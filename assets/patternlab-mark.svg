@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="212" height="40" viewBox="0 0 212 40" role="img" aria-labelledby="title">
+  <title id="title">PatternLab</title>
+  <rect width="212" height="40" rx="10" fill="#17253F"/>
+  <rect x="10" y="16" width="6" height="15" rx="2" fill="#FFFFFF"/>
+  <rect x="20" y="10" width="6" height="21" rx="2" fill="#93C5FD"/>
+  <rect x="30" y="5" width="6" height="26" rx="2" fill="#FFFFFF"/>
+  <text x="47" y="27" fill="#FFFFFF" font-family="system-ui, -apple-system, BlinkMacSystemFont, sans-serif" font-size="23" font-weight="650" letter-spacing="-0.5">PatternLab</text>
+</svg>

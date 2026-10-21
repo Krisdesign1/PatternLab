@@ -1,0 +1,32 @@
+# Credentials and machine-specific settings
+.streamlit/secrets.toml
+.env
+.env.*
+!.env.example
+
+# Python environments and generated caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# API downloads, frozen forecasts, local models and generated audit evidence
+data/
+audit/
+*.sqlite*
+*.db
+*.log
+
+# Local editor/agent configuration and operating-system files
+.agents/
+.claude/
+.codex/
+.idea/
+.vscode/
+.DS_Store
+._*
