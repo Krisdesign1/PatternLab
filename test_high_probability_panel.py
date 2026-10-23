@@ -93,6 +93,38 @@ class HighProbabilityPanelTests(unittest.TestCase):
         for mock in (self.api, self.train, self.write, self.write_mixed):
             mock.assert_not_called()
 
+    def test_missing_history_is_explained_instead_of_blaming_probability_filter(self):
+        self.value['rows'] = []
+        self.value['excluded'] = [dict(match_id='1', reason='insufficient_league_history', detail='0/30 résultats')]
+        self.value['diagnostics'].update(day_count=444, upcoming_count=20, eligible_count=0, history_count=0)
+        # This focused harness renders only the panel, without app.py's page
+        # registry. Navigation itself is exercised by the full workspace tests.
+        with patch.object(panel.st, 'page_link'):
+            at = self.open()
+        self.assertTrue(any('historique de compétition' in node.value for node in at.warning))
+        self.assertTrue(any('Aucun résultat antérieur' in node.value for node in at.caption))
+        self.assertTrue(any('n’importe pas les saisons' in node.value for node in at.caption))
+        self.assertFalse(any('ces filtres' in node.value for node in at.info))
+        self.readonly()
+
+    def test_no_upcoming_match_is_not_misreported_as_missing_history(self):
+        self.value['rows'] = []
+        self.value['excluded'] = [dict(match_id='1', reason='not_upcoming', detail='Statut FT')]
+        self.value['diagnostics'].update(day_count=4, upcoming_count=0, eligible_count=0)
+        at = self.open()
+        self.assertTrue(any('Aucun match confirmé encore à venir' in node.value for node in at.info))
+        self.assertFalse(at.warning)
+        self.readonly()
+
+    def test_empty_calendar_explains_refresh_without_request_on_render(self):
+        self.value['rows'] = []
+        self.value['excluded'] = []
+        self.value['diagnostics'].update(day_count=0, upcoming_count=0, eligible_count=0)
+        at = self.open()
+        self.assertTrue(any('calendrier du jour n’est pas chargé' in node.value for node in at.info))
+        self.assertFalse(any('ces filtres' in node.value for node in at.info))
+        self.readonly()
+
     def test_first_ranking_shows_all_matches_and_probabilities_without_support_sorting(self):
         original = deepcopy(self.value)
         at = self.open()

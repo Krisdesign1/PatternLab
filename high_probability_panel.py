@@ -3,6 +3,7 @@
 Rendering and filtering only read the local scan. Calendar refresh, scenario
 preparation, and the immutable pre-match journal entry are explicit actions.
 """
+from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -76,6 +77,36 @@ def _rows(report, now):
         return []
     return sorted((row for row in report.get('rows', []) if _is_future(row['fixture'], now)),
                   key=lambda row: (-row['max_probability'], _stamp(row['fixture']['timestamp']), int(_id(row))))
+
+
+def _show_unavailable(report):
+    """Explain missing inputs separately from a user's probability filters."""
+    diagnostic = report.get('diagnostics') or {}
+    reasons = Counter(item.get('reason') for item in report.get('excluded', []))
+    missing_history = sum(reasons[name] for name in (
+        'insufficient_league_history', 'insufficient_history_days', 'insufficient_club_history'))
+    if diagnostic.get('day_count') == 0:
+        st.info('Le calendrier du jour n’est pas chargé sur cette installation. '
+                'Utilisez « Actualiser les matchs du jour » pour charger les affiches.')
+    elif missing_history:
+        st.warning(f'{missing_history} rencontre(s) à venir écartée(s) : '
+                   'historique de compétition ou profils des clubs insuffisants. '
+                   'Aucun pourcentage personnalisé ne peut être affiché pour ces rencontres.')
+        if diagnostic.get('history_count') == 0:
+            st.caption('Aucun résultat antérieur exploitable dans les compétitions des rencontres à venir. '
+                       'Les résultats du jour ne servent pas à prédire ces mêmes rencontres.')
+        st.caption('Il faut au moins 30 résultats de la compétition sur 3 journées UTC antérieures, '
+                   'avec 3 précédents à domicile pour le club recevant et 3 à l’extérieur pour son adversaire.')
+        st.caption('Actualiser charge le calendrier du jour ; cela n’importe pas les saisons historiques. '
+                   'L’historique doit être disponible sur le serveur en ligne pour tous les appareils.')
+        st.page_link('ui_pages/settings.py', label='Importer l’historique API-Football', icon=':material/database:')
+        st.page_link('ui_pages/automation.py', label='Voir les données manquantes', icon=':material/checklist:')
+    elif diagnostic.get('upcoming_count') == 0 or reasons['kickoff_passed']:
+        st.info('Aucun match confirmé encore à venir n’est disponible pour ce classement dans le relevé actuel. '
+                'Les matchs commencés et terminés ne reçoivent pas de nouvelle prévision avant match.')
+    else:
+        st.info('Aucun match ne possède actuellement les données nécessaires au calcul. '
+                'Les raisons figurent dans « Rencontres écartées et couverture des données ».')
 
 
 def _fingerprint(report, rows, minimum, outcome, query):
@@ -334,6 +365,8 @@ def render_high_probabilities():
             st.session_state.pop(key, None)
         st.info('La journée a changé. Actualisez le calendrier pour rechercher uniquement les matchs d’aujourd’hui.')
         return
+    if not rows:
+        _show_unavailable(report)
     current_report = dict(report, rows=rows)
     st.subheader('Trois classements indépendants', icon=':material/leaderboard:')
     st.caption('Chaque classement examine tous les matchs évaluables, même si le résultat recherché n’est pas leur résultat le plus probable.')
@@ -383,10 +416,10 @@ def render_high_probabilities():
         st.metric('Sous le seuil', len(rows) - len(qualified))
     st.caption(f'{len(visible)} rencontre(s) après les filtres · Classement décroissant sur la probabilité de {outcome}. '
                'La quantité d’historique ne sert pas de score de classement.')
-    if not visible:
+    if not visible and rows:
         st.info(f'Aucune rencontre ne correspond à ces filtres et au seuil de {minimum * 100:g} %. '
                 'Le seuil reste inchangé ; aucun match moins probable n’est ajouté automatiquement.')
-    else:
+    elif visible:
         with st.container(horizontal=True):
             saved_size = st.session_state.get('hp_page_size', 10)
             if type(saved_size) is not int or saved_size not in (10, 25, 50):
