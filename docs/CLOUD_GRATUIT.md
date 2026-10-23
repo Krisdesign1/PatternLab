@@ -79,6 +79,12 @@ PATTERNLAB_CLOUD_ADOPT_LOCAL = true
 
 Conserver aussi la configuration API-Football existante. `PATTERNLAB_CLOUD_REQUIRED` empêche un retour silencieux au stockage local si la chaîne est oubliée ultérieurement.
 
+Pendant une synchronisation, une page peut attendre que le stockage partagé soit
+disponible. Elle réessaie automatiquement toutes les dix secondes et propose
+**Réessayer maintenant**. Ce contrôle ne consomme aucune requête API-Football et
+ne rejoue pas une action qui n’a pas pu démarrer. Les protections du stockage
+restent actives pendant l’attente.
+
 L’instance Streamlit peut déjà contenir quelques rencontres et prévisions différentes : `PATTERNLAB_CLOUD_ADOPT_LOCAL=true` autorise explicitement leur remplacement par la référence distante, après copie de précaution locale. Exporter les données Cloud à conserver **avant** cette étape. Cette copie locale n’est pas une sauvegarde durable sur Community Cloud.
 
 Après la première restauration, retirer `PATTERNLAB_CLOUD_ADOPT_LOCAL` des secrets. Une instance entièrement neuve et vide restaure automatiquement l’espace déjà initialisé. Une autre installation locale non vide exige à nouveau une adoption explicite.

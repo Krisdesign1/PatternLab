@@ -1,9 +1,27 @@
 """Streamlit boundaries for the shared durable workspace, including fragments."""
 from functools import wraps
+from time import monotonic
 
 import streamlit as st
 
 import cloud_storage
+
+
+RETRY_SECONDS = 10
+
+
+@st.fragment(run_every=RETRY_SECONDS)
+def _busy_notice(retry_at, retry_key):
+    """Retry the page after releasing all storage locks, without replaying an action."""
+    st.info('Synchronisation des données en cours. La page se rechargera automatiquement '
+            'dès que le stockage partagé sera disponible.')
+    st.caption(f'Nouvelle tentative toutes les {RETRY_SECONDS} secondes. '
+               'Aucune action de cette page n’a été exécutée pendant cette attente.')
+    retry = st.button('Réessayer maintenant', icon=':material/refresh:', key=retry_key)
+    if retry or monotonic() >= retry_at:
+        # A full run is required: page.run() and navigation must stay outside
+        # this retry fragment. A new Busy response sets a fresh future deadline.
+        st.rerun(scope='app')
 
 
 def guarded(function):
@@ -14,8 +32,8 @@ def guarded(function):
             with cloud_storage.transaction():
                 return function(*args, **kwargs)
         except cloud_storage.CloudStorageBusy:
-            st.info('Une mise à jour des données partagées est en cours. '
-                    'Réessayez dans un instant ; aucune opération de cette page n’a été lancée.')
+            _busy_notice(monotonic()+RETRY_SECONDS,
+                         f'cloud_retry_{function.__module__}.{function.__qualname__}')
         except cloud_storage.CloudStorageError as error:
             st.error(str(error))
             st.caption('Le stockage partagé est indisponible. Les opérations sont suspendues '
