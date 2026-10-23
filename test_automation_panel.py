@@ -20,8 +20,7 @@ class AutomationPanelTests(unittest.TestCase):
         self.root = Path(folder.name)
         self.config = copy.deepcopy(panel.worker.DEFAULT_CONFIG)
         self.config.update(enabled=True, sizes=[2,4,6,8], interval_minutes=15,
-                           daily_request_budget=500, cycle_request_budget=40,
-                           history_seasons=[2022,2023,2024,2025,2026], history_requests_per_cycle=2)
+                           history_seasons=[2022,2023,2024,2025,2026], history_enabled=True)
         self.patch(api, 'STORE_PATH', self.root/'fixtures.json')
         self.patch(workspace, '_snapshot', return_value=dict(competitions={}, fixtures=[], day_count=0,
                                                             usable_count=0, updated_at=None))
@@ -103,16 +102,19 @@ class AutomationPanelTests(unittest.TestCase):
 
     def test_configuration_changes_only_save_on_submit_and_do_not_run(self):
         at = self.open()
-        at.number_input(key='automation_daily_budget').set_value(200).run()
+        self.assertFalse(any('budget' in item.label.casefold() for item in at.number_input))
+        self.assertTrue(any('Aucun plafond de requêtes' in item.value for item in at.caption))
+        at.toggle(key='automation_history_enabled').set_value(False).run()
         self.saver.assert_not_called()
         at.multiselect(key='automation_sizes').set_value([3,5]).run()
         at.button(key='automation_save').click().run()
         self.assertFalse(at.exception)
         self.saver.assert_called_once()
         saved = self.saver.call_args.args[0]
-        self.assertEqual(saved['daily_request_budget'], 200)
+        self.assertNotIn('daily_request_budget', saved)
+        self.assertNotIn('cycle_request_budget', saved)
         self.assertEqual(saved['sizes'], [3,5])
-        self.assertEqual(saved['history_requests_per_cycle'], 2)
+        self.assertFalse(saved['history_enabled'])
         self.assertTrue(any('Réglages enregistrés' in item.value for item in at.success))
         self.runner.assert_not_called()
         self.network.assert_not_called()

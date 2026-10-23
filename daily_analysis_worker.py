@@ -1,4 +1,4 @@
-"""Bounded, resumable daily forecasts with immutable selection anchors.
+"""Resumable daily forecasts with immutable selection anchors.
 
 The planner selects from local API-Football data. Every new forecast needs a
 fresh ID-scoped provider preflight after its calculations. Opening a page only
@@ -159,17 +159,20 @@ def _report(root, state, day, report, clock):
 
 
 @cloud_storage.persisted
-def run(root, clock, fetch=None, *, max_jobs=4):
-    """Prepare at most ``max_jobs`` candidates using an already-budgeted fetch.
+def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
+    """Prepare the finite frozen queue using provider-checked fetches.
 
     ``fetch(**params)`` returns raw fixture dictionaries, e.g. a worker Gate's
     ``call``. Without it no forecast is written. All anchors are committed
     before the first calculation, and completed/expired anchors never move.
-    A budget exception is re-raised after saving progress for the next cycle.
+    An explicit positive ``max_jobs`` can limit a caller's batch. By default
+    every candidate is attempted. ``check_time`` lets a host stop between
+    calculations without losing the plan. Pauses save progress before raising.
     """
-    if type(max_jobs) is not int or not 1 <= max_jobs <= 100:
-        raise DailyAnalysisError('Le nombre de calculs par passage doit être compris entre 1 et 100.')
-    if not callable(clock) or fetch is not None and not callable(fetch):
+    if max_jobs is not None and (type(max_jobs) is not int or max_jobs < 1):
+        raise DailyAnalysisError('Le nombre de calculs explicite doit être un entier positif.')
+    if (not callable(clock) or fetch is not None and not callable(fetch) or
+            check_time is not None and not callable(check_time)):
         raise DailyAnalysisError('Horloge ou actualisation quotidienne invalide.')
     root = _root(root)
     current = _clock(clock)
@@ -185,6 +188,8 @@ def run(root, clock, fetch=None, *, max_jobs=4):
             commits = state.setdefault('plan_commits', {})
             if day not in commits and not jobs:
                 import daily_analysis_engine as engine
+                if check_time is not None:
+                    check_time()
                 planned = engine.plan(raw, now=current, existing=())
                 if planned.get('day') != day or not isinstance(planned.get('candidates'), list):
                     raise DailyAnalysisError('Le plan ne correspond pas à la journée de Kinshasa.')
@@ -208,6 +213,8 @@ def run(root, clock, fetch=None, *, max_jobs=4):
             queue = sorted(jobs.items(), key=lambda pair: (pair[1].get('last_attempt_at', ''),
                             pair[1]['fixtures'][0]['timestamp'], pair[0]))
             for identity, job in queue:
+                if check_time is not None:
+                    check_time()
                 fixtures = job['fixtures']
                 existing = journal.find_mixed(fixtures, path=root/'predictions.sqlite3')
                 if existing:
@@ -220,7 +227,7 @@ def run(root, clock, fetch=None, *, max_jobs=4):
                 if not eligible:
                     job.update(state='expired', reason=reason)
                     continue
-                if report['attempted'] >= max_jobs:
+                if max_jobs is not None and report['attempted'] >= max_jobs:
                     report['status'] = 'pending'
                     continue
                 if fetch is None:
@@ -235,6 +242,8 @@ def run(root, clock, fetch=None, *, max_jobs=4):
                         ('recorded', 'expired', 'changed') for value in jobs.values())))
                 if history is None:
                     history = api.load_matches(root/'fixtures.json')[0]
+                if check_time is not None:
+                    check_time()
                 try:
                     frozen = models.build_mixed_methods(history, fixtures)
                 except (ValueError, KeyError, TypeError, OSError):
@@ -300,8 +309,8 @@ def run(root, clock, fetch=None, *, max_jobs=4):
 
 
 @cloud_storage.persisted
-def run_now(root=None, *, max_jobs=4):
-    """Explicit UI action sharing the worker's lock and durable API budgets.
+def run_now(root=None, *, max_jobs=None):
+    """Explicit UI action sharing the worker's lock and provider quota checks.
 
     Refresh only today's calendar and ID-scoped preflights. No training or
     multi-season import is invoked by this action.
@@ -324,7 +333,7 @@ def run_now(root=None, *, max_jobs=4):
                 raise DailyAnalysisError('La journée a changé pendant l’actualisation ; relancez la préparation.')
             api.save_fixtures(raw, root/'fixtures.json')
             workspace._mark_calendar_refresh(root/'fixtures.json', day, ZONE.key)
-            result = run(root, clock, gate.call, max_jobs=max_jobs)
+            result = run(root, clock, gate.call, max_jobs=max_jobs, check_time=gate.check_time)
             result['requests'] = report['requests']
             _write(root/STATUS_NAME, result)
             return result

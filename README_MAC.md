@@ -497,10 +497,10 @@ composant Clubs ; les autres méthodes indisponibles sont signalées. Aucun
 réentraînement n’est lancé par cette préparation. Une prévision existante du même
 groupe est réutilisée avec son identifiant et ses probabilités d’origine.
 
-Le service automatique prépare jusqu’à quatre nouveaux groupes par cycle, puis
-reprend la file. Cette limite de travail protège les ressources et le quota API ;
-elle ne limite pas le nombre final d’analyses. Le bouton **Préparer les analyses
-du jour** relance explicitement un passage, avec les mêmes budgets et contrôles.
+Le service automatique parcourt la file finie des groupes du plan quotidien,
+sans plafond de quatre nouvelles analyses par cycle. Si le passage doit être
+interrompu, le suivant reprend les groupes restants. Le bouton **Préparer les
+analyses du jour** relance explicitement ce traitement, avec les mêmes contrôles.
 Chaque nouvelle prévision est confirmée par l’API et contrôlée jusqu’à son
 enregistrement avant le premier coup d’envoi.
 
@@ -855,7 +855,8 @@ compétition par passage, lorsque la préparation des modèles est activée.
 Les imports alternent entre les compétitions ayant une rencontre confirmée dans
 les sept prochains jours et la file générale. Les saisons les plus récentes de
 ces compétitions sont récupérées en premier. Les autres compétitions restent
-dans la file, avec les mêmes limites de requêtes.
+dans la file. Le réglage **Compléter et actualiser l’historique** active ou
+suspend cette phase sans imposer un nombre maximal d’imports par passage.
 
 La première **campagne de modèles** commence après l’import des saisons
 configurées et lorsque les périodes chronologiques contiennent assez de
@@ -893,11 +894,12 @@ indépendamment de la collecte API. Les instantanés et manifestes se trouvent
 dans `data/api_football/model_campaigns/fixed-validation-v1/` ; le dernier état
 du processus local est conservé dans `model_campaign_status.json`.
 
-Les limites initiales sont de **500 requêtes par jour**, **40 par cycle** et
-**2 imports de saisons par cycle**, pour les saisons 2022 à 2026. Elles ne
-remplacent pas le quota du compte API et ne comptent pas les appels manuels
-effectués ailleurs. La configuration, le statut et la progression sont conservés
-dans `data/api_football/automation_*.json`.
+L’application n’ajoute aucun plafond de requêtes par jour ou par cycle, ni de
+nombre d’imports historiques. Les saisons configurées vont de 2022 à 2026.
+Les anciens réglages de budgets sont ignorés au chargement ; les compteurs
+restent visibles pour suivre la consommation sans bloquer les appels. Les
+quotas du compte API-Football restent applicables. La configuration, le statut
+et la progression sont conservés dans `data/api_football/automation_*.json`.
 
 Le calendrier est actualisé **uniquement pour aujourd’hui, à l’heure de Kinshasa**.
 Les nouvelles compétitions reçues rejoignent la file sans liste de championnats
@@ -915,13 +917,16 @@ statuts avant d’enregistrer la première prévision. Les scores manquants ou l
 modèles indisponibles restent signalés ; une compétition sans historique
 suffisant attend les imports suivants. Les méthodes statistiques disponibles
 sont conservées même si CatBoost ou les voisins contextuels ne le sont pas.
-Le worker réserve son budget avant chaque tentative, respecte une limite locale
-de dix appels par minute et s’arrête avant d’épuiser le quota reçu de l’API.
+Le worker comptabilise chaque tentative avant son appel, sans plafond local
+de dix appels par minute ni réserve de cinq appels. Il suspend le passage si
+API-Football indique un quota épuisé ou répond HTTP 429, puis reprend lorsque
+le fournisseur le permet. Les résultats en attente et les prévisions du jour
+sont traités avant les imports historiques, sur une file finie par passage.
 Les résultats du journal sont actualisés par lots et les corrections d’un
 groupe terminé sont vérifiées pendant sept jours. Aucun résultat passé ne
 devient une prévision avant match.
 
-La page **Automatisation** affiche la couverture, les manques, les budgets et le
+La page **Automatisation** affiche la couverture, les manques, la consommation et le
 dernier bilan. Désactiver les cycles dans cette page les suspend au prochain
 passage du planificateur.
 

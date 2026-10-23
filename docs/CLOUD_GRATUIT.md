@@ -101,24 +101,27 @@ Ajouter comme **Repository variables** :
 - `PATTERNLAB_WORKSPACE` : `patternlab-main`.
 - `PATTERNLAB_CLOUD_AUTOMATION` : `true`, **uniquement après l’initialisation et la vérification du stockage**.
 
-Dans **Actions → Cycle Cloud gratuit et borné**, lancer une première fois **Run workflow** et vérifier le résultat. Ce passage consomme des requêtes API-Football dans les limites ci-dessous. Les résumés masquent les détails de connexion et n’exportent aucun fichier de données dans les artefacts GitHub.
+Dans **Actions → Cycle Cloud gratuit**, lancer une première fois **Run workflow** et vérifier le résultat. Ce passage peut effectuer des requêtes API-Football ; aucun plafond de nombre d’appels n’est ajouté par l’application. Les résumés masquent les détails de connexion et n’exportent aucun fichier de données dans les artefacts GitHub.
 
 Le workflow ne se lance pas sur les pull requests. Il utilise un seul groupe de concurrence et n’annule pas un cycle actif pour en lancer un autre. La variable d’activation est absente par défaut : ajouter le code au dépôt ne lance donc aucun traitement.
 
-## Fréquence et limites gratuites
+## Fréquence et ressources gratuites
 
 | Réglage par défaut | Valeur |
 | --- | --- |
 | Horaires à Kinshasa | **00:17, 08:17, 16:17**, sous réserve des retards GitHub |
 | Cadence | Un passage toutes les 8 heures |
 | Durée maximale d’un job | 8 minutes, installation comprise |
-| Requêtes worker par passage | Au plus 6, ou moins si le réglage existant est plus bas |
-| Budget worker quotidien | Au plus 60, ou moins si le réglage existant est plus bas |
+| Durée de travail avant sauvegarde et reprise | Environ 240 secondes ; une opération déjà commencée peut se terminer ensuite |
+| Requêtes worker par passage et par jour | Aucun plafond ajouté par l’application |
+| Imports historiques | File des saisons à traiter, sans plafond de nombre par passage ; activation indépendante avec `history_enabled` |
 | Entraînement dans le workflow | Désactivé |
 | Taille maximale d’un état compressé | 96 Mio ; refus explicite au-delà |
 | Restauration totale maximale | 1 Gio non compressé |
 
-Les plafonds Cloud sont des limites appliquées au lancement ; ils ne remplacent pas les réglages enregistrés. Les actions manuelles dans l’application peuvent utiliser des requêtes supplémentaires ; le quota du fournisseur reste la référence pour l’ensemble du compte.
+Les anciens réglages de budgets quotidiens et par cycle sont ignorés lors du chargement. Le compteur d’appels reste un suivi de consommation : il ne bloque plus le worker. L’ancienne limite de dix appels par minute et la réserve de cinq appels sont également supprimées. Les quotas annoncés par API-Football restent applicables : un quota fournisseur épuisé ou une réponse HTTP 429 suspend le passage jusqu’à une reprise appropriée.
+
+Le cycle traite d’abord les résultats en attente et les prévisions du jour, puis les saisons historiques. Il parcourt une file finie, sans refaire indéfiniment les mêmes opérations dans un passage. La durée de travail de 240 secondes permet de sauvegarder l’avancement avant la fin du job gratuit de huit minutes ; le passage suivant reprend les éléments restants. Aucun entraînement n’est lancé par ce workflow.
 
 Trois jobs par jour sur un mois de 31 jours, limités à huit minutes, représentent **au plus 744 minutes planifiées**. Le quota GitHub Free d’un compte personnel est actuellement de 2 000 minutes mensuelles pour les dépôts privés ; les autres workflows et lancements manuels partagent cette réserve. Dans les réglages de facturation GitHub, conserver le blocage de la consommation payante pour respecter le choix « gratuit uniquement ».
 

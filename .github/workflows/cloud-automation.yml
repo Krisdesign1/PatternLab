@@ -1,4 +1,4 @@
-name: Cycle Cloud gratuit et borné
+name: Cycle Cloud gratuit
 
 on:
   workflow_dispatch:

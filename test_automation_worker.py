@@ -44,12 +44,17 @@ class Client:
 
 class WorkerTests(unittest.TestCase):
     def setUp(self):
+        # This suite owns a temporary local store and must never inspect or
+        # contact the developer's configured production workspace.
+        offline = patch.object(worker.cloud_storage, 'configured', return_value=False)
+        offline.start()
+        self.addCleanup(offline.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
-        self.config = dict(worker.DEFAULT_CONFIG, sizes=[2, 4], history_requests_per_cycle=0)
+        self.config = dict(worker.DEFAULT_CONFIG, sizes=[2, 4], history_enabled=False)
         # This suite exercises the original per-league queue in isolation.
-        # The real daily hook, its variable sizes and shared budgets are covered
+        # The real daily hook, its variable sizes and shared quota handling are covered
         # separately by test_daily_analysis_worker.DailyIntegrationTests.
         daily = patch.object(daily_analysis_worker, 'run', return_value=dict(
             status='completed', candidates=0, created=0, remaining=0))
@@ -251,8 +256,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(report['created'], 0)
         self.assertFalse((self.root/'predictions.sqlite3').exists())
 
-    def test_budget_reservation_persists_even_on_failed_request(self):
-        self.config['daily_request_budget'] = 1
+    def test_request_counter_persists_on_failure_and_network_cooldown_still_applies(self):
         client = Client(self.future)
         client.fail = api.ApiFootballError('Connexion impossible.')
         report = self.run_cycle(client)
@@ -265,26 +269,42 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertFalse((self.root/'predictions.sqlite3').exists())
 
-    def test_daily_budget_resets_on_next_utc_day(self):
-        self.config['daily_request_budget'] = 1
+    def test_daily_counter_and_exhausted_provider_quota_reset_on_next_utc_day(self):
         client = Client([])
         self.run_cycle(client)
+        state = json.loads((self.root/'automation_state.json').read_text())
+        state['quota'] = {'requests_remaining_day':0}
+        worker._write(self.root/'automation_state.json', state)
+        self.assertEqual(self.run_cycle(client)['requests'], 0)
         result = self.run_cycle(client, now=BEFORE+timedelta(days=1))
         self.assertEqual(result['requests'], 1)
         self.assertEqual(result['requests_today'], 1)
 
-    def test_quota_reserve_and_rolling_minute_are_enforced(self):
+    def test_old_budgets_high_daily_counter_and_ten_recent_calls_do_not_block(self):
+        self.config.update(daily_request_budget=1, cycle_request_budget=1)
+        worker._write(self.root/'automation_state.json', dict(
+            version=worker.VERSION, budget_day=BEFORE.date().isoformat(), requests_today=158,
+            minute_calls=[BEFORE.timestamp()]*10, quota={}))
+        report = self.run_cycle()
+        self.assertEqual(report['status'], 'completed', report)
+        self.assertEqual((report['requests'], report['requests_today'], report['created']), (4,162,3))
+        state = json.loads((self.root/'automation_state.json').read_text())
+        self.assertEqual(len(state['minute_calls']), 14)
+
+    def test_provider_five_remaining_are_usable_and_zero_stops_the_next_call(self):
         client = Client(self.future)
         client.last_quota = {'requests_remaining_day': 5}
         report = self.run_cycle(client)
-        self.assertEqual(report['status'], 'paused')
-        self.assertEqual(report['requests'], 1)
-        self.assertEqual(report['created'], 0)
-        # A persisted full rolling-minute window refuses even the calendar call.
+        self.assertEqual(report['status'], 'completed', report)
+        self.assertEqual((report['requests'], report['created']), (4,3))
         state = json.loads((self.root/'automation_state.json').read_text())
-        state.update(minute_calls=[BEFORE.timestamp()]*10, quota={})
+        state['quota'] = {'requests_remaining_day':0}
         worker._write(self.root/'automation_state.json', state)
-        self.assertEqual(self.run_cycle()['requests'], 0)
+        before = len(client.calls)
+        exhausted = self.run_cycle(client)
+        self.assertEqual((exhausted['status'], exhausted['requests']), ('paused',0))
+        self.assertEqual(len(client.calls), before)
+        self.assertIn('API-Football', exhausted['issues'][0])
 
     def test_provider_minute_quota_waits_without_an_extra_request(self):
         client = Client(self.future)
@@ -296,15 +316,60 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(second['requests'], 0)
         self.assertEqual(len(client.calls), 1)
 
-    def test_budget_pause_does_not_postpone_an_unattempted_history_import(self):
-        self.config.update(history_requests_per_cycle=2, cycle_request_budget=1, sizes=[20])
-        report = self.run_cycle()
+    def test_host_deadline_does_not_postpone_an_unattempted_history_import(self):
+        self.config.update(history_enabled=True, history_seasons=[2024,2025], sizes=[20])
+        elapsed = [0]
+        def expire(*args):
+            elapsed[0] = 11
+        with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]), \
+             patch.object(worker, '_refresh_results', side_effect=expire):
+            report = self.run_cycle(max_duration_seconds=10)
         self.assertEqual(report['status'], 'paused')
+        self.assertEqual(report['requests'], 1)
+        self.assertIn('hébergeur', report['issues'][0])
         state = json.loads((self.root/'automation_state.json').read_text())
         self.assertEqual(state['history_attempts'], {})
-        self.config['cycle_request_budget'] = 5
         report = self.run_cycle(now=BEFORE+timedelta(minutes=15))
         self.assertEqual(report['history_imports'], 2)
+
+    def test_deadline_before_calendar_makes_no_request_and_invalid_durations_fail_closed(self):
+        client = Client(self.future)
+        with patch.object(worker.time, 'monotonic', side_effect=[0,10]):
+            report = self.run_cycle(client, max_duration_seconds=10)
+        self.assertEqual((report['status'], report['requests']), ('paused',0))
+        self.assertEqual(client.calls, [])
+        for duration in (True,0,-1,float('nan'),float('inf'),'10'):
+            with self.subTest(duration=duration), self.assertRaises(worker.AutomationError):
+                self.run_cycle(client, max_duration_seconds=duration)
+
+    def test_full_finite_history_queue_runs_after_forecasts_without_import_cap(self):
+        self.config.update(history_enabled=True, history_seasons=[2023,2024,2025])
+        extra = raw_match(9900, stamp='2025-03-20T16:00:00Z', league=777, season=2025)
+        api.save_fixtures([extra], self.root/'fixtures.json')
+        client = Client(self.future+[extra])
+        report = self.run_cycle(client)
+        self.assertEqual(report['status'], 'completed', report)
+        self.assertEqual((report['created'], report['history_imports']), (3,6))
+        calls = client.calls
+        history_start = next(index for index, params in enumerate(calls) if 'league' in params)
+        self.assertTrue(all('ids' in params for params in calls[1:history_start]))
+        self.assertEqual({(params['league'],params['season']) for params in calls if 'league' in params},
+                         {(league,year) for league in ('39','777') for year in (2023,2024,2025)})
+        again = self.run_cycle(client, now=BEFORE+timedelta(minutes=15))
+        self.assertEqual(again['history_imports'], 0)
+
+    def test_full_due_results_queue_uses_twenty_id_batches_without_forty_match_cap(self):
+        rows = [raw_match(12000+i, stamp='2025-03-20T08:00:00Z', status='FT',
+                          league=39, season=2025) for i in range(65)]
+        fixtures = [dict(match_id=str(row['fixture']['id']),timestamp=row['fixture']['date']) for row in rows]
+        state, report = {}, dict(requests=0)
+        client = Client(rows)
+        gate = worker._Gate(self.root, state, self.config, client, lambda:BEFORE, report)
+        with patch.object(journal, 'list_entries', return_value=[dict(status='pending',fixtures=fixtures)]):
+            worker._refresh_results(self.root, gate, lambda:BEFORE, report)
+        self.assertEqual(report['requests'], 4)
+        self.assertEqual([len(params['ids'].split('-')) for params in client.calls], [20,20,20,5])
+        self.assertEqual(set(state['result_checks']), {row['match_id'] for row in fixtures})
 
     def test_previous_start_year_season_is_refreshed_in_january(self):
         marker_raw = copy.deepcopy(self.future)
@@ -315,7 +380,7 @@ class WorkerTests(unittest.TestCase):
         store = json.loads((self.root/'fixtures.json').read_text())
         store['season_imports'][0]['imported_at'] = '2024-12-01T00:00:00Z'
         worker._write(self.root/'fixtures.json', store)
-        self.config.update(history_requests_per_cycle=1, history_seasons=[2024], sizes=[20])
+        self.config.update(history_enabled=True, history_seasons=[2024], sizes=[20])
         client = Client([])
         report = self.run_cycle(client, now=datetime(2025,1,2,tzinfo=timezone.utc))
         self.assertEqual(report['history_imports'], 1)
@@ -338,7 +403,7 @@ class WorkerTests(unittest.TestCase):
         self.assertNotIn('isolated-test-secret', json.dumps(report))
         self.assertIn('[clé masquée]', report['issues'][0])
 
-    def test_current_season_refresh_and_missing_import_share_bounded_slots(self):
+    def test_current_season_refresh_and_missing_import_both_run(self):
         current_raw = copy.deepcopy(self.future)
         for item in current_raw:
             item['league']['season'] = 2025
@@ -347,7 +412,7 @@ class WorkerTests(unittest.TestCase):
         store = json.loads((self.root/'fixtures.json').read_text())
         store['season_imports'][0]['imported_at'] = '2025-03-01T00:00:00Z'
         worker._write(self.root/'fixtures.json', store)
-        self.config.update(history_requests_per_cycle=2, history_seasons=[2024,2025], sizes=[20])
+        self.config.update(history_enabled=True, history_seasons=[2024,2025], sizes=[20])
         client = Client(self.future)
         report = self.run_cycle(client)
         years = [r['season'] for r in client.calls if 'league' in r]
@@ -355,7 +420,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(report['history_imports'], 2)
 
     def test_upcoming_history_takes_priority_without_starving_background_imports(self):
-        self.config.update(history_seasons=[2024],history_requests_per_cycle=2,sizes=[20])
+        self.config.update(history_seasons=[2024],history_enabled=True,sizes=[20])
         # League 777 plays tomorrow; league 39's existing future is removed
         # from the calendar response while its historic results stay stored.
         future=[raw_match(9999,stamp='2025-03-21T15:00:00Z',league=777,season=2025)]
@@ -442,7 +507,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual({e['id']:e['methods'] for e in entries}, before)
 
     def test_history_queue_includes_every_league_and_advances_after_denial(self):
-        self.config.update(history_requests_per_cycle=2, history_seasons=[2024], sizes=[20])
+        self.config.update(history_enabled=True, history_seasons=[2024], sizes=[20])
         extra = raw_match(9900, stamp='2025-03-20T16:00:00Z', league=777, season=2025)
         api.save_fixtures([extra], self.root/'fixtures.json')
         client = Client(self.future+[extra])
@@ -464,7 +529,7 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse(any('league' in p for p in client.calls))
 
     def test_incomplete_history_response_never_marks_season_imported(self):
-        self.config.update(history_requests_per_cycle=1, sizes=[20])
+        self.config.update(history_enabled=True, sizes=[20])
         client = Client(self.future)
         original = client.fixtures
         def response(**params):
@@ -478,12 +543,25 @@ class WorkerTests(unittest.TestCase):
 
     def test_configuration_validation_and_corrupt_state_fail_closed(self):
         for invalid in ({'sizes':[1]}, {'sizes':[]}, {'source':'other'}, {'enabled':'yes'},
-                        {'daily_request_budget':True}, {'history_requests_per_cycle':3}):
+                        {'daily_request_budget':True}, {'daily_request_budget':0},
+                        {'cycle_request_budget':-1}, {'history_requests_per_cycle':-1}, {'history_enabled':1}):
             with self.assertRaises(worker.AutomationError):
                 worker.save_config(invalid, root=self.root)
         (self.root/'automation_state.json').write_text('not json')
         with self.assertRaises(worker.AutomationError):
             self.run_cycle()
+
+    def test_legacy_configuration_migrates_to_enablement_without_any_request_cap(self):
+        legacy = dict(daily_request_budget=1, cycle_request_budget=1, history_requests_per_cycle=3)
+        restored = worker._config(legacy)
+        self.assertTrue(restored['history_enabled'])
+        self.assertFalse(set(legacy) & set(restored))
+        self.assertFalse(worker._config(dict(legacy, history_requests_per_cycle=0))['history_enabled'])
+        self.assertTrue(worker._config(dict(legacy, history_requests_per_cycle=0, history_enabled=True))['history_enabled'])
+        worker._write(self.root/'automation_config.json', legacy)
+        self.assertEqual(worker.load_config(self.root), restored)
+        worker.save_config(worker.load_config(self.root), self.root)
+        self.assertEqual(json.loads((self.root/'automation_config.json').read_text()), restored)
 
 
 if __name__ == '__main__':

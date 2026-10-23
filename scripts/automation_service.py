@@ -1,7 +1,7 @@
 """Run one automation cycle or manage its per-user macOS launchd agent.
 
 No API key is copied into the plist.  Service inspection never starts a cycle.
-The worker owns API budgets, grouping, locking and the persistent cycle report.
+The worker owns provider quota handling, grouping, locking and the cycle report.
 """
 from __future__ import annotations
 
@@ -245,20 +245,23 @@ def _prepare_models(root=None, *, config=None):
     return module.run_cycle(**arguments)
 
 
-def run_once(root=None, *, dry_run=False, config=None, skip_models=False):
+def run_once(root=None, *, dry_run=False, config=None, skip_models=False, max_duration_seconds=None):
     """Call the worker exactly once and return a log-safe summary only."""
     worker = _worker(root)  # Also makes the project importable for direct CLI use.
     cloud = importlib.import_module('cloud_storage')
     with cloud.transaction():
-        summary = _run_once(worker, root, dry_run=dry_run, config=config, skip_models=skip_models)
+        summary = _run_once(worker, root, dry_run=dry_run, config=config, skip_models=skip_models,
+                            max_duration_seconds=max_duration_seconds)
         cloud.checkpoint()
         return summary
 
 
-def _run_once(worker, root, *, dry_run, config, skip_models):
+def _run_once(worker, root, *, dry_run, config, skip_models, max_duration_seconds=None):
     arguments = {'root': _paths(root)['data'], 'dry_run': dry_run}
     if config is not None:
         arguments['config'] = config
+    if max_duration_seconds is not None:
+        arguments['max_duration_seconds'] = max_duration_seconds
     report = worker.run_cycle(**arguments)
     if not isinstance(report, dict) or report.get("status") not in _STATUSES:
         raise ServiceError("Le cycle a renvoyé un statut invalide.")

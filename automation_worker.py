@@ -1,4 +1,4 @@
-"""Bounded API-only daily pipeline, independent from a Streamlit session.
+"""API-only daily pipeline, independent from a Streamlit session.
 
 All known competitions participate. Calendar collection and forecasts concern
 today's Africa/Kinshasa fixtures only. Group anchors persist across updates;
@@ -11,9 +11,11 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
+import time
 from zoneinfo import ZoneInfo
 
 import api_football as api
@@ -24,9 +26,8 @@ import competition_readiness as readiness
 
 VERSION = 'all-competitions-daily-blocks-v1'
 DEFAULT_CONFIG = dict(enabled=True, sizes=[2, 4, 6, 8], interval_minutes=15,
-                      daily_request_budget=500, cycle_request_budget=40,
                       history_seasons=[2022, 2023, 2024, 2025, 2026],
-                      history_requests_per_cycle=2, models_enabled=True, model_jobs_per_cycle=1)
+                      history_enabled=True, models_enabled=True, model_jobs_per_cycle=1)
 TIMEZONE = workspace.DEFAULT_TIMEZONE
 
 
@@ -72,14 +73,22 @@ def _write(path, value):
 
 
 def _config(value):
-    if not isinstance(value, dict) or set(value) - set(DEFAULT_CONFIG):
+    legacy = {'daily_request_budget', 'cycle_request_budget', 'history_requests_per_cycle'}
+    if not isinstance(value, dict) or set(value) - set(DEFAULT_CONFIG) - legacy:
         raise AutomationError('Réglages d’automatisation invalides.')
-    result = dict(DEFAULT_CONFIG, **value)
-    if type(result['enabled']) is not bool or type(result['models_enabled']) is not bool:
+    # Read old saved settings without allowing their former caps to survive.
+    # A previous explicit history stop remains a stop; positive counts become
+    # ordinary enablement, with no maximum number of imports per passage.
+    for field in legacy & set(value):
+        minimum = 0 if field == 'history_requests_per_cycle' else 1
+        if type(value[field]) is not int or value[field] < minimum:
+            raise AutomationError(f'Valeur invalide : {field}.')
+    result = dict(DEFAULT_CONFIG, **{key: val for key, val in value.items() if key not in legacy})
+    if 'history_enabled' not in value and 'history_requests_per_cycle' in value:
+        result['history_enabled'] = value['history_requests_per_cycle'] > 0
+    if any(type(result[field]) is not bool for field in ('enabled', 'models_enabled', 'history_enabled')):
         raise AutomationError('L’activation doit être un booléen.')
-    for field, low, high in (('interval_minutes', 1, 1440), ('daily_request_budget', 1, 100000),
-                             ('cycle_request_budget', 1, 1000), ('history_requests_per_cycle', 0, 2),
-                             ('model_jobs_per_cycle', 0, 1)):
+    for field, low, high in (('interval_minutes', 1, 1440), ('model_jobs_per_cycle', 0, 1)):
         if type(result[field]) is not int or not low <= result[field] <= high:
             raise AutomationError(f'Valeur invalide : {field}.')
     for field, low, high in (('sizes', 2, 20), ('history_seasons', 1900, datetime.now(timezone.utc).year)):
@@ -255,29 +264,31 @@ def coverage(root=None, config=None, now=None):
 
 
 class _Gate:
-    """Reserve requests durably BEFORE network; bounded rolling minute, UTC day."""
-    def __init__(self, root, state, config, client, clock, report):
+    """Record calls before network; honor provider quotas and the host deadline."""
+    def __init__(self, root, state, config, client, clock, report, *, deadline=None):
         self.root, self.state, self.config, self.client, self.clock, self.report = root, state, config, client, clock, report
+        self.deadline = deadline
 
     def save(self):
         _write(self.root / 'automation_state.json', self.state)
 
+    def check_time(self):
+        if self.deadline is not None and time.monotonic() >= self.deadline:
+            raise _Pause('Le passage se termine pour sauvegarder les données avant l’arrêt de l’hébergeur ; '
+                         'le traitement reprendra au prochain cycle.')
+
     def call(self, **params):
+        self.check_time()
         now = self.clock()
         day = now.date().isoformat()
         if self.state.get('budget_day') != day:
             self.state.update(budget_day=day, requests_today=0, quota={})
         quota = self.state.get('quota', {})
         recent = [v for v in self.state.get('minute_calls', []) if v > now.timestamp()-60]
-        if (self.report['requests'] >= self.config['cycle_request_budget'] or
-                self.state.get('requests_today', 0) >= self.config['daily_request_budget']):
-            raise _Pause('Budget de requêtes atteint ; reprise au cycle suivant ou au prochain jour UTC.')
-        if len(recent) >= 10:
-            raise _Pause('Temporisation : dix requêtes au maximum sur une minute ; reprise au prochain cycle.')
         if self.state.get('cooldown_until', 0) > now.timestamp():
             raise _Pause('API temporairement en pause ; nouvelle tentative au prochain cycle.')
-        if quota.get('requests_remaining_day', 100000) <= 5:
-            raise _Pause('Réserve du quota API journalier atteinte ; reprise après remise à zéro UTC.')
+        if quota.get('requests_remaining_day', 1) <= 0:
+            raise _Pause('Le quota journalier communiqué par API-Football est épuisé ; reprise après remise à zéro UTC.')
         if (quota.get('requests_available_minute', 1) == 0 and
                 now.timestamp() < self.state.get('quota_seen_at', 0)+max(60, quota.get('reset_seconds', 0))):
             raise _Pause('Quota API par minute épuisé ; reprise après temporisation.')
@@ -328,15 +339,15 @@ def _history(root, config, gate, report, info, clock):
                 continue
             queue.append((marker is not None, attempts.get(key, 0), int(code), -year, code, year, key))
     report['history_pending'] = len(queue)
+    if not config['history_enabled']:
+        return
     pools = {False: [row for row in queue if not row[0]],
              True: [row for row in queue if row[0]]}
-    selected = []
     prefer_refresh = gate.state.get('history_prefer_refresh', True)
     prefer_upcoming = gate.state.get('history_prefer_upcoming', True)
-    for _ in range(config['history_requests_per_cycle']):
+    while pools[False] or pools[True]:
+        gate.check_time()
         kind = prefer_refresh if pools[prefer_refresh] else not prefer_refresh
-        if not pools[kind]:
-            break
         priority = [row for row in pools[kind] if row[-3] in upcoming]
         background = [row for row in pools[kind] if row[-3] not in upcoming]
         pool = (priority if prefer_upcoming else background) or background or priority
@@ -345,10 +356,9 @@ def _history(root, config, gate, report, info, clock):
         else:
             chosen = min(pool)
         pools[kind].remove(chosen)
-        selected.append(chosen)
         prefer_refresh = not kind
         prefer_upcoming = chosen[-3] not in upcoming
-    for is_refresh, *_, code, year, key in selected:
+        is_refresh, *_, code, year, key = chosen
         before = report['requests']
         try:
             raw = gate.call(league=code, season=year, timezone='UTC')
@@ -356,7 +366,7 @@ def _history(root, config, gate, report, info, clock):
             report['issues'].append(f'Historique {code}, saison {year} indisponible ; tentative différée de six heures.')
             continue
         finally:
-            # A budget pause is not an attempted import and must not defer it.
+            # A provider or host pause before the call is not an attempted import.
             if report['requests'] > before:
                 attempts[key] = clock().timestamp()
                 gate.state['history_prefer_refresh'] = not is_refresh
@@ -389,7 +399,7 @@ def _refresh_results(root, gate, clock, report):
             if checks.get(row['match_id'], 0) <= clock().timestamp()-interval:
                 due[row['match_id']] = checks.get(row['match_id'], 0)
     ordered = sorted(due, key=lambda mid: (due[mid], int(mid)))
-    for index in range(0, min(len(ordered), 40), 20):
+    for index in range(0, len(ordered), 20):
         ids = ordered[index:index+20]
         raw = gate.call(ids='-'.join(ids), timezone='UTC')
         if {str(r['fixture']['id']) for r in raw} != set(ids):
@@ -400,7 +410,12 @@ def _refresh_results(root, gate, clock, report):
 
 
 @cloud_storage.persisted
-def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
+def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, max_duration_seconds=None):
+    if max_duration_seconds is not None and (
+            type(max_duration_seconds) not in (int, float) or
+            not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0):
+        raise AutomationError('La durée disponible doit être un nombre positif et fini.')
+    deadline = None if max_duration_seconds is None else time.monotonic()+max_duration_seconds
     root = _root(root)
     config = _config(config if config is not None else load_config(root))
     clock = (lambda: _time(now)) if now is not None else _time
@@ -420,7 +435,7 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
             if state.get('version', VERSION) != VERSION:
                 raise AutomationError('Version de la politique automatique incompatible.')
             state['version'] = VERSION
-            gate = _Gate(root, state, config, client, clock, report)
+            gate = _Gate(root, state, config, client, clock, report, deadline=deadline)
             try:
                 if gate.client is None:
                     gate.client = api.ApiFootballClient(api.load_key())
@@ -434,14 +449,14 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
                 _same_day(today, clock)
                 raw = api.load_fixtures(root / 'fixtures.json')
                 info, rows, issues = _inventory(raw, clock())
-                # Results and progressive imports get bounded slots before the
-                # potentially much larger forecast queue. No league can starve them.
+                # Retrieve due results before forecasts. The finite historical
+                # backlog comes last so it cannot hold up today's predictions.
                 _refresh_results(root, gate, clock, report)
-                _history(root, config, gate, report, info, clock)
                 _same_day(today, clock)
                 try:
                     import daily_analysis_worker
-                    report['daily_analyses'] = daily_analysis_worker.run(root, clock, gate.call)
+                    report['daily_analyses'] = daily_analysis_worker.run(root, clock, gate.call,
+                                                                        check_time=gate.check_time)
                 except _Pause:
                     raise
                 except (ValueError, OSError, ImportError, KeyError, TypeError):
@@ -463,6 +478,7 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
                                               default=clock()), int(g['league']), g['size']))
                 import prospective_models as models
                 for group in groups:
+                    gate.check_time()
                     _same_day(today, clock)
                     fixtures = _fixtures(group, raw_ids, clock())
                     job = dict(league=group['league'], competition=info[group['league']]['competition'],
@@ -512,6 +528,7 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
                     report['created'] += int(entry['created'])
                     job.update(state='recorded', id=entry['id'], methods=list(entry['methods']),
                                unavailable=frozen['unavailable'], reason='Prévision verrouillée avant match.')
+                _history(root, config, gate, report, info, clock)
             except _Pause as error:
                 report.update(status='paused')
                 report['issues'].append(str(error))
@@ -531,7 +548,7 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
                 report.update(status='error')
                 report['issues'].append('Cycle interrompu : API, données ou stockage indisponibles. Reprise au prochain passage.')
             finally:
-                # Reconciliation is local and still runs if network or request budget stopped the cycle.
+                # Local reconciliation also runs after a provider or host pause.
                 try:
                     settled = journal.reconcile(api.load_fixtures(root / 'fixtures.json'), now=now,
                                                 path=root / 'predictions.sqlite3')

@@ -205,16 +205,67 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertEqual(result['jobs'][0]['state'],'changed')
         self.record.assert_not_called()
 
-    def test_budget_pause_preserves_plan_and_resumes_without_reanchoring(self):
+    def test_provider_pause_preserves_plan_and_resumes_without_reanchoring(self):
         class Pause(RuntimeError): pass
         with self.assertRaises(Pause):
-            worker.run(self.root,lambda:self.current,lambda **kwargs:(_ for _ in ()).throw(Pause('budget')))
+            worker.run(self.root,lambda:self.current,lambda **kwargs:(_ for _ in ()).throw(Pause('provider quota')))
         self.assertEqual(worker.load_status(self.root)['status'],'paused')
         state=json.loads((self.root/worker.STATE_NAME).read_text())
         original=copy.deepcopy(state['days']['2025-03-20']['one']['fixtures'])
         result=self.run_worker()
         self.assertEqual(result['created'],1)
         self.assertEqual(result['jobs'][0]['fixtures'],original)
+
+    def test_default_attempts_every_candidate_in_frozen_queue(self):
+        self.candidates=[candidate(str(i),i*10) for i in range(7)]
+        self.raw=[row for selected in self.candidates for row in raw_fixtures(selected['fixtures'])]
+        api.save_fixtures(self.raw,self.root/'fixtures.json')
+        result=self.run_worker()
+        self.assertEqual((result['attempted'],result['created'],result['remaining']),(7,7,0))
+        self.assertEqual(len(self.fetch_calls),7)
+        self.assertEqual(len(worker.load_selections(self.root)),7)
+
+    def test_time_pause_before_calculation_retains_frozen_queue_for_resume(self):
+        class Pause(RuntimeError): pass
+        checks=[]
+        def check_time():
+            checks.append(True)
+            if len(checks)==3:
+                raise Pause('Host deadline')
+        with self.assertRaises(Pause):
+            self.run_worker(check_time=check_time)
+        self.assertEqual(len(checks),3)  # planner, candidate, expensive model build
+        self.build.assert_not_called()
+        self.record.assert_not_called()
+        self.assertEqual(self.fetch_calls,[])
+        paused=worker.load_status(self.root)
+        self.assertEqual(paused['status'],'paused')
+        anchor=copy.deepcopy(paused['jobs'][0]['fixtures'])
+        self.candidates=[candidate('replacement',100)]
+        resumed=self.run_worker()
+        self.assertEqual(resumed['created'],1)
+        self.assertEqual(resumed['jobs'][0]['fixtures'],anchor)
+        self.assertEqual(resumed['jobs'][0]['candidate_id'],'one')
+
+    def test_time_callback_runs_before_each_candidate_and_model_build(self):
+        self.candidates=[candidate(str(i),i*10) for i in range(2)]
+        self.raw=[row for selected in self.candidates for row in raw_fixtures(selected['fixtures'])]
+        api.save_fixtures(self.raw,self.root/'fixtures.json')
+        events=[]
+        def build(history, selected):
+            events.append('build')
+            return {'methods':{'clubs':{'version':'synthetic'}},'unavailable':{}}
+        self.build.side_effect=build
+        self.run_worker(check_time=lambda:events.append('check'))
+        self.assertEqual(events,['check','check','check','build','check','check','build'])
+
+    def test_explicit_batch_accepts_any_positive_integer_and_rejects_invalid_inputs(self):
+        for value in (0,-1,True,1.5,'2'):
+            with self.subTest(max_jobs=value), self.assertRaises(worker.DailyAnalysisError):
+                self.run_worker(max_jobs=value)
+        with self.assertRaises(worker.DailyAnalysisError):
+            self.run_worker(check_time=False)
+        self.assertEqual(self.run_worker(max_jobs=101)['created'],1)
 
     def test_transient_record_failure_remains_retryable_with_original_anchor(self):
         self.record.side_effect=journal.JournalError('Temporary isolated storage failure')
@@ -255,9 +306,9 @@ class DailyWorkerTests(unittest.TestCase):
         self.build.assert_not_called()
         self.record.assert_not_called()
 
-    def test_run_now_reuses_gate_budgets_and_never_calls_training_or_history(self):
+    def test_run_now_reuses_provider_gate_and_never_calls_training_or_history(self):
         self._patch(automation,'_time',side_effect=lambda now=None:self.current)
-        # Use the real gate and its durable minute/day reservations; the client
+        # Use the real gate and its durable request counters; the client
         # and every input file are isolated synthetic data.
         api.load_key.side_effect=None
         api.load_key.return_value='synthetic-test-key'
@@ -289,7 +340,7 @@ class DailyIntegrationTests(unittest.TestCase):
                 history.append(item)
             future=raw_fixtures()
             api.save_fixtures(history+future,root/'fixtures.json')
-            config=dict(automation.DEFAULT_CONFIG,sizes=[2,4],history_requests_per_cycle=0)
+            config=dict(automation.DEFAULT_CONFIG,sizes=[2,4],history_enabled=False)
             with patch.object(ml,'load_report',return_value=None), patch.object(models,'_context_neighbors',
                     side_effect=models.SnapshotError('Isolated missing configuration.')):
                 client=Client(future)
@@ -328,7 +379,7 @@ class DailyIntegrationTests(unittest.TestCase):
                 self.assertEqual(settled['settled'],4)
                 self.assertEqual({entry['id']:entry['methods'] for entry in journal.list_entries(root/'predictions.sqlite3')},frozen)
 
-    def test_actual_backend_clock_guard_at_commit_and_explicit_budget_pause(self):
+    def test_actual_provider_quota_pause_preserves_immutable_plan(self):
         from test_catboost_scenarios import sample
         import catboost_scenarios as ml
         import prospective_models as models
@@ -345,20 +396,30 @@ class DailyIntegrationTests(unittest.TestCase):
                     all_history.append(item)
             future=raw_fixtures(chosen)
             api.save_fixtures(all_history+future,root/'fixtures.json')
-            config=dict(automation.DEFAULT_CONFIG,cycle_request_budget=1)
+            config=dict(automation.DEFAULT_CONFIG)
             automation.save_config(config,root)
             current=NOW
-            client=SimpleNamespace(last_quota={},fixtures=lambda **kwargs:dict(errors=[],results=len(future),response=future))
+            calls=[]
+            def calendar(**kwargs):
+                calls.append(kwargs)
+                client.last_quota={'requests_remaining_day':0}
+                return dict(errors=[],results=len(future),response=future)
+            client=SimpleNamespace(last_quota={},fixtures=calendar)
             with patch.object(automation,'_time',side_effect=lambda now=None:current), \
                  patch.object(api,'load_key',return_value='synthetic'), \
                  patch.object(api,'ApiFootballClient',return_value=client), \
                  patch.object(ml,'load_report',return_value=None), \
                  patch.object(models,'_context_neighbors',side_effect=models.SnapshotError('Missing test config.')):
                 with self.assertRaises(automation._Pause):worker.run_now(root)
+                original=json.loads((root/worker.STATE_NAME).read_text())['days']['2025-03-20']
+                self.assertTrue(original)
+                with self.assertRaises(automation._Pause):worker.run_now(root)
+                self.assertEqual(json.loads((root/worker.STATE_NAME).read_text())['days']['2025-03-20'],original)
             self.assertFalse((root/'predictions.sqlite3').exists())
             self.assertEqual(worker.load_status(root)['status'],'paused')
             self.assertTrue(json.loads((root/worker.STATE_NAME).read_text())['days']['2025-03-20'])
             self.assertEqual(json.loads((root/'automation_state.json').read_text())['requests_today'],1)
+            self.assertEqual(len(calls),1)
 
 
 if __name__=='__main__':

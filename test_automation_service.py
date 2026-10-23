@@ -229,6 +229,13 @@ class AutomationServiceTests(unittest.TestCase):
         self.worker.run_cycle.assert_called_once_with(root=self.root / "data" / "api_football", dry_run=True)
         command.assert_not_called()
 
+    def test_cloud_duration_reaches_worker_without_a_request_count_budget(self):
+        self.worker.run_cycle.return_value = {'status': 'paused', 'requests': 84}
+        result = service.run_once(root=self.root, skip_models=True, max_duration_seconds=240)
+        self.assertEqual(result['requests'], 84)
+        self.worker.run_cycle.assert_called_once_with(
+            root=self.root / 'data' / 'api_football', dry_run=False, max_duration_seconds=240)
+
     def test_install_dry_run_stages_only_without_registering_or_running_worker(self):
         with patch.object(service, "install_service") as install, patch.object(service, "_command") as command:
             code, result = self.invoke(["--install", "--dry-run"])

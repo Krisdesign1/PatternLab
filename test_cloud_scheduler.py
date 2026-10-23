@@ -1,4 +1,4 @@
-"""Cloud execution is explicit, bounded, secret-safe and visitor independent."""
+"""Cloud execution is explicit, secret-safe and visitor independent."""
 from contextlib import contextmanager
 import copy
 import io
@@ -36,17 +36,18 @@ class CloudSchedulerTests(unittest.TestCase):
                 cli.run_workspace()
             run.assert_not_called()
 
-    def test_runtime_caps_keep_saved_configuration_unchanged(self):
+    def test_old_request_caps_are_removed_without_changing_saved_configuration(self):
         config = copy.deepcopy(worker.DEFAULT_CONFIG)
+        config.update(cycle_request_budget=1, daily_request_budget=1, history_requests_per_cycle=2)
         original = copy.deepcopy(config)
-        bounded = cli.bounded_config(config)
+        runtime = cli.runtime_config(config)
         self.assertEqual(config, original)
-        self.assertEqual(bounded['cycle_request_budget'], 6)
-        self.assertEqual(bounded['daily_request_budget'], 60)
-        self.assertFalse(bounded['models_enabled'])
-        self.assertEqual(bounded['model_jobs_per_cycle'], 0)
-        smaller = cli.bounded_config({**config, 'cycle_request_budget':2, 'daily_request_budget':4})
-        self.assertEqual((smaller['cycle_request_budget'], smaller['daily_request_budget']), (2,4))
+        self.assertNotIn('cycle_request_budget', runtime)
+        self.assertNotIn('daily_request_budget', runtime)
+        self.assertNotIn('history_requests_per_cycle', runtime)
+        self.assertTrue(runtime['history_enabled'])
+        self.assertFalse(runtime['models_enabled'])
+        self.assertEqual(runtime['model_jobs_per_cycle'], 0)
 
     def test_run_is_fenced_and_skips_models_by_default(self):
         store = self.storage()
@@ -56,7 +57,9 @@ class CloudSchedulerTests(unittest.TestCase):
                 patch.object(cli.service, 'run_once', return_value=dict(status='completed', requests=2)) as run:
             self.assertEqual(cli.run_workspace()['requests'], 2)
         self.assertTrue(run.call_args.kwargs['skip_models'])
-        self.assertEqual(run.call_args.kwargs['config']['cycle_request_budget'], 6)
+        self.assertNotIn('cycle_request_budget', run.call_args.kwargs['config'])
+        self.assertNotIn('daily_request_budget', run.call_args.kwargs['config'])
+        self.assertEqual(run.call_args.kwargs['max_duration_seconds'], cli.CYCLE_DURATION_SECONDS)
         store.checkpoint.assert_called_once()
         self.assertEqual(store.assert_lease.call_count, 2)
 

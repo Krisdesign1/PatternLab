@@ -67,27 +67,22 @@ def _configuration(config):
         models_enabled = st.toggle('Préparer et figer les modèles des compétitions prêtes',
                                     value=config.get('models_enabled', True), key='automation_models_enabled')
         sizes = st.multiselect('Matchs par groupe', list(range(2, 21)), default=config['sizes'], key='automation_sizes')
-        with st.container(horizontal=True):
-            interval = st.number_input('Intervalle entre les cycles (minutes)', min_value=1, max_value=1440,
-                                       value=int(config['interval_minutes']), step=1, key='automation_interval')
-            daily = st.number_input('Budget API par jour', min_value=1, max_value=100000,
-                                    value=int(config['daily_request_budget']), step=10, key='automation_daily_budget')
-            cycle = st.number_input('Budget API par cycle', min_value=1, max_value=1000,
-                                    value=int(config['cycle_request_budget']), step=1, key='automation_cycle_budget')
+        interval = st.number_input('Intervalle entre les cycles (minutes)', min_value=1, max_value=1440,
+                                   value=int(config['interval_minutes']), step=1, key='automation_interval')
+        st.caption('Aucun plafond de requêtes par jour ou par cycle n’est ajouté par PatternLab. '
+                   'Les compteurs sont informatifs ; les quotas annoncés par API-Football sont respectés.')
         years = sorted(set(range(1900, datetime.now(timezone.utc).year+1)) | set(config['history_seasons']))
         seasons = st.multiselect('Saisons historiques à préparer', years,
                                  default=config['history_seasons'], key='automation_seasons')
-        history_requests = st.number_input('Imports historiques maximum par cycle', min_value=0, max_value=2,
-                                           value=int(config['history_requests_per_cycle']), step=1,
-                                           key='automation_history_requests')
+        history_enabled = st.toggle('Compléter et actualiser l’historique', value=config['history_enabled'],
+                                     key='automation_history_enabled')
         st.caption('Les imports alternent entre les compétitions qui jouent dans les sept prochains jours et la file générale. '
                    'La préparation locale des modèles traite au maximum une compétition par passage du service. '
                    'Ses paramètres restent ensuite figés pour le suivi avant match.')
         saved = st.form_submit_button('Enregistrer les réglages', icon=':material/save:', key='automation_save')
     if saved:
         candidate = dict(config, enabled=enabled, models_enabled=models_enabled, sizes=sizes, interval_minutes=int(interval),
-                         daily_request_budget=int(daily), cycle_request_budget=int(cycle),
-                         history_seasons=seasons, history_requests_per_cycle=int(history_requests))
+                         history_seasons=seasons, history_enabled=history_enabled)
         try:
             config = worker.save_config(candidate)
             _coverage.clear()
@@ -229,7 +224,7 @@ def render_automation():
         run = st.button('Lancer un cycle maintenant', type='primary', icon=':material/play_arrow:',
                          key='automation_run', disabled=not config['enabled'])
         refresh = st.button('Relire l’état local', icon=':material/refresh:', key='automation_refresh')
-    st.caption('Lancer un cycle peut consommer des requêtes dans les budgets ci-dessus. '
+    st.caption('Lancer un cycle utilise les requêtes nécessaires, selon les disponibilités d’API-Football. '
                'L’ouverture de cette page et « Relire l’état local » utilisent seulement les fichiers locaux.')
     report = None
     if refresh:
