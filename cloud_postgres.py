@@ -156,6 +156,43 @@ class PostgresBackend:
                 raise BackendError('Un fichier du point de reprise distant est absent.')
         return bytes(row[0]), row[1]
 
+    def read_blobs(self, digests):
+        """Read one bounded batch over a single authenticated connection."""
+        if not isinstance(digests, (list, tuple, set)) or any(
+                not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
+                for value in digests):
+            raise BackendError('Le lot de fichiers demandé est invalide.')
+        requested = sorted(set(digests))
+        if len(requested) > 32:
+            raise BackendError('Le lot de fichiers demandé dépasse la limite de lecture.')
+        if not requested:
+            return {}
+        with self._connection() as con:
+            metadata = {digest: (raw_size, size) for digest, raw_size, size in con.execute(
+                '''SELECT digest,raw_size,octet_length(content) FROM patternlab.workspace_blobs
+                WHERE workspace=%s AND digest=ANY(%s)''', (self.workspace, requested)).fetchall()}
+            if set(metadata) != set(requested):
+                raise BackendError('Un fichier du point de reprise distant est absent.')
+            total = 0
+            for raw_size, size in metadata.values():
+                if type(raw_size) is not int or raw_size < 0 or type(size) is not int or size < 0:
+                    raise BackendError('Les tailles du lot distant sont invalides.')
+                total += size
+            # Inspect sizes before fetching bytea values. One large object may
+            # exceed the normal batch target, but never the workspace limit.
+            limit = 96 * 1024 * 1024 if len(requested) == 1 else 4 * 1024 * 1024
+            if total > limit:
+                raise BackendError('Le lot de fichiers distant dépasse la limite de lecture.')
+            rows = con.execute(
+                '''SELECT digest,content,raw_size FROM patternlab.workspace_blobs
+                WHERE workspace=%s AND digest=ANY(%s)''', (self.workspace, requested)).fetchall()
+            result = {digest: (bytes(content), raw_size) for digest, content, raw_size in rows}
+            if set(result) != set(requested) or any(
+                    (raw_size, len(content)) != metadata[digest]
+                    for digest, (content, raw_size) in result.items()):
+                raise BackendError('Le lot de fichiers distant est incomplet ou incohérent.')
+        return result
+
     def upload(self, lease, digest, content, raw_size):
         # Lock the head row during every object write so a competing acquisition
         # cannot race an expired owner between validation and INSERT.
@@ -177,10 +214,18 @@ class PostgresBackend:
                 FOR UPDATE''', self._where(lease)).fetchone()
             if head is None or head[0] != expected_revision:
                 raise LeaseLost('La version distante a changé ; aucun état concurrent n’a été remplacé.')
+            # One metadata round-trip validates the entire snapshot. Per-file
+            # SELECTs hold the fenced head lock for hundreds of network trips,
+            # which can unnecessarily block its independent lease heartbeat.
+            digests = sorted({entry['sha256'] for entry in entries.values()})
+            blobs = {}
+            if digests:
+                rows = con.execute('''SELECT digest,raw_size,octet_length(content)
+                    FROM patternlab.workspace_blobs WHERE workspace=%s AND digest=ANY(%s)''',
+                    (self.workspace, digests)).fetchall()
+                blobs = {digest: (size, compressed_size) for digest, size, compressed_size in rows}
             for entry in entries.values():
-                blob = con.execute('''SELECT raw_size,octet_length(content) FROM patternlab.workspace_blobs
-                    WHERE workspace=%s AND digest=%s''', (self.workspace, entry['sha256'])).fetchone()
-                if blob != (entry['size'], entry['compressed_size']):
+                if blobs.get(entry['sha256']) != (entry['size'], entry['compressed_size']):
                     raise BackendError('Le point de reprise est incomplet ; publication annulée.')
             # Re-check database time after the potentially large validation.
             row = con.execute('''UPDATE patternlab.workspace_heads

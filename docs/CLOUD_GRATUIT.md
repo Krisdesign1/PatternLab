@@ -10,6 +10,8 @@ L’historique API-Football, les deux journaux SQLite, les premières prévision
 
 Les fichiers inchangés ne sont pas renvoyés. Un verrou distant avec expiration et compteur croissant empêche un ancien processus de remplacer les données d’un autre. La sauvegarde SQLite utilise l’API de sauvegarde de SQLite. Une réservation de requête du worker est sauvegardée avant son appel API ; un incident ultérieur ne remet donc pas ce compteur à zéro.
 
+Les premières restaurations regroupent les lectures en lots de 32 contenus distincts et 4 Mio compressés au maximum, avec un lot séparé pour un fichier plus grand. Les contenus identiques ne sont téléchargés qu’une fois. Tous les fichiers sont contrôlés avant leur installation locale ; la publication vérifie les tailles de l’ensemble en une seule requête pour limiter les délais sous verrou.
+
 La confirmation d’un enregistrement attend sa publication distante. Si la base est indisponible, le mode partagé suspend les opérations au lieu de continuer avec un historique local divergent. Les affichages périodiques et les écritures des fragments sont également protégés.
 
 Ce mécanisme conserve l’état courant et les objets de la publication précédente. Il ne remplace pas une sauvegarde indépendante de longue durée. Les exports depuis l’application restent utiles.

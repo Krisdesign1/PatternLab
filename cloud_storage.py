@@ -27,6 +27,8 @@ MAX_STATE_BYTES = 96 * 1024 * 1024
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_RAW_STATE_BYTES = 1024 * 1024 * 1024
 MAX_FILES = 10000
+RESTORE_BATCH_BYTES = 4 * 1024 * 1024
+RESTORE_BATCH_FILES = 32
 _PROJECT = Path(__file__).resolve().parent
 _data_root = _PROJECT / 'data'
 _backend_factory = PostgresBackend
@@ -240,6 +242,37 @@ def _verify_destination(root, name):
     return destination
 
 
+def _restore_batches(entries):
+    """Bound each download by compressed bytes and distinct content objects."""
+    batch, compressed_size = {}, 0
+    for digest, entry in entries.items():
+        if batch and (len(batch) >= RESTORE_BATCH_FILES
+                      or compressed_size + entry['compressed_size'] > RESTORE_BATCH_BYTES):
+            yield batch
+            batch, compressed_size = {}, 0
+        batch[digest] = entry
+        compressed_size += entry['compressed_size']
+    if batch:
+        yield batch
+
+
+def _read_restore_batch(session, entries):
+    session.check()
+    bulk_reader = getattr(session.backend, 'read_blobs', None)
+    if callable(bulk_reader):
+        contents = bulk_reader(list(entries))
+    else:
+        # Existing local/test backends keep their single-object interface.
+        contents = {}
+        for digest in entries:
+            session.check()
+            contents[digest] = session.backend.read_blob(digest)
+    session.check()
+    if not isinstance(contents, dict) or set(contents) != set(entries):
+        raise CloudStorageError('Les fichiers du point de reprise distant sont incomplets ou inattendus.')
+    return contents
+
+
 def _restore(session, old_marker):
     manifest = _manifest(session.manifest)
     current = dict(_tracked(session.root))
@@ -253,44 +286,52 @@ def _restore(session, old_marker):
             target = backup / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target)
+    needed, objects = [], {}
+    for name, entry in manifest['files'].items():
+        destination = _verify_destination(session.root, name)
+        existing = current.get(name)
+        if existing is not None:
+            try:
+                signature = _signature(existing)
+                cached = _file_cache.get(str(existing))
+                if cached is not None and cached[0] == signature:
+                    local_entry = cached[1]
+                else:
+                    local_entry, encoded_local = _encode_file(existing)
+                    _file_cache[str(existing)] = signature, local_entry, encoded_local
+                if local_entry == entry:
+                    continue
+            except (OSError, CloudStorageError):
+                # A corrupt local cache is replaced only after validating
+                # the entire committed remote snapshot below.
+                pass
+        digest = entry['sha256']
+        if digest in objects and objects[digest] != entry:
+            raise CloudStorageError('Le manifeste distant contient des tailles de fichier incohérentes.')
+        objects[digest] = entry
+        needed.append((name, destination, digest))
     # Stage and validate ALL incoming content before changing ANY tracked file.
+    # Duplicate destinations share one verified staged object and one download.
     with tempfile.TemporaryDirectory(prefix='patternlab-restore-') as directory:
         staging = Path(directory)
-        changed = []
-        for name, entry in manifest['files'].items():
-            destination = _verify_destination(session.root, name)
-            existing = current.get(name)
-            if existing is not None:
-                try:
-                    signature = _signature(existing)
-                    cached = _file_cache.get(str(existing))
-                    if cached is not None and cached[0] == signature:
-                        local_entry = cached[1]
-                    else:
-                        local_entry, encoded_local = _encode_file(existing)
-                        _file_cache[str(existing)] = signature, local_entry, encoded_local
-                    if local_entry == entry:
-                        continue
-                except (OSError, CloudStorageError):
-                    # A corrupt local cache is replaced only after validating
-                    # the entire committed remote snapshot below.
-                    pass
-            session.check()
-            encoded, raw_size = session.backend.read_blob(entry['sha256'])
-            if raw_size != entry['size']:
-                raise CloudStorageError('La taille d’un fichier distant est incohérente.')
-            raw = _decode(encoded, entry)
-            target = staging / name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(raw)
-            if target.suffix == '.sqlite3':
-                try:
-                    with closing(sqlite3.connect(f'file:{target.as_posix()}?mode=ro', uri=True)) as con:
-                        if con.execute('PRAGMA quick_check').fetchone() != ('ok',):
-                            raise CloudStorageError('Le journal distant est invalide.')
-                except sqlite3.Error:
-                    raise CloudStorageError('Le journal distant est invalide.') from None
-            changed.append((name, destination, target))
+        sqlite_digests = {digest for name, _, digest in needed if Path(name).suffix == '.sqlite3'}
+        for batch in _restore_batches(objects):
+            contents = _read_restore_batch(session, batch)
+            for digest, entry in batch.items():
+                encoded, raw_size = contents[digest]
+                if raw_size != entry['size']:
+                    raise CloudStorageError('La taille d’un fichier distant est incohérente.')
+                raw = _decode(encoded, entry)
+                target = staging / digest
+                target.write_bytes(raw)
+                if digest in sqlite_digests:
+                    try:
+                        with closing(sqlite3.connect(f'file:{target.as_posix()}?mode=ro', uri=True)) as con:
+                            if con.execute('PRAGMA quick_check').fetchone() != ('ok',):
+                                raise CloudStorageError('Le journal distant est invalide.')
+                    except sqlite3.Error:
+                        raise CloudStorageError('Le journal distant est invalide.') from None
+        changed = [(name, destination, staging / digest) for name, destination, digest in needed]
         for name in current:
             _verify_destination(session.root, name)
         session.check()
