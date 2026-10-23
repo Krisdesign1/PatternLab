@@ -151,6 +151,64 @@ class CalendarPanelTests(unittest.TestCase):
         self.refresh.assert_not_called()
         self._assert_no_prediction_or_real_network()
 
+    def test_first_refresh_after_empty_cloud_start_selects_all_competitions(self):
+        populated = copy.deepcopy(self.raw)
+        self.raw = []
+        self.at = AppTest.from_file(str(APP_PATH), default_timeout=15).run()
+        selection_key = f'workspace_league_API-Football_{DAY}'
+        self.assertFalse(self.at.exception)
+        self.assertIsNone(self.at.selectbox(key=selection_key).value)
+
+        def refreshed(source, day):
+            self.raw = populated
+            return {'day_count': len(self.raw)}
+
+        self.refresh.side_effect = refreshed
+        self.at.button(key='workspace_refresh').click().run()
+        self.assertFalse(self.at.exception)
+        self.assertEqual(self.at.selectbox(key=selection_key).value, calendar.ALL)
+        self.assertEqual(len(self._table()), len(populated))
+        self.refresh.assert_called_once_with('API-Football', DAY)
+        self.at.run()
+        self.assertFalse(self.at.exception)
+        self.assertEqual(len(self._table()), len(populated))
+        self.refresh.assert_called_once()
+        self._competition('39')
+        self.assertEqual(len(self.at.checkbox), 6)
+        self._assert_no_prediction_or_real_network()
+
+    def test_refresh_removing_selected_competition_returns_to_all_matches(self):
+        self._competition('39')
+
+        def refreshed(source, day):
+            self.raw = [row for row in self.raw if row['league']['id'] != 39]
+            return {'day_count': len(self.raw)}
+
+        self.refresh.side_effect = refreshed
+        self.at.button(key='workspace_refresh').click().run()
+        self.assertFalse(self.at.exception)
+        self.assertEqual(self.at.selectbox(key=f'workspace_league_API-Football_{DAY}').value, calendar.ALL)
+        self.assertEqual(len(self._table()), 4)
+        self.assertNotIn('Premier League', set(self._table()['Compétition']))
+        self.refresh.assert_called_once()
+        self._assert_no_prediction_or_real_network()
+
+    def test_invalid_competition_widget_return_keeps_the_full_calendar_visible(self):
+        original = workspace.st.selectbox
+        for invalid in (None, 'England · Premier League (5 matchs)', '999999'):
+            with self.subTest(selection=invalid):
+                def selectbox(label, *args, **kwargs):
+                    value = original(label, *args, **kwargs)
+                    return invalid if label == 'Compétition' else value
+
+                with patch.object(workspace.st, 'selectbox', side_effect=selectbox):
+                    self.at.run()
+                self.assertFalse(self.at.exception)
+                self.assertEqual(len(self._table()), len(self.raw))
+                self.assertFalse(self.at.checkbox)
+        self.refresh.assert_not_called()
+        self._assert_no_prediction_or_real_network()
+
     def test_live_filter_includes_half_time_and_displays_current_scores_and_minutes(self):
         self._status('En cours')
         table = self._table()

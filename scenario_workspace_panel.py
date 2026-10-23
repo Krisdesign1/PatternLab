@@ -312,13 +312,22 @@ def _render_workspace(source, auto=False):
         requested=st.session_state.pop('workspace_requested_league',None)
         if requested and requested.get('context') == (source,day.isoformat()) and requested.get('league') in competitions:
             st.session_state[league_key]=requested['league']
+        league_options = [calendar.ALL] + options if options else []
+        # A first cloud session starts empty. Streamlit preserves its None
+        # selection when the first refresh subsequently supplies competitions.
+        if options and st.session_state.get(league_key) not in league_options:
+            st.session_state[league_key] = calendar.ALL
+        elif not options and st.session_state.get(league_key) is not None:
+            st.session_state[league_key] = None
         with controls[1]:
-            league = st.selectbox('Compétition', [calendar.ALL] + options if options else [],
+            league = st.selectbox('Compétition', league_options,
                 index=0 if options else None,
                 format_func=lambda key: 'Toutes les compétitions' if key == calendar.ALL else
                     f"{competitions[key]['country']} · {competitions[key]['name']} "
                     f"({competitions[key]['matches']} matchs)",
                 placeholder='Actualiser pour charger les compétitions', key=league_key)
+            if options and league not in league_options:
+                league = calendar.ALL
         with controls[2]:
             if st.button('Actualiser', icon=':material/refresh:', width='stretch', key='workspace_refresh'):
                 calendar.mark_attempt(source, day)
