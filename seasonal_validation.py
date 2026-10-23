@@ -5,6 +5,8 @@ Recurrence strength/window are then selected on validation separately per size.
 Test labels never select parameters. All members of a group share its first
 UTC-day information cutoff, including groups spanning several match days.
 """
+
+import cloud_storage
 from collections import defaultdict
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -261,6 +263,7 @@ def _aggregate(folds, sizes):
     return output
 
 
+@cloud_storage.persisted
 def run(rows, league, source=SOURCE, sizes=DEFAULT_SIZES, progress=None):
     """Evaluate fixed seasonal folds in memory, with validation-only selection.
 
@@ -402,6 +405,7 @@ def load_report(league):
         raise SeasonalError('Le rapport de validation par saison est illisible ou invalide.') from None
 
 
+@cloud_storage.persisted
 def save_report(report):
     """Atomically persist only the explicit retrospective JSON report."""
     _validate_report(report)

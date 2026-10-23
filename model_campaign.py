@@ -5,6 +5,8 @@ snapshot, selected parameters and native artifacts are retained per league.
 Retries use that same snapshot; completed campaigns never tune on new matches.
 Existing compatible exploratory artifacts may be adopted without re-fitting.
 """
+
+import cloud_storage
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -82,6 +84,7 @@ def _protocol():
                         for years, validation, test in seasonal.FOLDS])
 
 
+@cloud_storage.persisted
 def _write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
@@ -154,11 +157,13 @@ def manual_publication(league, root=None):
     The check belongs at publication time: a calculation started before the
     campaign must not replace its artifacts after finishing later.
     """
-    paths = _paths(league, root)
-    with _lock(paths):
-        if paths['input'].exists() or paths['manifest'].exists():
-            raise CampaignError('Cette compétition possède une campagne figée ou en préparation ; remplacement du modèle refusé.')
-        yield
+    with cloud_storage.transaction():
+        paths = _paths(league, root)
+        with _lock(paths):
+            if paths['input'].exists() or paths['manifest'].exists():
+                raise CampaignError('Cette compétition possède une campagne figée ou en préparation ; remplacement du modèle refusé.')
+            yield
+        cloud_storage.checkpoint()
 
 
 def _history(rows, league, cutoff):
@@ -314,6 +319,7 @@ def _context_report(path, league, history, sizes):
     return report
 
 
+@cloud_storage.persisted
 def _copy_native(report, source_directory, target_directory, league):
     """Copy a verified immutable generation, then atomically switch its pointer."""
     source = ml._location(SOURCE, league, source_directory)
@@ -382,6 +388,7 @@ def _comparisons(native, contextual_report, sizes, context_reason):
                 reason=context_reason, report='models/api-football/'+(native['league'] if native else '')+'/CURRENT.json')
 
 
+@cloud_storage.persisted
 def run_one(rows, league, *, sizes=DEFAULT_SIZES, root=None, now=None):
     """Freeze, validate and publish one league once; no network or journal writes.
 
@@ -502,6 +509,8 @@ def run_one(rows, league, *, sizes=DEFAULT_SIZES, root=None, now=None):
             manifest.update(status='frozen', completed_at=current.isoformat())
             _write(paths['manifest'], manifest)
             return manifest
+        except cloud_storage.CloudStorageError:
+            raise
         except Exception as error:
             manifest.update(status='error', error='Validation ou publication interrompue ; reprise uniquement sur le premier instantané figé.')
             _write(paths['manifest'], manifest)

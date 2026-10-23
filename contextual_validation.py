@@ -4,6 +4,8 @@ Validation alone chooses neighbor parameters and CatBoost settings. Test
 catalogues contain only training and validation groups. No production CatBoost
 model or prediction journal is written by this module.
 """
+
+import cloud_storage
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -112,6 +114,7 @@ def _configuration(folds, history, league, fingerprint):
                 test_used_for_selection=False)
 
 
+@cloud_storage.persisted
 def run(rows, league, source=SOURCE, sizes=DEFAULT_SIZES, progress=None):
     """Return a five-method exploratory comparison on common seasonal cohorts.
 
@@ -285,6 +288,7 @@ def load_report(league):
         raise ContextualError('Le rapport contextuel local est illisible ou invalide.') from None
 
 
+@cloud_storage.persisted
 def save_report(report):
     """Explicitly save the retrospective JSON/configuration atomically."""
     _validate_report(report)

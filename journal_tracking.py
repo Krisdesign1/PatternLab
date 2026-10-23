@@ -1,4 +1,6 @@
 """Explicit network checks around immutable forecasts; local result updates."""
+
+import cloud_storage
 from datetime import datetime, timezone
 
 import api_football as api
@@ -7,6 +9,7 @@ import prediction_journal as journal
 import prospective_models as models
 
 
+@cloud_storage.persisted
 def register(rows, fixtures, estimate, engine, *, competition=None):
     """Freeze all available methods, then recheck provider status before commit."""
     now = datetime.now(timezone.utc)
@@ -39,10 +42,12 @@ def register(rows, fixtures, estimate, engine, *, competition=None):
                 message='Prévisions verrouillées avant le coup d’envoi ; leur comparaison aux résultats est activée.')
 
 
+@cloud_storage.persisted
 def reconcile_local():
     return journal.reconcile()
 
 
+@cloud_storage.persisted
 def refresh_entry(entry):
     """One explicit request for up to 20 tracked fixtures, including corrections."""
     ids = [row['match_id'] for row in entry['fixtures']]

@@ -4,6 +4,7 @@ from datetime import datetime
 from math import isfinite
 
 import streamlit as st
+from cloud_ui import guarded
 
 import api_football as api
 import daily_analysis_data as data
@@ -165,6 +166,7 @@ def _detail(row, clock_day):
 
 
 @st.fragment(run_every=60)
+@guarded
 def render_daily():
     today = _now().date()
     render_page_header('Analyses du jour',

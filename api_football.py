@@ -1,4 +1,6 @@
 """API-Football access and local fixtures for the application's single source."""
+
+import cloud_storage
 from datetime import datetime, timezone
 from contextlib import contextmanager
 import fcntl
@@ -86,6 +88,7 @@ class ApiFootballClient:
     def _safe(self, message):
         return str(message).replace(self._key, "[clé masquée]")
 
+    @cloud_storage.persisted
     def get(self, endpoint, **params):
         self.last_quota = {}
         if not isinstance(endpoint, str) or not endpoint.strip("/"):
@@ -96,6 +99,8 @@ class ApiFootballClient:
         query = urlencode({key: value for key, value in params.items() if value is not None})
         url = f"{BASE_URL}/{endpoint}" + (f"?{query}" if query else "")
         request = Request(url, headers={"x-apisports-key": self._key, "Accept": "application/json"})
+        # Never spend a provider request after losing the shared workspace lease.
+        cloud_storage.assert_lease()
         try:
             with urlopen(request, timeout=25, context=_ssl_context()) as response:
                 self._capture_quota(getattr(response, 'headers', None))
@@ -305,6 +310,7 @@ def _store_write_lock(path):
         handle.close()
 
 
+@cloud_storage.persisted
 def save_fixtures(fixtures, path=STORE_PATH, *, season_imports=None):
     """Serialize the whole merge before atomically replacing the provider store."""
     with _store_write_lock(path) as locked_path:

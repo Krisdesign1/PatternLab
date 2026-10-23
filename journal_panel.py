@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 
 import streamlit as st
+from cloud_ui import guarded
 
 import api_football
 import journal_performance as performance
@@ -199,6 +200,7 @@ def _past_days(entries, today):
 
 
 @st.fragment(run_every=60)
+@guarded
 def render_journal():
     today = _today()
     render_page_header('Mes analyses et évaluations',

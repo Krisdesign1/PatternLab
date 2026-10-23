@@ -3,6 +3,8 @@
 The list always uses the same Clubs model. Group snapshots reuse exactly the
 displayed probabilities; no model selection, training or history import occurs.
 """
+
+import cloud_storage
 from copy import deepcopy
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -60,6 +62,7 @@ def load_scan(root=None, now=None):
     return report
 
 
+@cloud_storage.persisted
 def refresh_scan(root=None, now=None):
     """One explicit calendar request, no training or multi-season imports."""
     current = _now(now)
@@ -178,6 +181,7 @@ def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choic
                 created_at=current.isoformat())
 
 
+@cloud_storage.persisted
 def record_group(prepared, root=None, clock=None, fetch=None):
     """Fresh provider preflight followed by the existing write-once journal."""
     root = _root(root)

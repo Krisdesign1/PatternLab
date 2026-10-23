@@ -4,6 +4,8 @@ The planner selects from local API-Football data. Every new forecast needs a
 fresh ID-scoped provider preflight after its calculations. Opening a page only
 reads ``load_status``/``load_selections``; ``run_now`` is an explicit action.
 """
+
+import cloud_storage
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
@@ -45,6 +47,7 @@ def _read(path, default):
         raise DailyAnalysisError(f'Le fichier {path.name} est invalide ; préparation suspendue.') from None
 
 
+@cloud_storage.persisted
 def _write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     name = None
@@ -155,6 +158,7 @@ def _report(root, state, day, report, clock):
     return report
 
 
+@cloud_storage.persisted
 def run(root, clock, fetch=None, *, max_jobs=4):
     """Prepare at most ``max_jobs`` candidates using an already-budgeted fetch.
 
@@ -281,6 +285,8 @@ def run(root, clock, fetch=None, *, max_jobs=4):
                 report['created'] += int(entry['created'])
                 report['already_recorded'] += int(not entry['created'])
                 _write(root/STATE_NAME, state)
+        except cloud_storage.CloudStorageError:
+            raise
         except Exception:
             # Gate quota pauses and unexpected failures must not erase anchors.
             report['status'] = 'paused'
@@ -293,6 +299,7 @@ def run(root, clock, fetch=None, *, max_jobs=4):
         return _report(root, state, day, report, clock)
 
 
+@cloud_storage.persisted
 def run_now(root=None, *, max_jobs=4):
     """Explicit UI action sharing the worker's lock and durable API budgets.
 

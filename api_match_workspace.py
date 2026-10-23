@@ -1,4 +1,6 @@
 """Local Kinshasa calendar and explicit API-Football history imports."""
+
+import cloud_storage
 from datetime import date, datetime, time, timedelta, timezone
 import json
 import os
@@ -168,6 +170,7 @@ def _calendar_updates(path):
     return updates
 
 
+@cloud_storage.persisted
 def _mark_calendar_refresh(path, day, timezone_name):
     """Persist only successful per-day refresh times in an atomic metadata sidecar."""
     updates = _calendar_updates(path)
@@ -286,6 +289,7 @@ def _safe(error, key):
     return str(error).replace(key, "[clé masquée]") if key else str(error)
 
 
+@cloud_storage.persisted
 def refresh_day(day, *, timezone_name=DEFAULT_TIMEZONE, path=None):
     """One explicit date/timezone request; save all returned rows and filter locally."""
     _bounds(day, timezone_name)
@@ -319,6 +323,7 @@ def missing_history(competition_code, seasons, path=None):
     return [year for year in years if (code, year) not in imported]
 
 
+@cloud_storage.persisted
 def ensure_history(competition_code, seasons, *, path=None):
     """Fetch at most two complete season responses and atomically commit their markers."""
     code, years = _selection(competition_code, seasons)

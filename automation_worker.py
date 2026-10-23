@@ -4,6 +4,8 @@ All known competitions participate. Calendar collection and forecasts concern
 today's Africa/Kinshasa fixtures only. Group anchors persist across updates;
 no group is chosen on results, no forecast is backfilled, no model is fitted here.
 """
+
+import cloud_storage
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -52,6 +54,7 @@ def _read(path, default):
         raise AutomationError(f'Fichier {path.name} invalide : traitement suspendu.') from None
 
 
+@cloud_storage.persisted
 def _write(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     name = None
@@ -92,6 +95,7 @@ def load_config(root=None):
     return _config(_read(_root(root) / 'automation_config.json', {}))
 
 
+@cloud_storage.persisted
 def save_config(config, root=None):
     value = _config(config)
     _write(_root(root) / 'automation_config.json', value)
@@ -281,6 +285,9 @@ class _Gate:
         self.state['requests_today'] = self.state.get('requests_today', 0)+1
         self.report['requests'] += 1
         self.save()
+        # The reservation must reach durable storage before the provider call.
+        # This also covers injected clients that bypass ApiFootballClient.get.
+        cloud_storage.assert_lease()
         try:
             return workspace._response_fixtures(self.client.fixtures(**params))
         except api.ApiFootballError as error:
@@ -392,6 +399,7 @@ def _refresh_results(root, gate, clock, report):
         gate.save()
 
 
+@cloud_storage.persisted
 def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False):
     root = _root(root)
     config = _config(config if config is not None else load_config(root))

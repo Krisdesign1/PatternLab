@@ -3,6 +3,8 @@
 Opening the journal only reads this file. Registration never touches forecasts,
 results, models, the API or their automation settings.
 """
+
+import cloud_storage
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import copy
@@ -95,6 +97,7 @@ def _registration_lock(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+@cloud_storage.persisted
 def register_protocol(path=None, *, now=None):
     """Explicit one-time registration. Existing criteria are never overwritten.
 

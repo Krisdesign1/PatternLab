@@ -4,6 +4,8 @@ This module reads the API-Football store once. It never calls a provider, trains
 models, reconciles the journal, or changes an existing daily selection. Historical
 calendars reconstructed from final data are explicitly retrospective evidence.
 """
+
+import cloud_storage
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from hashlib import sha256
@@ -104,6 +106,7 @@ def _code_signature():
     return sha256(_json(files).encode()).hexdigest(), files
 
 
+@cloud_storage.persisted
 def _write(path, value, *, immutable=False):
     encoded = value if isinstance(value, str) else _json(value)
     name = None
@@ -213,6 +216,7 @@ def _review(report):
         '```json\n'+json.dumps(summary, ensure_ascii=False, indent=2, allow_nan=False)+'\n```\n')
 
 
+@cloud_storage.persisted
 def run_audit(*, root=None, today=None, start='2022-01-01', end=None, progress=None):
     """Freeze a local input/protocol, replay it once, then cache the immutable report."""
     today, start, end = _dates(today, start, end)

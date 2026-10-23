@@ -1,4 +1,6 @@
 """Immutable API-Football forecasts and append-only result reconciliation."""
+
+import cloud_storage
 from datetime import datetime, timezone
 from hashlib import sha256
 from itertools import groupby
@@ -158,10 +160,12 @@ def find_mixed(fixtures, path=None):
     return next((entry for entry in list_entries(path) if entry['id']==key),None)
 
 
+@cloud_storage.persisted
 def record(fixtures, methods, *, source='API-Football', now=None, path=None, metadata=None, raw_fixtures=None):
     return _record(fixtures,methods,source=source,now=now,path=path,metadata=metadata,raw_fixtures=raw_fixtures)
 
 
+@cloud_storage.persisted
 def record_mixed(fixtures, methods, *, source='API-Football', now=None, path=None, metadata=None, raw_fixtures=None, clock=None):
     """Explicit daily mixed-group registration; ordinary ``record`` stays strict."""
     return _record(fixtures,methods,source=source,now=now,path=path,metadata=metadata,
@@ -203,6 +207,7 @@ def _check_time(fixtures,current,allow_mixed):
             raise JournalError('Les nouvelles analyses mixtes doivent contenir uniquement les matchs du jour à Kinshasa.')
 
 
+@cloud_storage.persisted
 def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata=None,raw_fixtures=None,allow_mixed=False,clock=None):
     if source != 'API-Football':
         raise JournalError('Le journal accepte uniquement API-Football.')
@@ -315,6 +320,7 @@ def _settle(entry, raw, now):
                 observed=observed, evaluations=evaluations, issues=issues)
 
 
+@cloud_storage.persisted
 def reconcile(raw_fixtures=None, *, now=None, path=None):
     entries = list_entries(path)
     if not entries:

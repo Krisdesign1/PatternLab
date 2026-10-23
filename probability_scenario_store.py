@@ -5,6 +5,8 @@ become additional independent observations in a model performance calculation.
 Only the already frozen Clubs distribution supplies probabilities and baselines.
 The caller performs the fresh API-Football status preflight before ``record``.
 """
+
+import cloud_storage
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -267,6 +269,7 @@ def list_intents(path=None):
             con.close()
 
 
+@cloud_storage.persisted
 def record(entry, selection, *, path=None, clock=None):
     """Save a distinct pre-kickoff choice without mutating its forecast.
 

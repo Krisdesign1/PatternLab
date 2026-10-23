@@ -236,15 +236,30 @@ def uninstall_service(root=None, *, launch_agents_dir=None, runner=None):
             "plist_path": str(paths["installed"])}
 
 
-def _prepare_models(root=None):
+def _prepare_models(root=None, *, config=None):
     """Separate local phase: a provider failure need not prevent validation."""
     module = importlib.import_module('model_campaign_worker')
-    return module.run_cycle(root=_paths(root)['data'])
+    arguments = {'root': _paths(root)['data']}
+    if config is not None:
+        arguments['config'] = config
+    return module.run_cycle(**arguments)
 
 
-def run_once(root=None, *, dry_run=False):
+def run_once(root=None, *, dry_run=False, config=None, skip_models=False):
     """Call the worker exactly once and return a log-safe summary only."""
-    report = _worker(root).run_cycle(root=_paths(root)["data"], dry_run=dry_run)
+    worker = _worker(root)  # Also makes the project importable for direct CLI use.
+    cloud = importlib.import_module('cloud_storage')
+    with cloud.transaction():
+        summary = _run_once(worker, root, dry_run=dry_run, config=config, skip_models=skip_models)
+        cloud.checkpoint()
+        return summary
+
+
+def _run_once(worker, root, *, dry_run, config, skip_models):
+    arguments = {'root': _paths(root)['data'], 'dry_run': dry_run}
+    if config is not None:
+        arguments['config'] = config
+    report = worker.run_cycle(**arguments)
     if not isinstance(report, dict) or report.get("status") not in _STATUSES:
         raise ServiceError("Le cycle a renvoyé un statut invalide.")
     summary = {"status": report["status"]}
@@ -259,8 +274,8 @@ def run_once(root=None, *, dry_run=False):
     issues = report.get("issues")
     if isinstance(issues, (list, dict)):
         summary["issues"] = len(issues)
-    if not dry_run and report['status'] not in ('busy', 'disabled'):
-        model_report = _prepare_models(root)
+    if not dry_run and not skip_models and report['status'] not in ('busy', 'disabled'):
+        model_report = (_prepare_models(root) if config is None else _prepare_models(root, config=config))
         if model_report.get('status') not in ('idle', 'disabled'):
             summary['models_status'] = model_report['status']
             summary['models_prepared'] = model_report.get('prepared', 0)

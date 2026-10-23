@@ -4,6 +4,7 @@ import json
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+from cloud_ui import guarded
 
 import workspace_sources as sources
 import catboost_scenarios as ml
@@ -273,11 +274,13 @@ def render_workspace():
 
 
 @st.fragment(run_every=60)
+@guarded
 def _live_workspace(source):
     _render_workspace(source, auto=True)
 
 
 @st.fragment(run_every=60)
+@guarded
 def _manual_workspace(source):
     _render_workspace(source, auto=False)
 

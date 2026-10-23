@@ -2,6 +2,7 @@
 import json
 
 import streamlit as st
+from cloud_ui import guarded
 
 import api_football as api
 import daily_analysis_worker as worker
@@ -157,6 +158,7 @@ def _prospective():
 
 
 @st.fragment(run_every=60)
+@guarded
 def render_evaluation():
     render_page_header('Bilan de la sélection',
                        'Mesurer le regroupement des matchs, la qualité des probabilités et les résultats réellement observés.',

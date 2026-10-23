@@ -1,4 +1,6 @@
 """One bounded local model job after an API cycle; frozen leagues never refit."""
+
+import cloud_storage
 from datetime import timedelta
 import fcntl
 
@@ -7,6 +9,7 @@ import automation_worker as automation
 import model_campaign as campaign
 
 
+@cloud_storage.persisted
 def run_cycle(*, root=None, config=None, now=None, dry_run=False):
     root = automation._root(root)
     config = automation._config(config if config is not None else automation.load_config(root))

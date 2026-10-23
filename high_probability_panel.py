@@ -9,6 +9,7 @@ import json
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+from cloud_ui import guarded
 
 import api_football as api
 import high_probability_engine as engine
@@ -300,6 +301,7 @@ def _prepared_detail(report, indexed, now):
 
 
 @st.fragment(run_every=60)
+@guarded
 def render_high_probabilities():
     now = _now()
     render_page_header('Fortes probabilités',

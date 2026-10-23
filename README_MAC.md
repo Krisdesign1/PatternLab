@@ -1002,3 +1002,9 @@ identifiés pour éviter de les télécharger à chaque classement.
 Aucun appel n’est déclenché au simple affichage quand le suivi automatique est désactivé.
 Le quota du fournisseur s’applique.
 Les réglages permettent de sauvegarder les données API-Football en JSON.
+
+## Stockage partagé et automatisation gratuits
+
+Le déploiement Streamlit seul ne suffit pas à conserver durablement l’historique ou à exécuter les traitements sans visiteur. Le [guide Cloud gratuit](docs/CLOUD_GRATUIT.md) explique l’import initial vers PostgreSQL, la connexion du site et l’activation de trois cycles quotidiens dans GitHub Actions.
+
+Cette intégration reste inactive tant que le stockage et ses secrets privés ne sont pas configurés. Le mode local habituel reste disponible. L’hébergement gratuit ne garantit pas une disponibilité 24 h/24.

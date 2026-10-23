@@ -5,6 +5,8 @@ uses frozen parameters and train+validation weights. Lagged features and the
 clubs baseline may see already played earlier test days, never any member of the
 target group's first day or later. Deployment is a separate all-past-data refit.
 """
+
+import cloud_storage
 from datetime import datetime, timezone
 import hashlib
 import importlib
@@ -238,6 +240,7 @@ def _split_details(examples, groups):
     return dict(matches=len(examples), start=min(days), end=max(days), groups=len(groups))
 
 
+@cloud_storage.persisted
 def _publish(model, report, source, league, directory):
     if Path(directory or DATA_DIR).resolve() == Path(DATA_DIR).resolve():
         import model_campaign as campaign
@@ -279,6 +282,7 @@ def _publish_unlocked(model, report, source, league, directory):
             pointer_temp.unlink()
 
 
+@cloud_storage.persisted
 def train(rows, league, source, directory=None, *, before=None):
     """Select on validation, report untouched test, then refit deployment on all past days."""
     module = _features()

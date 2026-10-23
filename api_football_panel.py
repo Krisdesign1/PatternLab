@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 
 import streamlit as st
+import cloud_storage
 
 from api_football import (
     ApiFootballClient, ApiFootballError, DATA_DIR, FINISHED_STATUSES,
@@ -20,6 +21,7 @@ def _check_report():
         return {}
 
 
+@cloud_storage.persisted
 def _save_check(report):
     # Only subscription/quota and a safe error message, never account details.
     DATA_DIR.mkdir(parents=True, exist_ok=True)

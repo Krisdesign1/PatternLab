@@ -1,4 +1,6 @@
 """API-Football is the only permitted workspace source."""
+
+import cloud_storage
 from datetime import datetime, timezone
 import importlib
 import json
@@ -39,6 +41,7 @@ def selected_source():
                                    'Enregistrez votre source dans Données et réglages.') from None
 
 
+@cloud_storage.persisted
 def save_source(source):
     """Persist only a provider label; this operation makes no API call."""
     source = _validate(source)
@@ -90,6 +93,7 @@ def local_snapshot(source, day):
     return _service(source).local_snapshot(day)
 
 
+@cloud_storage.persisted
 def refresh_day(source, day):
     return _service(source).refresh_day(day)
 
@@ -98,5 +102,6 @@ def missing_history(source, code, seasons):
     return _service(source).missing_history(code, seasons)
 
 
+@cloud_storage.persisted
 def ensure_history(source, code, seasons):
     return _service(source).ensure_history(code, seasons)

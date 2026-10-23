@@ -4,6 +4,8 @@ The source snapshot and protocol precede every fit. The selected rule is saved
 before the replay evaluates the test period. Production models and forecasts
 are never replaced by this experiment.
 """
+
+import cloud_storage
 from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -48,6 +50,7 @@ def _read(path):
         raise StudyError(f'Le fichier figé {path.name} est absent ou illisible.') from None
 
 
+@cloud_storage.persisted
 def _write(path, value, *, immutable=False):
     try:
         storage._write(path, value, immutable=immutable)
@@ -128,6 +131,7 @@ def _review(report):
                                    warnings=report.get('warnings',[])),ensure_ascii=False,indent=2,allow_nan=False)+'\n```\n')
 
 
+@cloud_storage.persisted
 def run_study(*, root=None, today=None, end=None, progress=None):
     """Run or reuse one frozen experiment, without touching live predictions."""
     import daily_selection_replay as replay

@@ -4,6 +4,7 @@ import json
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import cloud_storage
 
 import api_football as api
 import automation_worker as worker
@@ -28,6 +29,12 @@ def _coverage(signature, configuration, day):
 
 
 def _scheduler_status():
+    if cloud_storage.configured():
+        st.info('Stockage partagé activé. La planification Cloud se règle séparément dans GitHub Actions.')
+        st.caption('Le programme gratuit prévoit trois passages par jour. '
+                   'Une connexion au stockage ne confirme pas que cette planification est activée. '
+                   'Le dernier cycle réellement exécuté figure dans le bilan ci-dessous.')
+        return
     try:
         state = service.service_status()
     except (OSError, ValueError) as error:

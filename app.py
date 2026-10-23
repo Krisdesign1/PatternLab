@@ -2,6 +2,7 @@
 import streamlit as st
 from ux_theme import render_brand
 from scenario_odds import DEFAULT_ODDS, format_odds
+from cloud_ui import guarded
 
 st.set_page_config(page_title="PatternLab", page_icon=":material/schema:", layout="wide")
 st.set_option("client.toolbarMode", "viewer")
@@ -30,4 +31,4 @@ with st.sidebar:
                 f":orange-badge[2nd] · **{format_odds(DEFAULT_ODDS['2nd'])}** · Plus de buts après la pause")
     st.caption("Cotes fixes de référence renseignées manuellement.")
     st.caption("Horaires : Africa/Kinshasa · UTC+1")
-page.run()
+guarded(page.run)()
