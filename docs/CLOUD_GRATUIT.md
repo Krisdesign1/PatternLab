@@ -46,6 +46,14 @@ PATTERNLAB_CLOUD_REQUIRED = true
 
 Le fichier est exclu de Git. En ligne de commande, ces mêmes noms peuvent être fournis comme variables d’environnement ; ils priment sur le fichier. Ne jamais passer la chaîne comme argument de commande.
 
+Pour éviter de composer la chaîne à la main, utiliser l’assistant local avec l’hôte et l’utilisateur affichés dans **Connect → Direct → Session pooler** :
+
+```bash
+python scripts/configure_cloud_storage.py --host HOTE_DU_SESSION_POOLER --user postgres.IDENTIFIANT_DU_PROJET
+```
+
+Il demande le mot de passe existant de la base sans l’afficher, encode ses caractères spéciaux, puis enregistre les trois réglages ci-dessus dans le fichier privé. Il conserve la configuration API-Football et refuse de remplacer une configuration Cloud déjà présente. Il n’effectue aucun appel réseau, aucun import ni démarrage de traitement. Fermer l’application locale et arrêter le planificateur avant cette configuration, puis initialiser le stockage avec les commandes suivantes avant de les relancer.
+
 ```bash
 python scripts/cloud_workspace.py check
 python scripts/cloud_workspace.py seed
