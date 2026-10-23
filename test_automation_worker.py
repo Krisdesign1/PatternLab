@@ -358,6 +358,101 @@ class WorkerTests(unittest.TestCase):
         again = self.run_cycle(client, now=BEFORE+timedelta(minutes=15))
         self.assertEqual(again['history_imports'], 0)
 
+    def test_forecast_deadline_hands_history_the_next_turn_and_reloads_new_results(self):
+        self.config.update(history_enabled=True, history_seasons=[2024])
+        imported = raw_match(200000, stamp='2024-10-18T12:00:00Z', status='FT',
+                             league=39, season=2024)
+        elapsed, seen_import = [0], []
+        def unavailable(rows, fixtures):
+            seen_import.append(any(row['match_id']=='200000' for row in rows))
+            elapsed[0] = 241
+            return dict(methods={}, unavailable={})
+        with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]), \
+             patch.object(models, 'build_methods', side_effect=unavailable):
+            first = self.run_cycle(max_duration_seconds=240)
+            self.assertEqual((first['status'],first['history_imports']), ('paused',0))
+            state = json.loads((self.root/'automation_state.json').read_text())
+            self.assertEqual(state['next_phase'], 'history')
+            elapsed[0] = 0
+            client = Client(self.future)
+            original = client.fixtures
+            def response(**params):
+                if 'league' in params:
+                    client.calls.append(params)
+                    return payload([imported])
+                return original(**params)
+            client.fixtures = response
+            second = self.run_cycle(client, max_duration_seconds=240)
+        self.assertEqual((second['status'],second['history_imports']), ('paused',1))
+        self.assertEqual(client.calls[1], dict(league='39',season=2024,timezone='UTC'))
+        self.assertEqual(seen_import, [False,True])
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+
+    def test_historical_deadline_hands_forecasts_the_next_turn_without_request_caps(self):
+        self.config.update(history_enabled=True, history_seasons=[2023,2024,2025])
+        worker._write(self.root/'automation_state.json', dict(version=worker.VERSION,next_phase='history'))
+        elapsed = [0]
+        client = Client(self.future)
+        original = client.fixtures
+        def response(**params):
+            result = original(**params)
+            if 'league' in params:
+                elapsed[0] = 241
+            return result
+        client.fixtures = response
+        with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]):
+            first = self.run_cycle(client, max_duration_seconds=240)
+        self.assertEqual((first['status'],first['created'],first['history_imports']), ('paused',0,1))
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+        next_client = Client(self.future)
+        elapsed[0] = 0
+        with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]):
+            second = self.run_cycle(next_client, max_duration_seconds=240)
+        self.assertEqual((second['status'],second['created'],second['history_imports']), ('completed',3,2))
+        self.assertTrue('date' in next_client.calls[0])
+        self.assertTrue(all('ids' in params for params in next_client.calls[1:4]))
+        self.assertTrue(all('league' in params for params in next_client.calls[4:]))
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+
+    def test_last_unavailable_forecast_keeps_history_priority_if_its_first_call_cannot_start(self):
+        self.config.update(sizes=[4],history_enabled=True,history_seasons=[2024])
+        elapsed = [0]
+        def unavailable(*args, **kwargs):
+            elapsed[0] = 241
+            return dict(methods={},unavailable={})
+        with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]), \
+             patch.object(models, 'build_methods', side_effect=unavailable):
+            first = self.run_cycle(max_duration_seconds=240)
+            self.assertEqual((first['status'],first['groups_considered'],first['history_imports']), ('paused',1,0))
+            state = json.loads((self.root/'automation_state.json').read_text())
+            self.assertEqual(state['next_phase'], 'history')
+            self.assertEqual(state['history_attempts'], {})
+            elapsed[0] = 0
+            client = Client(self.future)
+            second = self.run_cycle(client,max_duration_seconds=240)
+        self.assertEqual(second['history_imports'], 1)
+        self.assertEqual(client.calls[:2], [dict(date='2025-03-20',timezone=worker.TIMEZONE),
+                                            dict(league='39',season=2024,timezone='UTC')])
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+
+    def test_trailing_history_pause_returns_forecast_priority_after_an_actual_attempt(self):
+        self.config.update(sizes=[20],history_enabled=True,history_seasons=[2024,2025])
+        elapsed = [0]
+        client = Client(self.future)
+        original = client.fixtures
+        def response(**params):
+            result = original(**params)
+            if 'league' in params:
+                elapsed[0] = 241
+            return result
+        client.fixtures = response
+        with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]):
+            report = self.run_cycle(client,max_duration_seconds=240)
+        self.assertEqual((report['status'],report['history_imports'],report['requests']), ('paused',1,2))
+        state = json.loads((self.root/'automation_state.json').read_text())
+        self.assertEqual(state['next_phase'], 'forecasts')
+        self.assertEqual(len(state['history_attempts']), 1)
+
     def test_full_due_results_queue_uses_twenty_id_batches_without_forty_match_cap(self):
         rows = [raw_match(12000+i, stamp='2025-03-20T08:00:00Z', status='FT',
                           league=39, season=2025) for i in range(65)]

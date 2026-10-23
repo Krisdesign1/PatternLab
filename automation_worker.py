@@ -449,9 +449,21 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
                 _same_day(today, clock)
                 raw = api.load_fixtures(root / 'fixtures.json')
                 info, rows, issues = _inventory(raw, clock())
-                # Retrieve due results before forecasts. The finite historical
-                # backlog comes last so it cannot hold up today's predictions.
+                # Calendar and due results always come first. If a host pause
+                # prevented the previous forecast phase from reaching history,
+                # the saved hand-off gives history the next turn. Save the
+                # opposite priority BEFORE work so either long queue resumes
+                # without permanently excluding the other one.
                 _refresh_results(root, gate, clock, report)
+                phase = state.get('next_phase', 'forecasts')
+                if phase not in ('forecasts', 'history'):
+                    raise AutomationError('La phase de reprise automatique est invalide.')
+                state['next_phase'] = 'forecasts' if phase == 'history' else 'history'
+                gate.save()
+                if phase == 'history':
+                    raw = api.load_fixtures(root / 'fixtures.json')
+                    info, rows, issues = _inventory(raw, clock())
+                    _history(root, config, gate, report, info, clock)
                 _same_day(today, clock)
                 try:
                     import daily_analysis_worker
@@ -528,7 +540,21 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
                     report['created'] += int(entry['created'])
                     job.update(state='recorded', id=entry['id'], methods=list(entry['methods']),
                                unavailable=frozen['unavailable'], reason='Prévision verrouillée avant match.')
-                _history(root, config, gate, report, info, clock)
+                if phase == 'forecasts':
+                    # Keep history next until it actually receives a turn.
+                    # The final forecast calculation can consume the deadline
+                    # without another loop iteration noticing it first.
+                    before_history = report['requests']
+                    try:
+                        _history(root, config, gate, report, info, clock)
+                    except _Pause:
+                        if report['requests'] > before_history:
+                            state['next_phase'] = 'forecasts'
+                            gate.save()
+                        raise
+                    else:
+                        state['next_phase'] = 'forecasts'
+                        gate.save()
             except _Pause as error:
                 report.update(status='paused')
                 report['issues'].append(str(error))

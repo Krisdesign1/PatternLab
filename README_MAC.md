@@ -920,8 +920,11 @@ sont conservées même si CatBoost ou les voisins contextuels ne le sont pas.
 Le worker comptabilise chaque tentative avant son appel, sans plafond local
 de dix appels par minute ni réserve de cinq appels. Il suspend le passage si
 API-Football indique un quota épuisé ou répond HTTP 429, puis reprend lorsque
-le fournisseur le permet. Les résultats en attente et les prévisions du jour
-sont traités avant les imports historiques, sur une file finie par passage.
+le fournisseur le permet. Le calendrier et les résultats en attente sont traités
+en premier. Les prévisions du jour sont ensuite prioritaires ; si une interruption
+empêche les imports historiques de commencer, le passage suivant leur donne
+leur tour avant de reprendre les prévisions. Cette reprise alternée permet aux
+deux files finies de progresser sans plafond de nombre d’appels.
 Les résultats du journal sont actualisés par lots et les corrections d’un
 groupe terminé sont vérifiées pendant sept jours. Aucun résultat passé ne
 devient une prévision avant match.
