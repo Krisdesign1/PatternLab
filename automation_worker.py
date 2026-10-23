@@ -409,6 +409,87 @@ def _refresh_results(root, gate, clock, report):
         gate.save()
 
 
+def _forecast(root, config, gate, report, clock, today, now):
+    """Process the finite forecast queue using the latest local history."""
+    state = gate.state
+    _same_day(today, clock)
+    try:
+        import daily_analysis_worker
+        report['daily_analyses'] = daily_analysis_worker.run(root, clock, gate.call,
+                                                            check_time=gate.check_time)
+    except _Pause:
+        raise
+    except (ValueError, OSError, ImportError, KeyError, TypeError):
+        report['daily_analyses'] = dict(status='error',
+            reason='La préparation quotidienne est indisponible ; les autres groupes restent suivis.')
+    raw = api.load_fixtures(root / 'fixtures.json')
+    info, rows, issues = _inventory(raw, clock())
+    day_info, _, _ = _inventory(workspace._day_rows(raw, today, TIMEZONE), clock())
+    report['coverage_competitions'] = len(day_info)
+    report['data_issues'] = sum(issues.values())
+    plans = state.setdefault('plans', {})
+    threshold = (today-timedelta(days=21)).isoformat()
+    state['plans'] = plans = {key: val for key, val in plans.items() if key[:10] >= threshold}
+    groups, raw_ids = _plan(raw, [today.isoformat()], config['sizes'], plans)
+    gate.save()
+    entries = {e['id']: e for e in journal.list_entries(root / 'predictions.sqlite3')}
+    # Prioritize earliest kickoff across leagues; unavailable histories consume no requests.
+    groups.sort(key=lambda g: (min((workspace._stamp(raw_ids[mid]) for mid in g['ids'] if mid in raw_ids),
+                                  default=clock()), int(g['league']), g['size']))
+    import prospective_models as models
+    for group in groups:
+        gate.check_time()
+        _same_day(today, clock)
+        fixtures = _fixtures(group, raw_ids, clock())
+        job = dict(league=group['league'], competition=info[group['league']]['competition'],
+                   day=group['day'], size=group['size'], state='ineligible', reason='')
+        report['jobs'].append(job)
+        report['groups_considered'] += 1
+        if fixtures is None:
+            job['reason'] = 'Coup d’envoi passé, clubs non confirmés ou statut incompatible.'
+            continue
+        try:
+            key = journal._group_key(journal._fixtures(fixtures))
+        except journal.JournalError as error:
+            job['reason'] = str(error)
+            continue
+        if key in entries:
+            job.update(state='recorded', id=key, reason='Première prévision déjà verrouillée.')
+            report['already_recorded'] += 1
+            continue
+        try:
+            frozen = models.build_methods(rows[group['league']], fixtures)
+        except (models.SnapshotError, ValueError, KeyError, TypeError):
+            job.update(state='insufficient', reason='Données du groupe incompatibles avec les méthodes disponibles.')
+            continue
+        if not frozen['methods']:
+            job.update(state='insufficient', reason='Historique ou modèles insuffisants.',
+                       unavailable=frozen['unavailable'])
+            continue
+        # Preflight is AFTER all calculations. No cached NS status can authorize a write.
+        _same_day(today, clock)
+        fresh = gate.call(ids='-'.join(r['match_id'] for r in fixtures), timezone='UTC')
+        _same_day(today, clock)
+        if {str(r['fixture']['id']) for r in fresh} != set(group['ids']):
+            job.update(state='changed', reason='API-Football ne confirme pas toutes les affiches.')
+            continue
+        api.save_fixtures(fresh, root / 'fixtures.json')
+        try:
+            entry = journal.record(fixtures, frozen['methods'], now=now,
+                path=root / 'predictions.sqlite3', raw_fixtures=fresh, metadata=dict(
+                    selected_engine='automation', unavailable=frozen['unavailable'],
+                    calendar_checked_at=clock().isoformat(), competition=job['competition'],
+                    country=info[group['league']]['country'], automation_policy=VERSION,
+                    automation_day=group['day'], automation_timezone=TIMEZONE))
+        except journal.JournalError as error:
+            job.update(state='changed', reason=str(error))
+            continue
+        entries[entry['id']] = entry
+        report['created'] += int(entry['created'])
+        job.update(state='recorded', id=entry['id'], methods=list(entry['methods']),
+                   unavailable=frozen['unavailable'], reason='Prévision verrouillée avant match.')
+
+
 @cloud_storage.persisted
 def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, max_duration_seconds=None):
     if max_duration_seconds is not None and (
@@ -447,114 +528,29 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
                 api.save_fixtures(raw, root / 'fixtures.json')
                 workspace._mark_calendar_refresh(root / 'fixtures.json', today, TIMEZONE)
                 _same_day(today, clock)
-                raw = api.load_fixtures(root / 'fixtures.json')
-                info, rows, issues = _inventory(raw, clock())
-                # Calendar and due results always come first. If a host pause
-                # prevented the previous forecast phase from reaching history,
-                # the saved hand-off gives history the next turn. Save the
-                # opposite priority BEFORE work so either long queue resumes
-                # without permanently excluding the other one.
-                _refresh_results(root, gate, clock, report)
-                phase = state.get('next_phase', 'forecasts')
-                if phase not in ('forecasts', 'history'):
+                phases = ('results', 'forecasts', 'history')
+                next_phase = state.get('next_phase', 'results')
+                if next_phase not in phases:
                     raise AutomationError('La phase de reprise automatique est invalide.')
-                state['next_phase'] = 'forecasts' if phase == 'history' else 'history'
-                gate.save()
-                if phase == 'history':
-                    raw = api.load_fixtures(root / 'fixtures.json')
-                    info, rows, issues = _inventory(raw, clock())
-                    _history(root, config, gate, report, info, clock)
-                _same_day(today, clock)
-                try:
-                    import daily_analysis_worker
-                    report['daily_analyses'] = daily_analysis_worker.run(root, clock, gate.call,
-                                                                        check_time=gate.check_time)
-                except _Pause:
-                    raise
-                except (ValueError, OSError, ImportError, KeyError, TypeError):
-                    report['daily_analyses'] = dict(status='error',
-                        reason='La préparation quotidienne est indisponible ; les autres groupes restent suivis.')
-                raw = api.load_fixtures(root / 'fixtures.json')
-                info, rows, issues = _inventory(raw, clock())
-                day_info, _, _ = _inventory(workspace._day_rows(raw, today, TIMEZONE), clock())
-                report['coverage_competitions'] = len(day_info)
-                report['data_issues'] = sum(issues.values())
-                plans = state.setdefault('plans', {})
-                threshold = (today-timedelta(days=21)).isoformat()
-                state['plans'] = plans = {key: val for key, val in plans.items() if key[:10] >= threshold}
-                groups, raw_ids = _plan(raw, [today.isoformat()], config['sizes'], plans)
-                gate.save()
-                entries = {e['id']: e for e in journal.list_entries(root / 'predictions.sqlite3')}
-                # Prioritize earliest kickoff across leagues; unavailable histories consume no requests.
-                groups.sort(key=lambda g: (min((workspace._stamp(raw_ids[mid]) for mid in g['ids'] if mid in raw_ids),
-                                              default=clock()), int(g['league']), g['size']))
-                import prospective_models as models
-                for group in groups:
+                start = phases.index(next_phase)
+                # Each finite queue hands the next turn off BEFORE its work.
+                # A long results queue therefore cannot consume every passage;
+                # a host/provider pause resumes with the following phase.
+                for phase in phases[start:]+phases[:start]:
                     gate.check_time()
                     _same_day(today, clock)
-                    fixtures = _fixtures(group, raw_ids, clock())
-                    job = dict(league=group['league'], competition=info[group['league']]['competition'],
-                               day=group['day'], size=group['size'], state='ineligible', reason='')
-                    report['jobs'].append(job)
-                    report['groups_considered'] += 1
-                    if fixtures is None:
-                        job['reason'] = 'Coup d’envoi passé, clubs non confirmés ou statut incompatible.'
-                        continue
-                    try:
-                        key = journal._group_key(journal._fixtures(fixtures))
-                    except journal.JournalError as error:
-                        job['reason'] = str(error)
-                        continue
-                    if key in entries:
-                        job.update(state='recorded', id=key, reason='Première prévision déjà verrouillée.')
-                        report['already_recorded'] += 1
-                        continue
-                    try:
-                        frozen = models.build_methods(rows[group['league']], fixtures)
-                    except (models.SnapshotError, ValueError, KeyError, TypeError):
-                        job.update(state='insufficient', reason='Données du groupe incompatibles avec les méthodes disponibles.')
-                        continue
-                    if not frozen['methods']:
-                        job.update(state='insufficient', reason='Historique ou modèles insuffisants.',
-                                   unavailable=frozen['unavailable'])
-                        continue
-                    # Preflight is AFTER all calculations. No cached NS status can authorize a write.
-                    _same_day(today, clock)
-                    fresh = gate.call(ids='-'.join(r['match_id'] for r in fixtures), timezone='UTC')
-                    _same_day(today, clock)
-                    if {str(r['fixture']['id']) for r in fresh} != set(group['ids']):
-                        job.update(state='changed', reason='API-Football ne confirme pas toutes les affiches.')
-                        continue
-                    api.save_fixtures(fresh, root / 'fixtures.json')
-                    try:
-                        entry = journal.record(fixtures, frozen['methods'], now=now,
-                            path=root / 'predictions.sqlite3', raw_fixtures=fresh, metadata=dict(
-                                selected_engine='automation', unavailable=frozen['unavailable'],
-                                calendar_checked_at=clock().isoformat(), competition=job['competition'],
-                                country=info[group['league']]['country'], automation_policy=VERSION,
-                                automation_day=group['day'], automation_timezone=TIMEZONE))
-                    except journal.JournalError as error:
-                        job.update(state='changed', reason=str(error))
-                        continue
-                    entries[entry['id']] = entry
-                    report['created'] += int(entry['created'])
-                    job.update(state='recorded', id=entry['id'], methods=list(entry['methods']),
-                               unavailable=frozen['unavailable'], reason='Prévision verrouillée avant match.')
-                if phase == 'forecasts':
-                    # Keep history next until it actually receives a turn.
-                    # The final forecast calculation can consume the deadline
-                    # without another loop iteration noticing it first.
-                    before_history = report['requests']
-                    try:
-                        _history(root, config, gate, report, info, clock)
-                    except _Pause:
-                        if report['requests'] > before_history:
-                            state['next_phase'] = 'forecasts'
-                            gate.save()
-                        raise
+                    state['next_phase'] = phases[(phases.index(phase)+1) % len(phases)]
+                    gate.save()
+                    if phase == 'results':
+                        _refresh_results(root, gate, clock, report)
+                    elif phase == 'forecasts':
+                        _forecast(root, config, gate, report, clock, today, now)
                     else:
-                        state['next_phase'] = 'forecasts'
-                        gate.save()
+                        raw = api.load_fixtures(root / 'fixtures.json')
+                        info, _, _ = _inventory(raw, clock())
+                        _history(root, config, gate, report, info, clock)
+                state['next_phase'] = 'results'
+                gate.save()
             except _Pause as error:
                 report.update(status='paused')
                 report['issues'].append(str(error))

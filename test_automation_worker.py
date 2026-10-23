@@ -318,11 +318,15 @@ class WorkerTests(unittest.TestCase):
 
     def test_host_deadline_does_not_postpone_an_unattempted_history_import(self):
         self.config.update(history_enabled=True, history_seasons=[2024,2025], sizes=[20])
+        worker._write(self.root/'automation_state.json',dict(version=worker.VERSION,next_phase='history'))
         elapsed = [0]
+        inventory = worker._inventory
         def expire(*args):
+            value = inventory(*args)
             elapsed[0] = 11
+            return value
         with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]), \
-             patch.object(worker, '_refresh_results', side_effect=expire):
+             patch.object(worker, '_inventory', side_effect=expire):
             report = self.run_cycle(max_duration_seconds=10)
         self.assertEqual(report['status'], 'paused')
         self.assertEqual(report['requests'], 1)
@@ -386,9 +390,9 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual((second['status'],second['history_imports']), ('paused',1))
         self.assertEqual(client.calls[1], dict(league='39',season=2024,timezone='UTC'))
         self.assertEqual(seen_import, [False,True])
-        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'history')
 
-    def test_historical_deadline_hands_forecasts_the_next_turn_without_request_caps(self):
+    def test_historical_deadline_hands_results_the_next_turn_then_forecasts_before_history(self):
         self.config.update(history_enabled=True, history_seasons=[2023,2024,2025])
         worker._write(self.root/'automation_state.json', dict(version=worker.VERSION,next_phase='history'))
         elapsed = [0]
@@ -403,7 +407,7 @@ class WorkerTests(unittest.TestCase):
         with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]):
             first = self.run_cycle(client, max_duration_seconds=240)
         self.assertEqual((first['status'],first['created'],first['history_imports']), ('paused',0,1))
-        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'results')
         next_client = Client(self.future)
         elapsed[0] = 0
         with patch.object(worker.time, 'monotonic', side_effect=lambda:elapsed[0]):
@@ -412,7 +416,7 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue('date' in next_client.calls[0])
         self.assertTrue(all('ids' in params for params in next_client.calls[1:4]))
         self.assertTrue(all('league' in params for params in next_client.calls[4:]))
-        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'results')
 
     def test_last_unavailable_forecast_keeps_history_priority_if_its_first_call_cannot_start(self):
         self.config.update(sizes=[4],history_enabled=True,history_seasons=[2024])
@@ -426,16 +430,16 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual((first['status'],first['groups_considered'],first['history_imports']), ('paused',1,0))
             state = json.loads((self.root/'automation_state.json').read_text())
             self.assertEqual(state['next_phase'], 'history')
-            self.assertEqual(state['history_attempts'], {})
+            self.assertEqual(state.get('history_attempts', {}), {})
             elapsed[0] = 0
             client = Client(self.future)
             second = self.run_cycle(client,max_duration_seconds=240)
         self.assertEqual(second['history_imports'], 1)
         self.assertEqual(client.calls[:2], [dict(date='2025-03-20',timezone=worker.TIMEZONE),
                                             dict(league='39',season=2024,timezone='UTC')])
-        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'forecasts')
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'results')
 
-    def test_trailing_history_pause_returns_forecast_priority_after_an_actual_attempt(self):
+    def test_trailing_history_pause_returns_results_priority_after_an_actual_attempt(self):
         self.config.update(sizes=[20],history_enabled=True,history_seasons=[2024,2025])
         elapsed = [0]
         client = Client(self.future)
@@ -450,8 +454,62 @@ class WorkerTests(unittest.TestCase):
             report = self.run_cycle(client,max_duration_seconds=240)
         self.assertEqual((report['status'],report['history_imports'],report['requests']), ('paused',1,2))
         state = json.loads((self.root/'automation_state.json').read_text())
-        self.assertEqual(state['next_phase'], 'forecasts')
+        self.assertEqual(state['next_phase'], 'results')
         self.assertEqual(len(state['history_attempts']), 1)
+
+    def test_results_deadline_rotates_to_forecasts_then_history_on_successive_passages(self):
+        self.config.update(sizes=[4],history_enabled=True,history_seasons=[2024])
+        elapsed, events = [0], []
+        def slow_results(root, gate, clock, report):
+            events.append('results')
+            elapsed[0] = 241
+            gate.check_time()
+        def slow_forecast(*args, **kwargs):
+            events.append('forecasts')
+            elapsed[0] = 241
+            return dict(methods={},unavailable={})
+        reports, clients = [], []
+        with patch.object(worker.time,'monotonic',side_effect=lambda:elapsed[0]), \
+             patch.object(worker,'_refresh_results',side_effect=slow_results), \
+             patch.object(models,'build_methods',side_effect=slow_forecast):
+            for expected_phase in ('forecasts','history','forecasts'):
+                elapsed[0] = 0
+                client = Client(self.future)
+                original = client.fixtures
+                def response(**params):
+                    if 'league' in params:
+                        events.append('history')
+                    return original(**params)
+                client.fixtures = response
+                reports.append(self.run_cycle(client,max_duration_seconds=240))
+                clients.append(client)
+                self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'],expected_phase)
+        self.assertEqual(events,['results','forecasts','history','results'])
+        self.assertEqual([report['status'] for report in reports],['paused']*3)
+        self.assertEqual([report['groups_considered'] for report in reports],[0,1,0])
+        self.assertEqual([report['history_imports'] for report in reports],[0,0,1])
+        self.assertEqual(clients[2].calls[:2],[dict(date='2025-03-20',timezone=worker.TIMEZONE),
+                                              dict(league='39',season=2024,timezone='UTC')])
+
+    def test_all_three_phases_complete_and_reset_results_priority(self):
+        self.config.update(history_enabled=True,history_seasons=[2024])
+        worker._write(self.root/'automation_state.json',dict(version=worker.VERSION,next_phase='forecasts'))
+        events = []
+        results = worker._refresh_results
+        history = worker._history
+        forecast = worker._forecast
+        def tracked(name, function):
+            def run(*args, **kwargs):
+                events.append(name)
+                return function(*args, **kwargs)
+            return run
+        with patch.object(worker,'_refresh_results',side_effect=tracked('results',results)), \
+             patch.object(worker,'_history',side_effect=tracked('history',history)), \
+             patch.object(worker,'_forecast',side_effect=tracked('forecasts',forecast)):
+            report = self.run_cycle()
+        self.assertEqual((report['status'],report['created'],report['history_imports']),('completed',3,1))
+        self.assertEqual(events,['forecasts','history','results'])
+        self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'],'results')
 
     def test_full_due_results_queue_uses_twenty_id_batches_without_forty_match_cap(self):
         rows = [raw_match(12000+i, stamp='2025-03-20T08:00:00Z', status='FT',
