@@ -58,6 +58,10 @@ def _remember_minimum(outcome):
     st.session_state['hp_thresholds'] = thresholds
 
 
+def _reset_match_page():
+    st.session_state['hp_page'] = 0
+
+
 def _is_future(fixture, now):
     try:
         stamp = _stamp(fixture['timestamp'])
@@ -382,11 +386,18 @@ def render_high_probabilities():
                 'Le seuil reste inchangé ; aucun match moins probable n’est ajouté automatiquement.')
     else:
         with st.container(horizontal=True):
-            per_page = st.selectbox('Matchs par page', [10, 25, 50], key='hp_page_size')
+            saved_size = st.session_state.get('hp_page_size', 10)
+            if type(saved_size) is not int or saved_size not in (10, 25, 50):
+                st.session_state['hp_page_size'] = 10
+            per_page = st.selectbox('Matchs par page', [10, 25, 50], key='hp_page_size',
+                                    on_change=_reset_match_page)
             pages = max(1, (len(visible) + per_page - 1) // per_page)
-            if st.session_state.get('hp_page', 0) >= pages:
-                st.session_state.pop('hp_page', None)
-            page = st.selectbox('Page des matchs', range(pages), format_func=lambda value: f'{value + 1} / {pages}',
+            saved_page = st.session_state.get('hp_page', 0)
+            if type(saved_page) is not int or not 0 <= saved_page < pages:
+                st.session_state['hp_page'] = 0
+            # Labels must stay stable when the page count changes: otherwise
+            # Streamlit can restore an old label as text instead of an index.
+            page = st.selectbox('Page des matchs', range(pages), format_func=lambda value: f'Page {value + 1}',
                                 key='hp_page')
         _show_table(visible[page * per_page:(page + 1) * per_page], key='hp_ranked_matches', offset=page * per_page)
         st.caption(f'{page * per_page + 1}–{min((page + 1) * per_page, len(visible))} sur {len(visible)} matchs.')

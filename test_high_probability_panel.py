@@ -114,6 +114,65 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.refresh.assert_not_called()
         self.readonly()
 
+    def test_changing_page_size_from_last_page_keeps_valid_match_ranges(self):
+        self.value['rows'] = [row(number, {'1st': .2, 'Égal': .25, '2nd': .55})
+                              for number in range(1, 64)]
+        at = self.open()
+        at.selectbox(key='hp_page').select(6).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.table(at)['Rang'].tolist(), [61, 62, 63])
+        for size in (50, 25, 10):
+            with self.subTest(size=size):
+                at.selectbox(key='hp_page_size').select(size).run()
+                self.assertFalse(at.exception)
+                self.assertEqual(at.selectbox(key='hp_page').value, 0)
+                self.assertEqual(self.table(at)['Rang'].tolist(), list(range(1, size + 1)))
+        at.selectbox(key='hp_page').select(6).run()
+        self.value['rows'] = self.value['rows'][:13]
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.selectbox(key='hp_page').value, 0)
+        at.selectbox(key='hp_page_size').select(50).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.table(at)['Rang'].tolist(), list(range(1, 14)))
+        self.prepare.assert_not_called()
+        self.record.assert_not_called()
+        self.refresh.assert_not_called()
+        self.readonly()
+
+    def test_stale_page_labels_and_invalid_saved_pages_recover_without_crashing(self):
+        at = AppTest.from_string(
+            "import streamlit as st\n"
+            "from high_probability_panel import render_high_probabilities\n"
+            "if 'restore_page' in st.session_state:\n"
+            "    st.session_state['hp_page'] = st.session_state.pop('restore_page')\n"
+            "render_high_probabilities()", default_timeout=20).run()
+        self.assertFalse(at.exception)
+        for value in ('1 / 10', '0', None, True, -1, 999):
+            with self.subTest(saved_page=value):
+                at.session_state['restore_page'] = value
+                at.run()
+                self.assertFalse(at.exception)
+                self.assertEqual(at.selectbox(key='hp_page').value, 0)
+                self.assertEqual(len(self.table(at)), 4)
+        self.prepare.assert_not_called()
+        self.record.assert_not_called()
+        self.refresh.assert_not_called()
+        self.readonly()
+
+    def test_invalid_saved_page_sizes_recover_before_pagination_arithmetic(self):
+        for value in ('50', None, True, 0, 100):
+            with self.subTest(saved_size=value):
+                at = AppTest.from_string(
+                    'from high_probability_panel import render_high_probabilities\n'
+                    'render_high_probabilities()', default_timeout=20)
+                at.session_state['hp_page_size'] = value
+                at.run()
+                self.assertFalse(at.exception)
+                self.assertEqual(at.selectbox(key='hp_page_size').value, 10)
+                self.assertEqual(len(self.table(at)), 4)
+        self.readonly()
+
     def test_threshold_outcome_and_search_never_add_under_threshold_fixtures(self):
         at = self.open()
         at.number_input(key='hp_minimum_1st').set_value(90).run()
