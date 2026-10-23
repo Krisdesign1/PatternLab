@@ -46,6 +46,8 @@ Les compétitions, saisons et limites d’accès dépendent du compte du fournis
 
 - **Analyser des matchs** : consulter toutes les compétitions de la journée,
   suivre les scores, puis choisir une compétition et classer ses scénarios.
+- **Fortes probabilités** : rechercher les plus hauts pourcentages par match,
+  toutes compétitions confondues, puis analyser et enregistrer un groupe choisi.
 - **Explorer les scénarios** : retrouver les suites observées, leurs matchs et
   les précédents d’un scénario commencé, uniquement à partir d’API-Football.
 - **Mes analyses du jour** : retrouver tous les groupes enregistrés aujourd’hui,
@@ -59,6 +61,109 @@ Les compétitions, saisons et limites d’accès dépendent du compte du fournis
 
 Il n’y a plus de choix de fournisseur, d’import de coupons manuels ou de
 navigation vers les anciens outils de données.
+
+## Fortes probabilités, toutes compétitions
+
+Cet onglet parcourt les rencontres confirmées **à venir aujourd’hui à Kinshasa**
+dans le calendrier API-Football local. Il calcule les trois probabilités
+**1st / Égal / 2nd** avec le même moteur **Clubs**, puis propose **trois classements
+indépendants**. Choisir `1st` classe tous les matchs selon leur probabilité `1st`,
+même lorsque `2nd` ou `Égal` est plus probable pour ces matchs. Le volume historique ne sert pas de
+score de classement ; aucun quota par compétition ni plafond de résultats
+n’est appliqué. La pagination permet de consulter toutes les lignes.
+
+Le seuil initial est **0 % pour chaque catégorie**, pour voir ses meilleurs
+pourcentages sans les masquer. Chaque seuil est réglable de 0 à 100 % et mémorisé
+séparément ; choisir 50 % conserve uniquement les matchs estimés à au moins
+50 % pour le résultat recherché. Un aperçu indique les meilleurs pourcentages
+et le nombre de matchs à au moins 50 % pour les trois catégories, avant les filtres.
+La recherche par club, pays ou compétition ne modifie pas les pourcentages. Aucun match inférieur au seuil n’est ajouté
+automatiquement si la liste est vide. Les pourcentages sont des estimations
+du modèle Clubs, pas des taux de réussite mesurés ni des probabilités calibrées
+par le comparatif historique.
+
+Les conditions minimales restent 30 résultats exploitables dans la compétition
+sur trois jours UTC et trois précédents pour chacun des clubs dans son rôle
+domicile ou extérieur. Les rencontres sans ces données sont indiquées parmi les
+exclusions. Les profils et tendances restent calculés dans leur compétition.
+L’historique s’arrête avant le premier jour UTC des rencontres à venir et avant
+le jour UTC actuel ; aucun score de la journée cible n’entre dans le calcul.
+
+**Analyser les premiers matchs** utilise les 2 à 20 premières rencontres selon
+les filtres choisis. La sélection manuelle permet de réunir d’autres rencontres
+du classement, y compris de compétitions différentes. Les matchs du groupe
+suivent l’ordre du coup d’envoi. Le **scénario recherché** reprend la catégorie
+choisie pour tous les matchs du groupe, avec sa probabilité complète : par exemple
+`1st → 1st`. Il reste visible même s’il ne figure pas dans les trois premiers
+choix du moteur, qui restent présentés séparément. Les scénarios conservent leurs probabilités
+complètes, sous l’hypothèse d’indépendance des matchs ; leur somme n’est pas
+ramenée à 100 %. Un seuil de 50 % par match ne signifie pas 50 % pour le groupe.
+
+L’ouverture et les filtres font des calculs locaux, sans appel API, entraînement
+ni écriture dans le journal. **Actualiser les matchs du jour** demande explicitement
+le calendrier à l’API. **Enregistrer avant match** vérifie toutes les affiches dans
+l’API, puis conserve les pourcentages affichés et les scénarios dans le journal
+immuable. Un groupe déjà enregistré réutilise sa première prévision et l’affiche
+sans la remplacer. **Voir le suivi de cette analyse** ouvre sa fiche ; les nouveaux
+groupes rejoignent **Analyses du jour**, puis son **Historique**, avec leurs scores,
+statuts en attente/réalisé et verdicts de réalisation des scénarios.
+Le scénario recherché possède son propre verdict dans la liste et la fiche,
+indépendamment de la réalisation des trois premiers choix. Seuls les résultats
+complets évalués permettent de conclure à sa réalisation.
+
+La préparation est invalidée si les filtres, les probabilités ou les affiches
+changent, à un coup d’envoi ou au changement de journée. Un simple nouveau
+calcul local inchangé ne supprime pas le groupe préparé.
+
+### Composer un scénario avec des résultats différents
+
+Dans **Composer mon scénario mixte**, sélectionne de 2 à 20 matchs parmi les
+rencontres évaluables du jour, puis choisis `1st`, `Égal` ou `2nd` pour chacun.
+Ce panier est indépendant des filtres du classement. Les rencontres sont
+remises dans leur ordre chronologique ; chaque résultat reste attaché à son
+identifiant de match. **Calculer mon scénario mixte** affiche la probabilité
+du scénario complet et, séparément, les trois premiers choix du moteur.
+
+Pour chaque résultat choisi, la **tendance du championnat** est la distribution
+de référence utilisée dans le calcul Clubs. L’écart en points vaut
+`100 × (probabilité choisie − tendance)`. Il décrit la différence apportée par
+les profils, pas un gain de précision démontré. Cette référence est conservée
+avec la prévision ; une ancienne prévision sans référence figée reste sans valeur
+dans cette colonne, plutôt que de recevoir des données actuelles.
+
+**Enregistrer avant match** conserve le scénario personnalisé dans
+`data/api_football/probability_scenarios.sqlite3`, lié à la première prévision
+immuable du groupe. Plusieurs choix différents peuvent partager cette prévision
+sans la remplacer ni devenir de nouvelles observations du modèle. Si le groupe
+existait déjà, les probabilités et références affichées après enregistrement
+proviennent de sa prévision d’origine. Chaque nouveau choix est confirmé dans
+l’API et doit être enregistré avant tous les coups d’envoi.
+
+Les scénarios personnalisés apparaissent dans **Analyses du jour → Historique**,
+avec leur séquence, leur propre état en attente/réalisé et leur verdict. Les
+corrections de résultats réévaluent ces verdicts à partir de la prévision d’origine.
+L’export des analyses conserve aussi le scénario lié lorsque cette information
+est présente.
+
+### Vérifier les pourcentages annoncés
+
+Le panneau **Les pourcentages annoncés se réalisent-ils ?** utilise uniquement
+les probabilités Clubs réellement enregistrées avant match. Il présente trois
+bilans distincts (`1st`, `Égal`, `2nd`) par tranches de dix points, avec la moyenne
+annoncée, la fréquence observée, les effectifs et les résultats en attente/exclus.
+Toutes les probabilités de la catégorie sont utilisées, même lorsqu’elle n’était
+pas le résultat favori du modèle.
+
+Chaque match compte une fois par version Clubs : sa première prévision valide
+avant son coup d’envoi. Les copies dans plusieurs groupes et les différents
+scénarios personnalisés ne multiplient pas les observations. La probabilité de
+cette première prévision reste retenue même si une prévision ultérieure a reçu
+son résultat plus tôt ; le panneau utilise son dernier rapprochement local.
+Les résultats partiels exploitables peuvent contribuer au bilan par match sans
+faire passer le groupe entier à l’état réalisé. Les valeurs sans résultats
+évalués restent vides. Ces statistiques sont descriptives, particulièrement
+fragiles avec de petits effectifs. Ouvrir le panneau ne fait aucun appel API,
+rapprochement, entraînement ni écriture dans le journal.
 
 ## Analyser les matchs
 
@@ -475,6 +580,82 @@ empreintes. Une exécution complète identique réutilise son rapport ; de nouve
 données ou un code différent créent une nouvelle exécution. Ouvrir la page lit
 uniquement le rapport et les évaluations existantes, sans API, calcul de prévisions,
 rapprochement des scores ou entraînement.
+
+## Comparatif de sélection
+
+Cette page mesure des règles de sélection avant leur éventuelle utilisation dans
+**Analyses du jour**. Elle affiche un rapport local figé ; son ouverture ne lance
+ni entraînement, ni import API, ni nouvelle prévision. Le classement de production
+et les prévisions déjà enregistrées ne sont pas modifiés par cette étude.
+
+Le protocole sépare quatre périodes, en journées de Kinshasa :
+
+| Période | Dates | Utilisation |
+| --- | --- | --- |
+| Apprentissage | 2022–2024 | Ajuster les poids CatBoost, fréquences et catalogues de contextes |
+| Calibration | Janvier–juin 2025 | Choisir la famille comparable et ajuster la confiance de réalisation du Top 3 |
+| Sélection | Juillet–décembre 2025 | Choisir la méthode et le seuil parmi une grille fixée |
+| Test historique réservé | 2026, jusqu’à la fin exclusive indiquée | Évaluer la règle déjà figée |
+
+Les paramètres de chaque famille sont fixés avant le calcul : CatBoost de
+profondeur 3 avec 150 arbres et régularisation 5, Combinaison d’exposant 0,5,
+Contextes avec 20 voisins et mélange 0,25 sans décroissance temporelle. Aucun
+modèle de production actuel n’est réutilisé. Les profils et caractéristiques
+peuvent incorporer les résultats des jours UTC strictement antérieurs à la cible.
+Les poids, fréquences de scénarios et catalogues restent ceux de l’apprentissage.
+La dernière journée UTC précédant la calibration est exclue de l’ajustement pour
+protéger les rencontres de début de journée locale.
+
+Les groupes d’une même compétition sont comparés sur les mêmes affiches, pour
+chaque taille de 2 à 20. La calibration doit comporter au moins 100 groupes
+complets communs, 20 journées, et 10 réalisations ainsi que 10 non-réalisations
+par méthode. La famille contient cinq méthodes si ces effectifs le permettent,
+sinon les trois méthodes statistiques ; cette décision précède le test. Les
+groupes entre compétitions constituent une comparaison distincte entre Clubs
+et une référence indépendante de fréquences par compétition.
+
+Deux types de seuils sont étudiés : la confiance calibrée que l’un des trois
+scénarios soit exactement réalisé, et le minimum des meilleures probabilités
+brutes de chacun des matchs. La calibration porte uniquement sur l’événement
+de réussite du Top 3 ; elle ne remplace ni les probabilités 1st/Égal/2nd, ni la
+distribution jointe des scénarios. Pour Répétitions, le seuil par match concerne
+ses distributions historiques par position, pas des profils individualisés des clubs.
+
+La période de sélection choisit une règle avec au moins 100 groupes complets,
+20 journées, 10 % de couverture et un écart moyen de calibration d’au plus
+10 points. Le critère est la borne basse descriptive de Wilson du taux Top 3.
+Ces seuils de protocole sont des conventions fixées pour cette expérience,
+pas des garanties de fiabilité. Si aucun candidat ne les respecte, le résultat
+est **Abstention**. Si le seuil choisi est nul, aucun bénéfice d’un filtrage de
+confiance n’a été établi dans cette sélection.
+
+Lancer explicitement le calcul depuis l’environnement Python du projet :
+
+```bash
+python scripts/evaluate_selection_policy.py
+# Fin de test historique explicite, exclue du calcul :
+python scripts/evaluate_selection_policy.py --end 2026-10-22
+```
+
+Le programme copie une seule fois les données locales et conserve le protocole,
+les empreintes des sources, les règles et le rapport sous
+`data/api_football/selection_study_runs/<identifiant>/`. Le fichier `rules.json`
+est créé avant l’évaluation du test. Une exécution identique réutilise son rapport
+vérifié ; elle ne réécrit pas ses fichiers figés.
+
+Le bilan distingue les effectifs, résultats manquants, couverture, journées sans
+proposition, probabilités brutes, confiance calibrée et réussites exactes. La
+référence est évaluée sur les mêmes groupes retenus ; la même méthode sans filtre
+porte sur une population différente. Les tailles ne sont jamais agrégées en un
+seul taux. Les groupes qui partagent des matchs ne sont pas indépendants : les
+intervalles de Wilson affichés restent descriptifs, sans correction des multiples
+règles et tailles explorées.
+
+**Tous ces historiques ont déjà été examinés dans le projet.** Le test est réservé
+à cette expérience, mais ne constitue pas une nouvelle preuve aveugle. Les
+calendriers sont reconstruits depuis leur état final et les scores manquants ne
+sont pas des échecs. Une confirmation indépendante demande de suivre ensuite
+une règle figée sur les futures prévisions enregistrées avant match.
 
 ## Mes analyses et évaluations
 

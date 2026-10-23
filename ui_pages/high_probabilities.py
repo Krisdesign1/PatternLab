@@ -1,0 +1,3 @@
+from high_probability_panel import render_high_probabilities
+
+render_high_probabilities()

@@ -13,8 +13,10 @@ if st.session_state.get('api_only_data_version') != '2026-10-18-v1':
 render_brand()
 page = st.navigation([
     st.Page("ui_pages/analyze.py", title="Analyser des matchs", icon=":material/calendar_month:", default=True),
+    st.Page("ui_pages/high_probabilities.py", title="Fortes probabilités", icon=":material/trending_up:"),
     st.Page("ui_pages/daily.py", title="Analyses du jour", icon=":material/stars:"),
     st.Page("ui_pages/daily_evaluation.py", title="Bilan de la sélection", icon=":material/fact_check:"),
+    st.Page("ui_pages/selection_study.py", title="Comparatif de sélection", icon=":material/science:"),
     st.Page("ui_pages/explore.py", title="Explorer les scénarios", icon=":material/schema:"),
     st.Page("ui_pages/journal.py", title="Mes analyses", icon=":material/history_edu:"),
     st.Page("ui_pages/automation.py", title="Automatisation", icon=":material/schedule:"),

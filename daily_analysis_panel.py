@@ -11,6 +11,7 @@ import daily_analysis_worker as worker
 import journal_performance as performance
 import journal_tracking as tracking
 import prediction_journal as journal
+import probability_scenario_store as intent_store
 import scenario_presentation as presentation
 import scenario_tables as tables
 from journal_browser import _markdown
@@ -39,25 +40,79 @@ def _detail(row, clock_day):
         st.rerun()
     st.subheader(f"Analyse de {entry['size']} matchs", icon=':material/schema:')
     st.badge(row['status_label'], color=COLORS[row['status']])
+    if row.get('searched_scenario'):
+        st.caption('Réalisation des trois premiers choix du moteur')
     tables.render_outcome(row['scenario_outcome'], show_sequence=True)
     st.caption(_markdown(_names(row)))
     st.caption(f"Matchs du {row['day'].strftime('%d/%m/%Y')} · Enregistrée avant match le {entry['created_at']} · "
                f"Référence {entry['id'][:8]}")
+    if row.get('scenario_intent'):
+        st.caption(f"Scénario choisi le {row['selection_created_at']} · Référence {row['scenario_intent']['id'][:8]}")
     st.markdown('**Pourquoi cette analyse a été retenue**')
-    if row['support'] is not None:
-        st.metric('Appui des données à la sélection', f"{row['support']:.1f} / 100".replace('.', ','))
-    st.caption('Cet indice décrit la couverture historique des rencontres. Il ne mesure pas un taux de réussite. '
-               'Le classement utilise les informations conservées avant match, indépendamment des cotes et des résultats.')
     selection = row['selection']
+    probability_search = selection.get('policy') in data.PROBABILITY_POLICIES
+    if probability_search:
+        st.badge('Fortes probabilités · Modèle Clubs', color='blue', icon=':material/trending_up:')
+        st.caption('Le groupe provient du classement par probabilité, toutes compétitions confondues. '
+                   'Les pourcentages ci-dessous sont ceux conservés avant match.')
+        saved_rows = {str(item.get('match_id')): item for item in selection.get('match_probabilities', [])}
+        probabilities = []
+        for index, fixture in enumerate(entry['fixtures'], 1):
+            saved = saved_rows.get(fixture['match_id'], {})
+            values = saved.get('probabilities') or {}
+            chosen = saved.get('search_outcome')
+            baseline = saved.get('baseline') or {}
+            chance = values.get(chosen)
+            tendency = baseline.get(chosen)
+            probabilities.append({'Ordre': index, 'Domicile': fixture['home'], 'Extérieur': fixture['away'],
+                'Résultat choisi': [chosen] if chosen in ('1st', 'Égal', '2nd') else [],
+                'Probabilité choisie (%)': 100*chance if isinstance(chance, (int, float)) else None,
+                'Tendance du championnat (%)': 100*tendency if isinstance(tendency, (int, float)) else None,
+                'Écart (points)': 100*(chance-tendency) if isinstance(chance, (int, float)) and isinstance(tendency, (int, float)) else None,
+                **{value: 100 * values[value] if isinstance(values.get(value), (int, float)) else None
+                   for value in ('1st', 'Égal', '2nd')}})
+        st.dataframe(probabilities, hide_index=True, width='stretch',
+                     column_config={**{value: st.column_config.NumberColumn(f'{value} (%)', format='%.2f')
+                                       for value in ('1st', 'Égal', '2nd')},
+                                    'Probabilité choisie (%)': st.column_config.NumberColumn(format='%.2f'),
+                                    'Tendance du championnat (%)': st.column_config.NumberColumn(format='%.2f'),
+                                    'Écart (points)': st.column_config.NumberColumn(format='%+.2f'),
+                                    'Résultat choisi': st.column_config.MultiselectColumn(
+                                        options=['1st', 'Égal', '2nd'], color=['#1D4ED8', '#6D48B5', '#B45309'])})
+        st.caption('L’écart décrit la différence avec la tendance figée du championnat ; il ne mesure pas un gain de réussite.')
+        searched = row.get('searched_scenario')
+        if searched:
+            st.markdown('**Scénario recherché lors de la sélection**')
+            if searched['sequence']:
+                tables.render_sequence(searched['sequence'])
+                st.metric('Probabilité du scénario recherché avant match',
+                          f"{100 * searched['probability']:.2f} %".replace('.', ','))
+            st.badge(searched['label'], color={'hit': 'green', 'miss': 'red', 'pending': 'blue',
+                                               'void': 'gray'}.get(searched['state'], 'orange'))
+            st.caption('Le scénario recherché reste distinct des trois premiers choix du moteur.')
+    else:
+        if row['support'] is not None:
+            st.metric('Appui des données à la sélection', f"{row['support']:.1f} / 100".replace('.', ','))
+        st.caption('Cet indice décrit la couverture historique des rencontres. Il ne mesure pas un taux de réussite. '
+                   'Le classement utilise les informations conservées avant match, indépendamment des cotes et des résultats.')
     if selection.get('explanation') or selection.get('reason'):
         st.markdown(_markdown(selection.get('explanation') or selection['reason']))
-    with st.expander('Appui historique conservé pour la sélection'):
+    with st.expander('Critères conservés pour la sélection' if probability_search else 'Appui historique conservé pour la sélection'):
+        if probability_search:
+            search = selection.get('search') or {}
+            if search.get('minimum') is not None:
+                st.caption(f"Seuil choisi par match : {100 * search['minimum']:.0f} %.")
+            outcome = selection.get('searched_outcome')
+            st.caption('Un résultat choisi pour chaque match du scénario mixte.' if search.get('outcome') == 'mixed' else
+                       f'Classement selon la probabilité Clubs de « {outcome} » pour chaque match.' if outcome else
+                       'Classement selon la plus haute probabilité Clubs de chaque match, sans tri par volume historique.')
         support = selection.get('support') or {}
-        st.dataframe([{'Indicateur': label, 'Minimum dans le groupe': support.get(key, '—')}
-                      for key, label in [('history_matches_min', 'Résultats par compétition'),
-                                         ('history_days_min', 'Jours historiques UTC'),
-                                         ('club_role_matches_min', 'Précédents dans le rôle de chaque club')]],
-                     hide_index=True, width='stretch')
+        if not probability_search:
+            st.dataframe([{'Indicateur': label, 'Minimum dans le groupe': support.get(key, '—')}
+                          for key, label in [('history_matches_min', 'Résultats par compétition'),
+                                             ('history_days_min', 'Jours historiques UTC'),
+                                             ('club_role_matches_min', 'Précédents dans le rôle de chaque club')]],
+                         hide_index=True, width='stretch')
         st.caption(f"Coupure historique conservée : {selection.get('before', 'non conservée')}")
     st.caption('Les scénarios combinent les modèles propres aux compétitions, sous une hypothèse d’indépendance entre elles.')
     observed = {item['match_id']: item for item in entry.get('observed', [])}
@@ -124,7 +179,7 @@ def render_daily():
         entries = journal.list_entries()
         selections = worker.load_selections(api.DATA_DIR)
         status = worker.load_status(api.DATA_DIR)
-        rows = data.project(entries, selections)
+        rows = data.project(entries, selections, intent_store.list_intents())
     except (journal.JournalError, api.ApiFootballError, ValueError, OSError) as error:
         st.error(str(error))
         return
@@ -169,7 +224,7 @@ def render_daily():
             if key in ('daily_selected', 'daily_preferences') or key.startswith(('daily_matrix_', 'daily_page_', 'daily_state', 'daily_verdict', 'daily_search')):
                 st.session_state.pop(key, None)
     selected_rows = data.on_day(rows, day, today=today)
-    st.caption(f"Matchs du {day.strftime('%d/%m/%Y')} · L’ordre repose sur l’appui des données figé lors de la sélection.")
+    st.caption(f"Matchs du {day.strftime('%d/%m/%Y')} · Les critères propres à chaque analyse sont conservés avant match.")
     st.caption('« Réalisé » signifie que les matchs ont été évalués. La réussite des scénarios est indiquée séparément dès la liste, puis dans la fiche.')
     stats = st.columns(3)
     for column, label, value in zip(stats, ('Analyses sélectionnées', 'En attente', 'Réalisées'),
@@ -225,16 +280,29 @@ def render_daily():
                     with left:
                         st.markdown(f"**{entry['size']} matchs · {_markdown(_names(row))}**")
                         st.badge(row['status_label'], color=COLORS[row['status']])
+                        if row.get('searched_scenario'):
+                            st.caption('Réalisation des trois premiers choix du moteur')
                         tables.render_outcome(row['scenario_outcome'])
                         st.caption(f"{len(entry['methods'])} méthode(s) · {scenarios_label} · "
                                    f"{performance.observed_count(entry)}/{entry['size']} résultats connus")
                         st.caption(' · '.join(_markdown(f"{fixture['home']} — {fixture['away']}") for fixture in entry['fixtures'][:2]) +
                                    (f" · +{entry['size']-2} matchs" if entry['size'] > 2 else ''))
-                        st.caption('Appui des données avant match : ' + (f"{row['support']:.1f}/100".replace('.', ',') if row['support'] is not None else 'non conservé'))
+                        if row['selection'].get('policy') in data.PROBABILITY_POLICIES:
+                            st.badge('Fortes probabilités', color='blue', icon=':material/trending_up:')
+                            searched = row.get('searched_scenario')
+                            if searched:
+                                if searched.get('sequence'):
+                                    tables.render_sequence(searched['sequence'], label='Scénario recherché')
+                                st.badge(searched['label'], color={'hit': 'green', 'miss': 'red',
+                                    'pending': 'blue', 'void': 'gray'}.get(searched['state'], 'orange'))
+                        else:
+                            st.caption('Appui des données avant match : ' + (f"{row['support']:.1f}/100".replace('.', ',') if row['support'] is not None else 'non conservé'))
                     with right:
                         if st.button('Voir l’analyse', icon=':material/arrow_forward:', key=f'daily_open_{row["id"]}', width='stretch'):
                             st.session_state['daily_selected'] = row['id']
                             st.rerun()
             st.caption(f'{len(filtered)} analyse(s) disponible(s) · Aucun plafond de sélection ; affichage par pages de 10.')
-    st.download_button('Exporter les analyses sélectionnées', json.dumps([row['entry'] for row in rows], ensure_ascii=False, indent=2),
+    st.download_button('Exporter les analyses sélectionnées', json.dumps([
+        dict(row['entry'], scenario_intent=row['scenario_intent']) if row.get('scenario_intent') else row['entry']
+        for row in rows], ensure_ascii=False, indent=2),
                        file_name='patternlab_analyses_du_jour.json', mime='application/json', key='daily_export')

@@ -1,0 +1,3 @@
+from daily_selection_study_panel import render_selection_study
+
+render_selection_study()

@@ -1,5 +1,7 @@
 import copy
 from datetime import date, datetime, timezone
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -62,12 +64,14 @@ class DailyDataTests(unittest.TestCase):
 class DailyPanelTests(unittest.TestCase):
     def setUp(self):
         self.entries=[]
+        self.intents=[]
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.patch(panel,'_now',return_value=NOW)
         self.patch(journal,'list_entries',side_effect=lambda *args:self.entries)
         self.patch(panel.tracking,'reconcile_local',return_value={})
         self.patch(panel.worker,'load_selections',return_value=[])
         self.patch(panel.worker,'load_status',return_value={})
+        self.patch(panel.intent_store,'list_intents',side_effect=lambda:self.intents)
         self.prepare=self.patch(panel.worker,'run_now',return_value=dict(day='2026-10-21',created=2,remaining=3,status='completed'))
         self.refresh=self.patch(panel.tracking,'refresh_entry',return_value={})
         self.network=self.patch(api.ApiFootballClient,'get',side_effect=AssertionError('No automatic API calls'))
@@ -99,6 +103,66 @@ class DailyPanelTests(unittest.TestCase):
         at.button(key='daily_back').click().run()
         self.assertFalse(at.exception)
         self.assertEqual(len([button for button in at.button if button.label=='Voir l’analyse']),2)
+
+    def test_probability_search_group_keeps_its_saved_percentages_in_history(self):
+        saved = entry('probabilities')
+        selection = dict(policy='high-probability-v1', reason='Classement par probabilité.', before='2026-10-21',
+                         search={'minimum': .5}, match_probabilities=[
+                             dict(match_id=fixture['match_id'], probabilities={'1st': .6, 'Égal': .1, '2nd': .3})
+                             for fixture in saved['fixtures']])
+        saved['metadata'].update(daily_policy='high-probability-v1', selection=selection)
+        self.entries = [saved]
+        at = self.open()
+        at.button(key='daily_open_probabilities').click().run()
+        self.assertFalse(at.exception)
+        probabilities = next(frame.value for frame in at.dataframe if '1st' in frame.value.columns)
+        self.assertEqual(probabilities['1st'].tolist(), [60.0]*3)
+        self.assertFalse(any(metric.label == 'Appui des données à la sélection' for metric in at.metric))
+        self.assertTrue(any('pourcentages ci-dessous sont ceux conservés avant match' in item.value for item in at.caption))
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
+    def test_requested_scenario_has_its_own_verdict_even_when_outside_the_top_three(self):
+        saved = entry('searched', status='settled')
+        saved['methods']['clubs'] = independent([{'1st': .2, 'Égal': .1, '2nd': .7}]*3)
+        saved['actual'] = ['1st']*3
+        saved['metadata'].update(daily_policy='high-probability-v2', selection=dict(
+            policy='high-probability-v2', searched_outcome='1st', search={'outcome': '1st', 'minimum': 0},
+            requested_scenario={'sequence': ['1st']*3, 'probability': .2**3}))
+        self.entries = [saved]
+        at = self.open()
+        self.assertTrue(any('Scénario recherché réalisé' in node.value for node in at.markdown))
+        self.assertTrue(any('Aucun scénario proposé réalisé' in item.value for item in at.markdown))
+        at.button(key='daily_open_searched').click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(next(metric.value for metric in at.metric
+                              if metric.label == 'Probabilité du scénario recherché avant match'), '0,80 %')
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
+    def test_two_custom_scenarios_share_one_forecast_and_have_their_own_detail_and_verdict(self):
+        saved = entry('choices')
+        for fixture in saved['fixtures']:
+            fixture['league'] = '39'
+        saved['id'] = journal._group_key(saved['fixtures'])
+        saved['methods']['clubs'].update(source='API-Football', league='39', training_before='2026-10-21')
+        with tempfile.TemporaryDirectory() as folder:
+            for sequence in (['1st', 'Égal', '2nd'], ['2nd', '1st', 'Égal']):
+                self.intents.append(panel.intent_store.record(saved, {'requested_scenario': {'sequence': sequence}},
+                    path=Path(folder)/'scenarios.sqlite3', clock=lambda: NOW))
+        self.entries = [saved]
+        at = self.open()
+        self.assertEqual(len([button for button in at.button if button.label == 'Voir l’analyse']), 2)
+        at.button(key='daily_open_intent:'+self.intents[1]['id']).click().run()
+        self.assertFalse(at.exception)
+        table = next(frame.value for frame in at.dataframe if 'Résultat choisi' in frame.value.columns)
+        self.assertEqual([list(value) for value in table['Résultat choisi']], [['2nd'], ['1st'], ['Égal']])
+        self.assertTrue(table['Tendance du championnat (%)'].isna().all())
+        saved['status'] = 'settled'
+        saved['actual'] = ['2nd', '1st', 'Égal']
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertTrue(any('Scénario recherché réalisé' in node.value for node in at.markdown))
+        self.assertEqual(len(self.entries), 1)
+        self.network.assert_not_called()
 
     def test_history_is_read_only_and_realized_means_evaluated_not_a_success_claim(self):
         self.entries=[entry('past',day='2026-10-20',status='settled'),entry('today'),entry('future',day='2026-10-22')]
