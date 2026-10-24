@@ -256,12 +256,29 @@ def render_daily():
             verdict = st.selectbox('Réalisation des scénarios', list(tables.OUTCOME_FILTERS),
                                     format_func=tables.OUTCOME_FILTERS.get, key='daily_verdict', persist_state='page')
             search = st.text_input('Rechercher un club ou une compétition', key='daily_search', persist_state='page')
-        st.session_state['daily_preferences'] = dict(daily_state=state, daily_verdict=verdict, daily_search=search)
         needle = search.casefold().strip()
         filtered = [row for row in selected_rows if (state is None or row['status'] == state) and
                     (verdict == 'all' or row['scenario_outcome']['state'] == verdict) and
                     (not needle or needle in (' '.join(f"{fixture['home']} {fixture['away']}" for fixture in row['entry']['fixtures'])
                                               + ' ' + _names(row)).casefold())]
+        size_key, page_key = 'daily_list_page_size', 'daily_page_index'
+        if size_key in st.session_state and (type(st.session_state[size_key]) is not int or
+                                             st.session_state[size_key] not in (10,20,50)):
+            st.session_state.pop(size_key)
+        with st.container(horizontal=True):
+            per_page = st.selectbox('Analyses par page',[10,20,50],index=2,key=size_key,persist_state='session')
+            list_context = (day.isoformat(),state,verdict,needle,per_page)
+            if st.session_state.get('daily_list_context') != list_context:
+                st.session_state['daily_list_context'] = list_context
+                st.session_state.pop(page_key,None)
+            pages = max(1,(len(filtered)+per_page-1)//per_page)
+            saved_page = st.session_state.get(page_key)
+            if saved_page is not None and (type(saved_page) is not int or not 0 <= saved_page < pages):
+                st.session_state.pop(page_key,None)
+            page = (st.selectbox('Page des analyses',range(pages),format_func=lambda value:f'Page {value+1}',
+                                 key=page_key,persist_state='page') if pages>1 else 0)
+        st.session_state['daily_preferences'] = dict(daily_state=state,daily_verdict=verdict,daily_search=search,
+                                                     **{size_key:per_page,page_key:page})
         if not filtered:
             if selected_rows:
                 st.info('Aucune analyse ne correspond à ces filtres.')
@@ -271,11 +288,7 @@ def render_daily():
             else:
                 st.info('Aucune analyse enregistrée pour cette journée. La préparation nécessite des rencontres à venir et des profils historiques suffisants.')
         else:
-            pages = (len(filtered) + 9) // 10
-            page_key = f'daily_page_{day.isoformat()}_{state}_{verdict}_{search}'
-            page = (st.selectbox('Page des analyses', range(pages), format_func=lambda value: f'{value+1} / {pages}', key=page_key)
-                    if pages > 1 else 0)
-            for row in filtered[page*10:(page+1)*10]:
+            for row in filtered[page*per_page:(page+1)*per_page]:
                 entry = row['entry']
                 try:
                     count = len({tuple(item['sequence']) for method in entry['methods'].values() for item in method['ranking']})
@@ -308,7 +321,8 @@ def render_daily():
                         if st.button('Voir l’analyse', icon=':material/arrow_forward:', key=f'daily_open_{row["id"]}', width='stretch'):
                             st.session_state['daily_selected'] = row['id']
                             st.rerun()
-            st.caption(f'{len(filtered)} analyse(s) disponible(s) · Aucun plafond de sélection ; affichage par pages de 10.')
+            st.caption(f'{page*per_page+1}–{min((page+1)*per_page,len(filtered))} sur {len(filtered)} analyses · '
+                       f'Page {page+1}/{pages} · {per_page} par page · Aucun plafond de sélection.')
     st.download_button('Exporter les analyses sélectionnées', json.dumps([
         dict(row['entry'], scenario_intent=row['scenario_intent']) if row.get('scenario_intent') else row['entry']
         for row in rows], ensure_ascii=False, indent=2),

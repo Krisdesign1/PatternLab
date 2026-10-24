@@ -539,6 +539,13 @@ dans la [documentation sur l’évaluation temporelle](https://scikit-learn.org/
 
 ## Analyses du jour : groupes libres et suivi
 
+La liste propose **10, 20 ou 50 analyses par page**, avec **50 par défaut**.
+Ce choix reste conservé au retour d’une fiche et ne change ni les analyses
+sélectionnées, ni leurs scénarios, ni l’export complet. Le compteur indique les
+lignes affichées et le total ; les filtres ou un changement de taille ramènent
+à la première page lorsque nécessaire. Avec 85 analyses et une taille de 50,
+les deux pages contiennent 50 puis 35 analyses.
+
 La page **Analyses du jour** sélectionne plusieurs groupes, pouvant réunir des
 rencontres de compétitions différentes. Toutes les tailles de **2 à 20 matchs**
 sont explorées lorsque le nombre de rencontres le permet. Il n’y a pas de quota

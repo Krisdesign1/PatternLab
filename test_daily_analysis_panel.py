@@ -106,6 +106,72 @@ class DailyPanelTests(unittest.TestCase):
         self.assertFalse(at.exception)
         self.assertEqual(len([button for button in at.button if button.label=='Voir l’analyse']),2)
 
+    def test_eighty_five_analyses_have_two_pages_by_default_and_all_remain_accessible(self):
+        self.entries=[entry(f'analysis_{i:03}',support=90-i) for i in range(85)]
+        original=copy.deepcopy(self.entries)
+        at=self.open()
+        visible=lambda:[button.key for button in at.button if button.label=='Voir l’analyse']
+        self.assertEqual(at.selectbox(key='daily_list_page_size').value,50)
+        first=visible()
+        self.assertEqual(len(first),50)
+        self.assertTrue(any('1–50 sur 85 analyses' in item.value for item in at.caption))
+        at.selectbox(key='daily_page_index').set_value(1).run()
+        self.assertFalse(at.exception)
+        last=visible()
+        self.assertEqual(len(last),35)
+        self.assertEqual(len(set(first+last)),85)
+        at.selectbox(key='daily_list_page_size').set_value(10).run()
+        self.assertEqual(at.selectbox(key='daily_page_index').value,0)
+        at.selectbox(key='daily_page_index').set_value(8).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(len(visible()),5)
+        self.assertTrue(any('81–85 sur 85 analyses' in item.value for item in at.caption))
+        self.assertEqual(self.entries,original)
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
+    def test_page_size_and_page_survive_detail_and_filter_shrink_returns_to_first_page(self):
+        self.entries=[entry(f'analysis_{i:03}',support=90-i) for i in range(25)]
+        at=self.open()
+        at.selectbox(key='daily_list_page_size').set_value(10).run()
+        at.selectbox(key='daily_page_index').set_value(2).run()
+        chosen=next(button.key for button in at.button if button.label=='Voir l’analyse')
+        at.button(key=chosen).click().run()
+        at.button(key='daily_back').click().run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.selectbox(key='daily_list_page_size').value,10)
+        self.assertEqual(at.selectbox(key='daily_page_index').value,2)
+        self.entries=self.entries[:12]
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.selectbox(key='daily_page_index').value,0)
+        self.assertEqual(len([button for button in at.button if button.label=='Voir l’analyse']),10)
+        at.text_input(key='daily_search').set_value('club introuvable').run()
+        self.assertFalse(at.exception)
+        self.assertFalse(any(button.label=='Voir l’analyse' for button in at.button))
+        self.assertEqual(at.selectbox(key='daily_list_page_size').value,10)
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
+    def test_invalid_pagination_state_is_reset_without_string_integer_error(self):
+        self.entries=[entry(f'analysis_{i:03}',support=90-i) for i in range(21)]
+        for bad in ('1 / 9',True,999):
+            # Seed before creating the daily widgets: AppTest itself cannot
+            # serialize an invalid value in an already rendered selectbox.
+            at=AppTest.from_file('app.py',default_timeout=20).run()
+            saved=dict(daily_context=('2026-10-21','today','2026-10-21'),
+                daily_list_context=('2026-10-21',None,'all','',10),
+                daily_list_page_size=10,daily_page_index=bad)
+            for key,value in saved.items():
+                at.session_state[key]=value
+            at.switch_page('ui_pages/daily.py').run()
+            self.assertFalse(at.exception)
+            self.assertEqual(at.selectbox(key='daily_page_index').value,0)
+        at=AppTest.from_file('app.py',default_timeout=20).run()
+        at.session_state['daily_list_page_size']='10'
+        at.switch_page('ui_pages/daily.py').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.selectbox(key='daily_list_page_size').value,50)
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
     def test_probability_search_group_keeps_its_saved_percentages_in_history(self):
         saved = entry('probabilities')
         selection = dict(policy='high-probability-v1', reason='Classement par probabilité.', before='2026-10-21',
