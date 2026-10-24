@@ -43,7 +43,22 @@ def _cached_scan(path, modified, size, period_start):
     # calendar period, unchanged data yield exactly the same probabilities.
     # Include all NS targets from the period's start, then expire their
     # kickoffs on every read instead of rescanning the history every minute.
-    report = engine.scan(api.load_fixtures(Path(path)), now=datetime.fromisoformat(period_start))
+    path = Path(path)
+    current = datetime.fromisoformat(period_start)
+    if api.active_store(path) is not None:
+        day = current.astimezone(ZONE).date()
+        raw = calendar.local_day_matches(day, ZONE.key, path=path)
+        leagues = set()
+        for item in raw:
+            try:
+                leagues.add(calendar.fixture_from_raw(item)['league'])
+            except ValueError:
+                continue
+        history, audit = api.load_matches(path, leagues=leagues,
+            end=current.date().isoformat(), statuses=api.FINISHED_STATUSES)
+        report = engine.scan(raw, now=current, history=history, history_issues=audit['issues'])
+    else:
+        report = engine.scan(api.load_fixtures(path), now=current)
     report['generated_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
     return report
 
@@ -52,12 +67,11 @@ def load_scan(root=None, now=None):
     """Read locally; reuse probabilities until the file or either day changes."""
     current = _now(now)
     path = _root(root) / 'fixtures.json'
-    stat = path.stat() if path.exists() else None
     local_day = current.astimezone(ZONE).date()
     period_start = max(datetime.combine(local_day, time.min, ZONE).astimezone(timezone.utc),
                        datetime.combine(current.date(), time.min, timezone.utc)).isoformat()
-    report = deepcopy(_cached_scan(str(path), stat.st_mtime_ns if stat else 0,
-                                  stat.st_size if stat else 0, period_start))
+    _, revision, identity = api.data_signature(path)
+    report = deepcopy(_cached_scan(str(path), revision, identity, period_start))
     # A cached period must never keep a match whose kickoff has just passed.
     kept, expired = [], []
     for row in report['rows']:

@@ -95,6 +95,28 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(second['requests'], 1)
         self.assertEqual(len(journal.list_entries(self.root/'predictions.sqlite3')), 3)
 
+    def test_health_ledger_retains_each_attempt_without_extra_api_requests(self):
+        import automation_health as health
+        client = Client(self.future)
+        first = worker.run_cycle(root=self.root, config=self.config, client=client, now=BEFORE, origin='service')
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(len(client.calls), first['requests'])
+        observed = health.load(self.root, now=BEFORE+timedelta(seconds=1))
+        self.assertEqual(len(observed['rows']), 1)
+        self.assertEqual(observed['rows'][0]['counters']['requests'], first['requests'])
+        self.assertEqual(observed['rows'][0]['origin'], 'service')
+        self.assertGreaterEqual(observed['rows'][0]['duration_seconds'], 0)
+        handle = (self.root/'automation.lock').open('a')
+        self.addCleanup(handle.close)
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        busy_client = Client(self.future)
+        busy = worker.run_cycle(root=self.root, config=self.config, client=busy_client,
+                                now=BEFORE+timedelta(minutes=15), origin='service')
+        self.assertEqual(busy['status'], 'busy')
+        self.assertEqual(busy_client.calls, [])
+        observed = health.load(self.root, now=BEFORE+timedelta(minutes=16))
+        self.assertEqual([row['status'] for row in observed['rows']], ['busy', 'completed'])
+
     def test_today_only_calendar_and_cached_tomorrow_are_excluded_without_erasing_them(self):
         tomorrow=[raw_match(10000+i,stamp='2025-03-21T12:00:00Z',league=777,season=2025) for i in range(2)]
         api.save_fixtures(tomorrow,self.root/'fixtures.json')

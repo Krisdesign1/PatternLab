@@ -82,8 +82,12 @@ def _snapshot(path):
     # One read, one parsed snapshot. A concurrent atomic provider-store update
     # cannot combine two generations of input or alter this audit's copy.
     try:
-        content = path.read_bytes()
-        value = json.loads(content)
+        if api.active_store(path) is not None:
+            value = api.export_store(path)
+            content = _json(value).encode('utf-8')
+        else:
+            content = path.read_bytes()
+            value = json.loads(content)
         if not isinstance(value, dict) or value.get('version') != 1 or not isinstance(value.get('fixtures'), list):
             raise ValueError()
         seen = set()
@@ -94,7 +98,7 @@ def _snapshot(path):
             seen.add(mid)
         _json(value)  # Reject NaN/Infinity as well as unreadable envelopes.
         return value, sha256(content).hexdigest()
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, api.ApiFootballError):
         raise EvaluationStoreError('Le fichier local des matchs API-Football est absent ou invalide.') from None
 
 

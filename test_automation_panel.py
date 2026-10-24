@@ -126,7 +126,7 @@ class AutomationPanelTests(unittest.TestCase):
         self.runner.assert_not_called()
         at.button(key='automation_run').click().run()
         self.assertFalse(at.exception)
-        self.runner.assert_called_once_with(config=self.config)
+        self.runner.assert_called_once_with(config=self.config, origin='manual')
         jobs = next(item.value for item in at.dataframe if 'Méthodes figées' in item.value.columns)
         self.assertEqual(list(jobs['Compétition']), ['Petite division'])
         self.assertEqual(list(jobs['État']), ['En attente'])

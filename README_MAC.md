@@ -58,6 +58,35 @@ pas les nouvelles analyses locales au site. Sauvegarder régulièrement le
 dossier `data/` ; les copies privées placées dans `.local_backups/` restent
 exclues de Git. Voir aussi [ADMINISTRATION.md](ADMINISTRATION.md).
 
+### Stockage local indexé
+
+Après migration explicite, `data/api_football/fixtures.sqlite3` est la référence
+du calendrier, des scores et des imports de saisons. Les pages lisent les matchs
+de la journée ou les résultats nécessaires, sans reparcourir tout le JSON. Les
+importations utilisent des transactions SQLite ; les lecteurs restent disponibles
+pendant les écritures. Les prévisions restent dans leur journal séparé.
+
+```bash
+# Consulter l’état sans migration ni appel API
+.venv/bin/python scripts/migrate_local_fixtures.py
+# Valider puis activer SQLite, une seule fois ; réexécution sans effet
+.venv/bin/python scripts/migrate_local_fixtures.py --activate
+# Exporter la version courante (destination nouvelle obligatoire)
+.venv/bin/python scripts/migrate_local_fixtures.py --export /tmp/patternlab_export.json
+```
+
+Le fichier `fixtures.json` d’origine est conservé. Après activation, les nouvelles
+collectes et corrections sont enregistrées dans SQLite : cet ancien JSON n’est
+donc plus une sauvegarde à jour. Le bouton de sauvegarde dans **Pilotage → Données
+et sauvegardes** exporte la base courante uniquement au clic.
+
+Pour sauvegarder tout le dossier `data/` par copie de fichiers, arrêter d’abord
+le service et l’application. Pendant une exécution, utiliser l’API SQLite
+`Connection.backup()` pour les bases, plutôt qu’une copie du seul fichier
+`.sqlite3` qui pourrait ignorer des écritures du journal WAL. Ne jamais revenir
+à l’ancien JSON seul après de nouvelles importations SQLite : conserver la base
+courante et exporter les données récentes avant toute restauration.
+
 ## Connexion API-Football
 
 Dans `.streamlit/secrets.toml` :
@@ -73,20 +102,19 @@ Les compétitions, saisons et limites d’accès dépendent du compte du fournis
 
 ## Les pages de l’application
 
-- **Analyser des matchs** : consulter toutes les compétitions de la journée,
-  suivre les scores, puis choisir une compétition et classer ses scénarios.
-- **Fortes probabilités** : rechercher les plus hauts pourcentages par match,
-  toutes compétitions confondues, puis analyser et enregistrer un groupe choisi.
+- **Aujourd’hui** : choisir ses matchs, rechercher les fortes probabilités ou
+  consulter les analyses proposées. Les trois vues se choisissent en haut de page.
+- **Mes analyses** : retrouver les groupes enregistrés, ouvrir leur fiche et
+  comparer leurs prévisions figées aux résultats observés.
+- **Bilan et preuves** : comparer les méthodes sur les mêmes prévisions réelles,
+  puis consulter le suivi prospectif ou les simulations historiques séparément.
 - **Explorer les scénarios** : retrouver les suites observées, leurs matchs et
   les précédents d’un scénario commencé, uniquement à partir d’API-Football.
-- **Mes analyses du jour** : retrouver tous les groupes enregistrés aujourd’hui,
-  ouvrir leur fiche et comparer leurs prévisions aux résultats observés.
-- **Automatisation** : distinguer les compétitions prêtes, les historiques à
-  compléter et les groupes à venir ; suivre les imports et les cycles planifiés.
-- **Modèles et validation** : entraîner CatBoost par compétition et consulter
-  les comparaisons chronologiques et les répétitions par contexte.
-- **Données et réglages** : vérifier la connexion API-Football, importer des
-  saisons et exporter les données de cette API.
+- **Pilotage** : données et sauvegardes, automatisation, modèles et validation.
+  Une seule de ces vues est exécutée à la fois.
+
+Les anciennes adresses des dix pages restent accessibles ; le menu principal
+regroupe désormais les fonctions en cinq rubriques.
 
 Il n’y a plus de choix de fournisseur, d’import de coupons manuels ou de
 navigation vers les anciens outils de données.
@@ -1002,6 +1030,17 @@ ouverte. Le service ne réveille pas le Mac et ne fonctionne pas lorsqu’il est
 l’agent. Un service chargé peut être en attente entre deux cycles ; son statut
 reste actif pendant cette attente.
 
+Dans **Pilotage → Automatisation**, le suivi des passages locaux conserve les
+durées, l’origine du lancement, les requêtes et les prévisions ajoutées, les
+pauses, les erreurs et les fins non confirmées. Il signale les écarts au rythme
+enregistré. Son fichier privé local est
+`data/api_football/.automation_health.sqlite3` ; il n’est pas publié au Cloud.
+Les vues de 24 heures, 7 jours et 30 jours portent uniquement sur les cycles
+observés depuis l’activation de ce suivi. Les anciens rapports ne sont pas
+transformés en observations. La préparation séparée des modèles n’est pas incluse
+dans la durée du cycle de données. Ce journal n’est ni une mesure de disponibilité
+24 h/24, ni une preuve de précision prédictive.
+
 ## Données conservées et appels API
 
 Le relevé initial du 18 octobre 2026 contient 4 828 rencontres API-Football, dont
@@ -1012,7 +1051,9 @@ les nouveaux résultats reçus.
 
 | Données | Emplacement |
 | --- | --- |
-| Calendrier, scores et manifestes de saisons API-Football | `data/api_football/fixtures.json` |
+| Calendrier, scores et manifestes après migration locale | `data/api_football/fixtures.sqlite3` |
+| Ancienne source JSON conservée à la migration | `data/api_football/fixtures.json` |
+| Durées et états des cycles locaux observés | `data/api_football/.automation_health.sqlite3` |
 | Contrôles d’accès et d’import API-Football | `data/api_football/` |
 | Journal avant match et révisions des résultats | `data/api_football/predictions.sqlite3` |
 | Évaluations historiques par saison | `data/api_football/seasonal_validation_*.json` |
@@ -1072,16 +1113,25 @@ valeur de session. La configuration privée est décrite dans [ADMINISTRATION.md
 Les traitements autorisés en ligne de commande et GitHub Actions restent distincts
 des sessions web.
 
-Dans **Bilan de la sélection → Comparaison des modèles**, Répétitions, Clubs et
-CatBoost sont comparés sur les mêmes matchs déjà prévus avant leur coup d’envoi et
-après l’enregistrement du protocole prospectif. Une cohorte conserve une compétition,
+Dans **Bilan et preuves → Comparaison des modèles**, chaque méthode disponible
+(Clubs, Combinaison, CatBoost ou Contextes) est comparée séparément aux
+**Répétitions seules réellement sauvegardées** avec elle avant match. La référence
+représente les répétitions lissées des scénarios par position, pas une fréquence
+brute reconstruite après les résultats. La vue exige des enregistrements après
+la date du protocole et une provenance temporelle vérifiable.
+Une cohorte conserve une compétition,
 une taille et les mêmes versions et générations, y compris celles des composants
 d’un groupe mixte. Un match répété entre groupes compte une fois dans cette cohorte.
 Les méthodes absentes, les attentes et les résultats invalides sont explicités ;
 ils ne deviennent pas des échecs. Les marginales sont calculées à partir des
 distributions sauvegardées, sans nouvel entraînement ni reconstruction de prévision.
 Les résultats restent descriptifs : ils ne déclenchent aucune promotion de modèle
-et ne remplacent pas le protocole d’incertitude existant du journal.
+et ne remplacent pas le protocole initial Clubs / top 3 du journal, qui reste
+inchangé. Le Brier, l’erreur logarithmique et la calibration des trois catégories
+sont visibles. Les intervalles descriptifs regroupent les dépendances par semaines
+et matchs partagés ; ils attendent au moins 20 blocs clos complets et ne corrigent
+pas les comparaisons multiples. Ce minimum ne suffit pas à garantir la qualité
+du modèle. La vue stricte réunissant Répétitions, Clubs et CatBoost reste disponible.
 
 Le workflow **Vérifications PatternLab** lance les tests sur les propositions de
 modification et les envois vers `main`, avec une base PostgreSQL jetable et sans

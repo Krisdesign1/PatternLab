@@ -26,7 +26,7 @@ def scheduled_fixtures(source, league):
     """Read locally scheduled fixtures only; callers filter elapsed kickoff times."""
     _validate(source)
     rows = []
-    for raw in api_football.load_fixtures(api_football.STORE_PATH):
+    for raw in api_football.load_fixtures(api_football.STORE_PATH, leagues=[league], statuses=['NS']):
         try:
             event = raw['fixture']
             if event['status'].get('short') != 'NS':

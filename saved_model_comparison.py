@@ -6,7 +6,7 @@ competition / group-size / version cohort. The registered journal protocol
 continues to govern the separate group-level uncertainty analysis.
 """
 from collections import Counter, defaultdict
-from datetime import date
+from datetime import date, datetime, timezone
 import json
 from math import fsum, isclose, log, prod
 
@@ -14,10 +14,13 @@ from league_model import VALUES
 import journal_protocol
 import probability_reliability as saved
 import prospective_models as models
+import journal_uncertainty as uncertainty
 
 
 VERSION = 'saved-paired-match-comparison-v1'
 METHODS = ('frequency', 'clubs', 'catboost')
+PAIRED_VERSION = 'saved-frequency-pairs-v1'
+CHALLENGERS = ('clubs', 'combined', 'catboost', 'context_neighbors')
 
 
 def _marginals(model):
@@ -211,3 +214,202 @@ def build(entries, protocol):
         registered_at=protocol['registered_at'], entries_read=len(entries), cohorts=cohorts,
         duplicates_removed=len(candidates)-len(first), snapshot_exclusions=dict(excluded),
         interpretation='Descriptive common-match scores only; no automatic promotion or retraining.')
+
+
+def _gain(record, challenger):
+    """Positive values always favor the challenger; identical paired matches."""
+    actual = record['actual']
+    baseline, predicted = record['methods']['frequency'], record['methods'][challenger]
+    loss = lambda p: -log(max(p[actual], 1e-15))
+    brier = lambda p: fsum((p[label]-int(actual == label))**2 for label in VALUES)
+    return (loss(baseline)-loss(predicted), brier(baseline)-brier(predicted),
+            int(max(VALUES,key=predicted.get) == actual)-int(max(VALUES,key=baseline.get) == actual))
+
+
+def _paired_uncertainty(records, challenger, protocol, current):
+    """Conservative closed-week clusters; this is not a new registered test.
+
+    Keep dependency components from all original weeks and fixtures, including
+    pending observations, before choosing mature components. No per-match IID
+    interval, p-value, model promotion or pooling across cohorts is produced.
+    """
+    components = uncertainty._components(records)
+    blocks, immature = [], Counter()
+    current_week = uncertainty._week(current)
+    for component in components:
+        if any(week >= current_week for row in component for week in row['weeks']):
+            immature['open_week'] += len(component)
+        elif any(row['state'] != 'evaluated' for row in component):
+            immature['incomplete_block'] += len(component)
+        else:
+            gains = [_gain(row, challenger) for row in component]
+            blocks.append((len(gains), *(fsum(gain[i] for gain in gains) for i in range(3))))
+    count = sum(block[0] for block in blocks)
+    outputs = {name:dict(estimate=fsum(block[index] for block in blocks)/count if count else None,
+                        lower=None,upper=None)
+               for index,name in enumerate(('logloss','brier','accuracy'),1)}
+    status = 'insufficient'
+    reason = (f"{len(blocks)} bloc(s) clos sur le minimum opérationnel de {protocol['min_blocks']}. "
+              'Ce minimum ne garantit pas une puissance suffisante.')
+    if len(blocks) >= protocol['min_blocks']:
+        # Fixed protocol seed/coverage/draw count, shared draws for paired metrics.
+        import random
+        generator = random.Random(protocol['seed'])
+        draws = [[],[],[]]
+        for _ in range(protocol['bootstrap_samples']):
+            chosen = generator.choices(blocks,k=len(blocks))
+            n = sum(block[0] for block in chosen)
+            for index,values in enumerate(draws,1):
+                values.append(fsum(block[index] for block in chosen)/n)
+        tail = (1-protocol['confidence'])/2
+        for index,(name,values) in enumerate(zip(outputs,draws),1):
+            means = [block[index]/block[0] for block in blocks]
+            ordered = sorted(values)
+            lower,upper = uncertainty._percentile(ordered,tail),uncertainty._percentile(ordered,1-tail)
+            if (not isclose(min(means),max(means),abs_tol=1e-12,rel_tol=1e-12)
+                    and not isclose(lower,upper,abs_tol=1e-12,rel_tol=1e-12)):
+                outputs[name].update(lower=lower,upper=upper)
+        status = 'descriptive'
+        reason = ('Intervalles descriptifs par blocs hebdomadaires; dépendances résiduelles possibles. '
+                  'Consultations répétées et comparaisons multiples non corrigées; aucun avantage confirmé.')
+        if outputs['logloss']['lower'] is None or outputs['brier']['lower'] is None:
+            reason += ' Un indicateur sans variation ne permet pas d’estimer sa précision.'
+    return dict(status=status,reason=reason,blocks=len(blocks),matches=count,
+                confidence=protocol['confidence'],gains=outputs,excluded=dict(immature))
+
+
+def _pair_fixtures(entry, registered, current):
+    if not isinstance(entry,dict) or entry.get('source') != 'API-Football':
+        raise ValueError('Source invalide.')
+    created = saved._stamp(entry['created_at'])
+    if created < registered:
+        return None
+    if created > current or not isinstance(entry.get('id'),str) or not entry['id']:
+        raise ValueError('Enregistrement invalide ou futur.')
+    fixtures = []
+    for fixture in entry['fixtures']:
+        row = dict(fixture)
+        if row.get('provider') != 'api-football':
+            raise ValueError('Source du match invalide.')
+        for field in ('match_id','league','home_id','away_id'):
+            row[field] = saved._id(row.get(field))
+        if row['home_id'] == row['away_id'] or created >= saved._stamp(row['timestamp']):
+            raise ValueError('Prévision après le début du groupe.')
+        fixtures.append(row)
+    if entry.get('size') != len(fixtures) or len({row['match_id'] for row in fixtures}) != len(fixtures):
+        raise ValueError('Taille du groupe invalide.')
+    return created,fixtures
+
+
+def _pair_method(payload, fixtures, created):
+    _causal(payload,fixtures)
+    # A future historical cutoff cannot prove that only available days were used.
+    if payload['training_before'] > created.date().isoformat():
+        raise ValueError('Coupure non vérifiable à la date d’enregistrement.')
+    if payload.get('trained_through') is not None and date.fromisoformat(
+            payload['trained_through']) >= created.date():
+        raise ValueError('Fin d’apprentissage non antérieure au jour de prévision.')
+    identity, positions = _method_identity(payload), marginals(payload)
+    if len(positions) != len(fixtures):
+        raise ValueError('Marginales incomplètes.')
+    return identity,positions
+
+
+def _frequency_reference(payload):
+    distribution = payload['distribution']
+    if distribution['type'] == 'block_product':
+        return all(_frequency_reference(block['method']) for block in distribution['components'])
+    return distribution['type'] == 'frequency'
+
+
+def build_pairs(entries, protocol, *, now=None):
+    """Supplementary prospective pairs versus the saved no-club frequency method.
+
+    The registered protocol remains unchanged (Clubs baseline, joint logloss and
+    top3). Its registration date and cluster settings are reused transparently;
+    these additional per-match comparisons are descriptive, not preregistered
+    superiority tests. Missing methods never force another pair out of the study.
+    """
+    protocol = journal_protocol.validate_protocol(protocol)
+    current = now if now is not None else datetime.now(timezone.utc)
+    if not isinstance(current,datetime) or current.tzinfo is None:
+        raise ValueError('L’heure du bilan doit préciser son fuseau.')
+    current = current.astimezone(timezone.utc)
+    registered = saved._stamp(protocol['registered_at'])
+    entries,excluded,candidates = list(entries),Counter(),[]
+    for entry in entries:
+        try:
+            validated = _pair_fixtures(entry,registered,current)
+            if validated is None:
+                excluded['before_protocol'] += 1
+                continue
+            created,fixtures = validated
+            if len(fixtures) not in protocol['sizes']:
+                raise ValueError('Taille de groupe incompatible.')
+            payloads = entry.get('methods',{})
+            if not isinstance(payloads,dict) or 'frequency' not in payloads:
+                excluded['missing_frequency'] += 1
+                continue
+            baseline_identity,baseline = _pair_method(payloads['frequency'],fixtures,created)
+            if not _frequency_reference(payloads['frequency']):
+                raise ValueError('La référence ne contient pas les répétitions figées.')
+            # Dependencies are based on the entire original group, not only its
+            # retained match, so spanning groups cannot break a week bridge.
+            dependencies = uncertainty._metadata(entry,created)
+        except (ValueError,KeyError,TypeError,AttributeError,OverflowError,IndexError):
+            excluded['invalid_snapshot'] += 1
+            continue
+        for challenger in CHALLENGERS:
+            if challenger not in payloads:
+                excluded['missing_'+challenger] += 1
+                continue
+            try:
+                identity,positions = _pair_method(payloads[challenger],fixtures,created)
+                if payloads[challenger]['training_before'] != payloads['frequency']['training_before']:
+                    raise ValueError('Coupures historiques différentes.')
+                for index,fixture in enumerate(fixtures):
+                    candidates.append(dict(cohort=(challenger,fixture['league'],len(fixtures),
+                        baseline_identity,identity),match_id=fixture['match_id'],created=created,
+                        entry_id=entry['id'],fixture=fixture,_entry=entry,
+                        ids=dependencies['ids'],weeks=dependencies['weeks'],
+                        methods={'frequency':baseline[index],challenger:positions[index]}))
+            except (ValueError,KeyError,TypeError,AttributeError,OverflowError,IndexError):
+                excluded['invalid_'+challenger] += 1
+    first = {}
+    for row in sorted(candidates,key=lambda item:(item['created'],item['entry_id'])):
+        key = (row['cohort'],row['match_id'])
+        if key not in first:
+            first[key] = row
+        else:
+            # A repeated forecast may span another original block. Preserve its
+            # dependencies even though its probabilities/results are not used.
+            first[key]['ids'] = first[key]['ids'] | row['ids']
+            first[key]['weeks'] = sorted(set(first[key]['weeks']) | set(row['weeks']))
+    grouped = defaultdict(list)
+    for row in first.values():
+        record = dict(row)
+        record.update(saved._result(record.pop('_entry'),record['fixture']))
+        if record['state'] == 'evaluated' and saved._stamp(row['_entry']['checked_at']) > current:
+            record.update(state='excluded',reason='observation_after_bilan')
+        grouped[record['cohort']].append(record)
+    cohorts = []
+    for (challenger,league,size,baseline_identity,identity),records in sorted(grouped.items()):
+        evaluated = [row for row in records if row['state'] == 'evaluated']
+        names = ('frequency',challenger)
+        scores = {method:_scores(evaluated,method) for method in names}
+        calibration = {method:{label:saved._bins([dict(row,probabilities=row['methods'][method])
+                         for row in records],label) for label in VALUES} for method in names}
+        cohorts.append(dict(challenger=challenger,league=league,size=size,
+            versions={name:dict(version=value[0],generation=value[1],components=value[2])
+                      for name,value in zip(names,(baseline_identity,identity))},
+            forecasts=len(records),evaluated=len(evaluated),
+            pending=sum(row['state']=='pending' for row in records),
+            excluded=sum(row['state']=='excluded' for row in records),
+            dates=len({saved._stamp(row['fixture']['timestamp']).date() for row in evaluated}),
+            match_ids=sorted(row['match_id'] for row in records),scores=scores,calibration=calibration,
+            uncertainty=_paired_uncertainty(records,challenger,protocol,current)))
+    return dict(version=PAIRED_VERSION,protocol_version=protocol['version'],
+        registered_at=protocol['registered_at'],as_of=current.isoformat(),
+        entries_read=len(entries),cohorts=cohorts,duplicates_removed=len(candidates)-len(first),
+        snapshot_exclusions=dict(excluded),
+        interpretation='Supplementary descriptive pairs; original Clubs/top3 protocol is unchanged.')

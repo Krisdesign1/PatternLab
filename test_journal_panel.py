@@ -29,7 +29,7 @@ class JournalPanelTests(unittest.TestCase):
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.network=self.patch(api.ApiFootballClient,'get',side_effect=AssertionError('No automatic API calls'))
         self.raw=[]
-        self.patch(api,'load_fixtures',side_effect=lambda *args:self.raw)
+        self.patch(api,'load_fixtures',side_effect=lambda *args, **kwargs:self.raw)
         self.day=self.patch(panel,'_today',return_value=date(2025,3,20))
         self.patch(panel,'_now',side_effect=lambda: datetime.combine(self.day.return_value,datetime.min.time(),
                                                                   tzinfo=timezone.utc)+timedelta(hours=8))

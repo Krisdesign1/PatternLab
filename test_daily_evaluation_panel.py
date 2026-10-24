@@ -45,12 +45,23 @@ class DailyEvaluationPanelTests(unittest.TestCase):
 
     def open(self):
         at=AppTest.from_file('app.py',default_timeout=15).run()
+        at.session_state['daily_audit_view']='historical'
         at.switch_page('ui_pages/daily_evaluation.py').run()
         self.assertFalse(at.exception)
         return at
 
     def assert_readonly(self):
         self.network.assert_not_called();self.reconcile.assert_not_called();self.build.assert_not_called();self.run.assert_not_called()
+
+    def test_default_view_prioritizes_saved_model_evidence_without_loading_replay(self):
+        with patch.object(panel.saved_model_comparison_panel, 'render') as render:
+            at=AppTest.from_file('app.py',default_timeout=15).run()
+            at.switch_page('ui_pages/daily_evaluation.py').run()
+            self.assertFalse(at.exception)
+            self.assertEqual(at.segmented_control(key='daily_audit_view').value,'methods')
+            render.assert_called_once()
+        self.load.assert_not_called()
+        self.assert_readonly()
 
     def test_historical_comparison_and_distinct_baselines_render_without_calculation(self):
         before=copy.deepcopy(self.value)

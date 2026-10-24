@@ -9,6 +9,7 @@ import tempfile
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import api_football as api
+import fixture_store
 
 
 SOURCE_LABEL = "API-Football"
@@ -69,7 +70,8 @@ def _day_rows(raw, day, timezone_name):
 
 
 def local_day_matches(day, timezone_name=DEFAULT_TIMEZONE, *, path=None):
-    return _day_rows(api.load_fixtures(_path(path)), day, timezone_name)
+    start, end = _bounds(day, timezone_name)
+    return _day_rows(api.load_fixtures(_path(path), start=start, end=end), day, timezone_name)
 
 
 def fixture_from_raw(raw):
@@ -132,6 +134,9 @@ def upcoming_in_day(raw, day, now=None, *, timezone_name=DEFAULT_TIMEZONE):
 
 
 def _metadata(path):
+    database = api.active_store(path)
+    if database is not None:
+        return api._sqlite_call(fixture_store.metadata, database).get('updated_at') or None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return payload.get("updated_at") if isinstance(payload, dict) else None
@@ -145,6 +150,9 @@ def _calendar_path(path):
 
 def _calendar_updates(path):
     """Invalid or absent display metadata must never prevent reading match data."""
+    database = api.active_store(path)
+    if database is not None:
+        return api._sqlite_call(fixture_store.calendar_updates, database)
     try:
         payload = json.loads(_calendar_path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -172,7 +180,18 @@ def _calendar_updates(path):
 
 @cloud_storage.persisted
 def _mark_calendar_refresh(path, day, timezone_name):
-    """Persist only successful per-day refresh times in an atomic metadata sidecar."""
+    """Persist freshness in the current authority, serialized with migration."""
+    with api._store_write_lock(path):
+        return _mark_calendar_refresh_locked(Path(path), day, timezone_name)
+
+
+def _mark_calendar_refresh_locked(path, day, timezone_name):
+    # Recheck after acquiring the stable provider lock: a migration may have
+    # switched from the sidecar to SQLite while this refresh was waiting.
+    database = api.active_store(path)
+    if database is not None:
+        return api._sqlite_call(fixture_store.mark_calendar_refresh, database,
+                                day.isoformat(), timezone_name, _now(None).isoformat(timespec='seconds'))
     updates = _calendar_updates(path)
     updates[day.isoformat(), timezone_name] = _now(None).isoformat(timespec="seconds")
     payload = dict(version=1, source=SOURCE_LABEL, calendar_updates=[
@@ -214,14 +233,26 @@ def _usable_rows(raw):
 def local_snapshot(day, *, timezone_name=DEFAULT_TIMEZONE, now=None, path=None):
     """Read only this provider's local calendar and historical result counts."""
     path = _path(path)
-    raw = api.load_fixtures(path)
-    day_matches = _day_rows(raw, day, timezone_name)
+    start, end = _bounds(day, timezone_name)
+    database = api.active_store(path)
+    if database is not None:
+        snapshot = api._sqlite_call(fixture_store.calendar_snapshot, database, start=start, end=end)
+        day_matches = _day_rows(snapshot['matches'], day, timezone_name)
+        day_usable, stats = snapshot['usable'], snapshot['stats']
+        history_counts = stats['history_counts']
+        stored_count, usable_count, updated_at = stats['stored_count'], stats['usable_count'], stats['updated_at']
+        calendar_updated_at = snapshot['calendar_updates'].get((day.isoformat(), timezone_name))
+    else:
+        raw = api.load_fixtures(path)
+        day_matches = _day_rows(raw, day, timezone_name)
+        usable, day_usable = _usable_rows(raw), _usable_rows(day_matches)
+        history_counts = {}
+        for row in usable:
+            history_counts[row['league']] = history_counts.get(row['league'], 0) + 1
+        stored_count, usable_count, updated_at = len(raw), len(usable), _metadata(path)
+        calendar_updated_at = _calendar_updates(path).get((day.isoformat(), timezone_name))
     fixtures = fixtures_in_day(day_matches, day, now, timezone_name=timezone_name)
     upcoming = [row for row in fixtures if row["is_upcoming"]]
-    usable, day_usable = _usable_rows(raw), _usable_rows(day_matches)
-    history_counts = {}
-    for row in usable:
-        history_counts[row["league"]] = history_counts.get(row["league"], 0) + 1
     competitions = {}
     for item in day_matches:
         try:
@@ -242,9 +273,9 @@ def local_snapshot(day, *, timezone_name=DEFAULT_TIMEZONE, now=None, path=None):
     for row in day_usable:
         competitions[row["league"]]["usable"] += 1
     return dict(day=day.isoformat(), timezone=timezone_name, matches=day_matches, fixtures=fixtures,
-                upcoming=upcoming, competitions=competitions, stored_count=len(raw), usable_count=len(usable),
-                day_count=len(day_matches), day_usable_count=len(day_usable), updated_at=_metadata(path),
-                calendar_updated_at=_calendar_updates(path).get((day.isoformat(), timezone_name)),
+                upcoming=upcoming, competitions=competitions, stored_count=stored_count, usable_count=usable_count,
+                day_count=len(day_matches), day_usable_count=len(day_usable), updated_at=updated_at,
+                calendar_updated_at=calendar_updated_at,
                 source_label=SOURCE_LABEL, history_counts=history_counts)
 
 
@@ -356,7 +387,7 @@ def ensure_history(competition_code, seasons, *, path=None):
         count = api.save_fixtures(collected, path, season_imports=markers)
     except api.ApiFootballError as error:
         raise api.ApiFootballError(_safe(error, key)) from None
-    history_count = sum(row["league"] == code for row in _usable_rows(api.load_fixtures(path)))
+    history_count = len(api.load_matches(path, leagues=[code])[0])
     return dict(source_label=SOURCE_LABEL, competition_code=code, league=code, seasons=years,
                 received_count=len(collected), stored_count=count, usable_count=sum(row["usable"] for row in reports),
                 history_count=history_count, reports=reports, quota=_quota(client), updated_at=_metadata(path))

@@ -22,6 +22,7 @@ import api_football as api
 import api_match_workspace as workspace
 import prediction_journal as journal
 import competition_readiness as readiness
+import automation_health as health
 
 
 VERSION = 'all-competitions-daily-blocks-v1'
@@ -491,7 +492,8 @@ def _forecast(root, config, gate, report, clock, today, now):
 
 
 @cloud_storage.persisted
-def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, max_duration_seconds=None):
+def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, max_duration_seconds=None,
+              origin='direct'):
     if max_duration_seconds is not None and (
             type(max_duration_seconds) not in (int, float) or
             not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0):
@@ -510,6 +512,15 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
     if not config['enabled']:
         report['status'] = 'disabled'
         return report
+    if origin not in health.ORIGINS:
+        raise AutomationError('Origine du cycle invalide.')
+    with health.monitor(root, report, interval_minutes=config['interval_minutes'], clock=clock,
+                        origin=origin, enabled=not cloud_storage.configured()):
+        return _execute_cycle(root, config, client, clock, report, deadline, now)
+
+
+def _execute_cycle(root, config, client, clock, report, deadline, now):
+    """Original pipeline, independent of the local diagnostics ledger."""
     try:
         with _lock(root):
             state = _read(root / 'automation_state.json', {})

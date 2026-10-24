@@ -73,7 +73,7 @@ def _estimate(state, home, away, before, *, home_id=None, away_id=None, provider
                 last_training_day=state['last_training_day'])
 
 
-def scan(raw, now=None):
+def scan(raw, now=None, *, history=None, history_issues=()):
     """Rank all eligible future NS fixtures today in Kinshasa by max probability.
 
     All histories stop before the first UTC date of today's confirmed targets,
@@ -152,7 +152,7 @@ def scan(raw, now=None):
     before = min(first.date(), current.date()).isoformat()
     leagues = {fixture['league'] for fixture, _ in upcoming}
     histories = defaultdict(list)
-    for mid, item, stamp in dated:
+    for mid, item, stamp in (dated if history is None else ()):
         if stamp >= current or stamp.date().isoformat() >= before:
             continue
         if api._status_short(item) not in api.FINISHED_STATUSES:
@@ -164,6 +164,15 @@ def scan(raw, now=None):
             histories[league].append(api.normalize_fixture(item))
         except (KeyError, TypeError, ValueError) as error:
             diagnostics['invalid_history'].append(dict(match_id=mid, reason=str(error)))
+    if history is not None:
+        # Indexed storage supplies the same validated regulation-time rows.
+        # Reapply the causal boundary here; today's results must never leak
+        # into a cached probability, even with an overly broad caller query.
+        for row in history:
+            if (row.get('provider') == 'api-football' and row.get('league') in leagues
+                    and isinstance(row.get('timestamp'), str) and row['timestamp'][:10] < before):
+                histories[row['league']].append(row)
+        diagnostics['invalid_history'].extend(history_issues)
     diagnostics['history_count'] = sum(map(len, histories.values()))
     diagnostics['history_leagues'] = len(histories)
     diagnostics['invalid_history_count'] = len(diagnostics['invalid_history'])

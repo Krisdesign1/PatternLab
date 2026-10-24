@@ -161,13 +161,13 @@ def _prospective():
 @st.fragment(run_every=60)
 @guarded
 def render_evaluation():
-    render_page_header('Bilan de la sélection',
-                       'Mesurer le regroupement des matchs, la qualité des probabilités et les résultats réellement observés.',
-                       eyebrow='REJEU CHRONOLOGIQUE · COMPARAISON PAR TAILLE · SUIVI RÉEL', icon=':material/fact_check:')
-    modes = {'historical':'Rejeu historique', 'prospective':'Suivi réel',
-             'methods':'Comparaison des modèles'}
+    render_page_header('Bilan et preuves',
+                       'Comparer les prévisions enregistrées avant match et leurs résultats, puis examiner les simulations historiques séparément.',
+                       eyebrow='PRÉVISIONS FIGÉES · RÉSULTATS OBSERVÉS · REJEUX SÉPARÉS', icon=':material/fact_check:')
+    modes = {'methods':'Comparaison des modèles', 'prospective':'Suivi réel',
+             'historical':'Rejeu historique'}
     mode = st.segmented_control('Bilan à consulter', list(modes), format_func=modes.get,
-                                default='historical', required=True, key='daily_audit_view')
+                                default='methods', required=True, key='daily_audit_view')
     if mode == 'prospective':
         _prospective()
         return

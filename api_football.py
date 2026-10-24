@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from league_model import outcome
+import fixture_store
 
 
 BASE_URL = "https://v3.football.api-sports.io"
@@ -161,6 +162,8 @@ def _score_pair(scores, period):
 def normalize_fixture(fixture):
     """Convert one completed fixture using regulation fulltime, even after AET/PEN."""
     try:
+        if fixture.get('provider') not in (None, 'api-football', 'API-Football'):
+            raise ValueError('Seules les données API-Football sont acceptées')
         event = fixture["fixture"]
         if event["status"]["short"] not in FINISHED_STATUSES:
             raise ValueError("Match non terminé")
@@ -214,9 +217,71 @@ def _load_store(path):
         raise ApiFootballError("Le fichier local des matchs API-Football est illisible ou invalide.") from None
 
 
-def load_fixtures(path=STORE_PATH):
-    """Return saved raw fixtures; absent storage is an empty history."""
-    return _load_store(path)["fixtures"]
+def _sqlite_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except fixture_store.FixtureStoreError as error:
+        raise ApiFootballError(str(error)) from None
+
+
+def active_store(path=STORE_PATH):
+    """A database is used only after an explicit, verified local migration."""
+    return _sqlite_call(fixture_store.active_path, path)
+
+
+def _select_fixtures(fixtures, *, start=None, end=None, leagues=None, statuses=None, ids=None):
+    def utc_bound(value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                raise ValueError('Une borne temporelle doit préciser son fuseau horaire.')
+            return value.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
+        return value
+    start, end = utc_bound(start), utc_bound(end)
+    leagues, statuses, ids = (None if values is None else set(map(str, values))
+                             for values in (leagues, statuses, ids))
+    selected = []
+    for raw in fixtures:
+        if ids is not None and _numeric_id(raw['fixture']['id'], 'du match') not in ids:
+            continue
+        if statuses is not None and _status_short(raw) not in statuses:
+            continue
+        if leagues is not None:
+            try:
+                league_id = _numeric_id(raw['league']['id'], 'de compétition')
+            except (KeyError, TypeError, ValueError):
+                continue
+            if league_id not in leagues:
+                continue
+        if start is not None or end is not None:
+            try:
+                stamp = datetime.fromisoformat(raw['fixture']['date'].replace('Z', '+00:00'))
+                if stamp.tzinfo is None:
+                    continue
+                stamp = stamp.astimezone(timezone.utc).replace(tzinfo=None).isoformat(timespec='seconds')
+                if start is not None and stamp < start or end is not None and stamp >= end:
+                    continue
+            except (KeyError, TypeError, ValueError, AttributeError):
+                continue
+        selected.append(raw)
+    return selected
+
+
+def load_fixtures(path=STORE_PATH, **filters):
+    """Read only requested fixtures; JSON remains a compatibility import format."""
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.raw_fixtures, database, **filters)
+    fixtures = _load_store(path)['fixtures']
+    return _select_fixtures(fixtures, **filters) if filters else fixtures
+
+
+def export_store(path=STORE_PATH):
+    """Consistent, explicit audit/backup export of the current authority."""
+    database = active_store(path)
+    return (_sqlite_call(fixture_store.export_snapshot, database) if database is not None
+            else _load_store(path))
 
 
 def _season_identity(raw):
@@ -271,6 +336,9 @@ def _valid_season_imports(payload, fixtures):
 
 def load_season_imports(path=STORE_PATH):
     """Return verified complete-season manifests, without inferring from result presence."""
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.season_imports, database)
     payload = _load_store(path)
     fixtures = {_numeric_id(raw["fixture"]["id"], "du match"): raw for raw in payload["fixtures"]}
     return _valid_season_imports(payload, fixtures)
@@ -314,6 +382,10 @@ def _store_write_lock(path):
 def save_fixtures(fixtures, path=STORE_PATH, *, season_imports=None):
     """Serialize the whole merge before atomically replacing the provider store."""
     with _store_write_lock(path) as locked_path:
+        # A writer may have waited while migration switched the authority.
+        database = active_store(locked_path)
+        if database is not None:
+            return _sqlite_call(fixture_store.upsert, database, fixtures, season_imports=season_imports)
         return _save_fixtures_locked(fixtures, locked_path, season_imports=season_imports)
 
 
@@ -377,9 +449,12 @@ def _save_fixtures_locked(fixtures, path, *, season_imports=None):
     return len(merged)
 
 
-def load_matches(path=STORE_PATH):
+def load_matches(path=STORE_PATH, **filters):
     """Only completed fixtures enter the model; audit invalid completed scores."""
-    fixtures = load_fixtures(path)
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.matches, database, **filters)
+    fixtures = load_fixtures(path, **filters)
     rows, issues, expected = [], [], 0
     for fixture in fixtures:
         event = fixture.get("fixture", {})
@@ -402,6 +477,9 @@ def load_matches(path=STORE_PATH):
 def data_signature(path=STORE_PATH):
     """A cheap signature suitable for Streamlit cache arguments."""
     path = Path(path)
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.signature, database)
     try:
         stat = path.stat()
     except FileNotFoundError:

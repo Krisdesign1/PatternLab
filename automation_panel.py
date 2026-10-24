@@ -9,6 +9,7 @@ import admin_access
 
 import api_football as api
 import automation_worker as worker
+import automation_health_panel
 from scripts import automation_service as service
 from ux_theme import render_page_header
 
@@ -60,6 +61,7 @@ def _scheduler_status():
     if state.get('needs_reinstall'):
         st.warning('Les réglages du planificateur ont changé. Réinstallez l’agent pour appliquer le nouvel intervalle.')
         st.code('.venv/bin/python scripts/automation_service.py --install', language='bash')
+    return state
 
 
 def _configuration(config):
@@ -101,6 +103,8 @@ def _show_report(report):
     if not report:
         st.info('Aucun cycle enregistré pour le moment.')
         return
+    if report.get('monitoring_warning'):
+        st.warning(report['monitoring_warning'])
     st.caption(f"État : {STATES.get(report.get('status'), report.get('status', 'Inconnu'))} · "
                f"Début : {report.get('started_at', '—')} · Fin : {report.get('finished_at') or '—'}")
     with st.container(horizontal=True):
@@ -215,7 +219,7 @@ def render_automation():
     st.caption('Le calendrier et les nouvelles prévisions concernent uniquement les matchs du jour à Kinshasa. '
                'Les historiques et le suivi des résultats déjà enregistrés sont conservés. '
                'Chaque première prévision reste verrouillée dans le journal.')
-    _scheduler_status()
+    scheduler = _scheduler_status()
     admin_access.read_only_notice()
     try:
         config = worker.load_config()
@@ -224,6 +228,7 @@ def render_automation():
     except (worker.AutomationError, OSError, ValueError) as error:
         st.error(str(error))
         return
+    automation_health_panel.render(config, scheduler=scheduler)
     with st.container(horizontal=True):
         run = st.button('Lancer un cycle maintenant', type='primary', icon=':material/play_arrow:',
                          key='automation_run', disabled=not config['enabled'] or not admin_access.can_admin())
@@ -237,7 +242,7 @@ def render_automation():
         admin_access.require_admin()
         try:
             with st.spinner('Préparation des données et enregistrement des groupes avant match…'):
-                report = worker.run_cycle(config=config)
+                report = worker.run_cycle(config=config, origin='manual')
             _coverage.clear()
             if report.get('status') == 'error':
                 st.error('Le cycle a rencontré une erreur. Consultez son bilan ci-dessous.')

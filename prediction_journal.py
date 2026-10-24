@@ -229,7 +229,8 @@ def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata
         if payload.get('source') != source or str(payload.get('league')) != ('mixed' if allow_mixed else fixtures[0]['league']) or payload.get('training_before', '') != before:
             raise JournalError('La provenance de la prévision ne correspond pas au groupe.')
         if allow_mixed:_mixed_provenance(payload,fixtures,before,leagues)
-    raw_fixtures = api.load_fixtures(api.STORE_PATH) if raw_fixtures is None else raw_fixtures
+    raw_fixtures = (api.load_fixtures(api.STORE_PATH, ids=[row['match_id'] for row in fixtures])
+                    if raw_fixtures is None else raw_fixtures)
     raw = {str(r.get('fixture', {}).get('id')): r for r in raw_fixtures}
     for row in fixtures:
         item = raw.get(row['match_id'])
@@ -326,7 +327,9 @@ def reconcile(raw_fixtures=None, *, now=None, path=None):
     if not entries:
         return dict(entries=0, changed=0, pending=0, settled=0, void=0, unresolved=0)
     now_value = _now(now)
-    raw_fixtures = api.load_fixtures(api.STORE_PATH) if raw_fixtures is None else raw_fixtures
+    raw_fixtures = (api.load_fixtures(api.STORE_PATH,
+                    ids=sorted({row['match_id'] for entry in entries for row in entry['fixtures']}, key=int))
+                    if raw_fixtures is None else raw_fixtures)
     raw = {str(r.get('fixture', {}).get('id')): r for r in raw_fixtures}
     changed = 0
     con = None

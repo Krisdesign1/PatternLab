@@ -26,8 +26,8 @@ def _file_revision(path):
 
 
 def _reconciliation_signature():
-    return tuple(_file_revision(path) for path in
-                 (api.STORE_PATH, journal.DB_PATH, str(journal.DB_PATH) + '-wal'))
+    return (api.data_signature(api.STORE_PATH),
+            _file_revision(journal.DB_PATH), _file_revision(str(journal.DB_PATH) + '-wal'))
 
 
 def _cached_reconciliation():

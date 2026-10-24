@@ -144,5 +144,125 @@ class SavedComparisonTests(unittest.TestCase):
         self.assertEqual(cohort['scores']['catboost']['accuracy'],1)
 
 
+class SavedFrequencyPairsTests(unittest.TestCase):
+    """Supplementary pairs keep frozen forecasts and protocol distinct."""
+    setUp = SavedComparisonTests.setUp
+    def paired(self, entries, now=None):
+        with patch('api_football.ApiFootballClient',side_effect=AssertionError('No API')), \
+                patch('catboost_scenarios.forecast',side_effect=AssertionError('No inference')):
+            return comparison.build_pairs(entries,self.protocol,
+                now=now or datetime(2026,10,24,tzinfo=timezone.utc))
+
+    def weekly_entry(self, index):
+        from datetime import timedelta
+        target = datetime(2026,10,20,tzinfo=timezone.utc)+timedelta(weeks=index)
+        value = entry(identity=f'week-{index}',created=target.replace(hour=10).isoformat())
+        for position,fixture in enumerate(value['fixtures']):
+            fixture.update(match_id=str(index*2+position+1),
+                           timestamp=target.replace(hour=12+position).isoformat())
+            value['observed'][position]['match_id']=fixture['match_id']
+        value['checked_at']=target.replace(hour=16).isoformat()
+        for name,method in value['methods'].items():
+            method['training_before']=target.date().isoformat()
+            if 'trained_through' in method:
+                method['trained_through']=(target-timedelta(days=1)).date().isoformat()
+        distributions = [dict(zip(VALUES,(.2,.3,.5))) if index%2 else dict(zip(VALUES,(.7,.2,.1))),
+                         dict(zip(VALUES,(.4,.3,.3)))]
+        value['methods']['clubs']=models._method('clubs-v2',models._distribution('independent',2,
+            distributions=distributions),dict(source='API-Football',league='39',
+            training_before=target.date().isoformat()))
+        return value
+
+    def test_missing_catboost_does_not_remove_clubs_or_require_all_methods(self):
+        value=entry(); del value['methods']['catboost']
+        value['methods']['combined']=deepcopy(value['methods']['clubs'])
+        value['methods']['combined']['version']='combined-v1'
+        before=deepcopy(value); protocol_before=deepcopy(self.protocol)
+        report=self.paired([value])
+        self.assertEqual({row['challenger'] for row in report['cohorts']},{'clubs','combined'})
+        self.assertTrue(all(row['evaluated']==2 for row in report['cohorts']))
+        self.assertEqual(report['snapshot_exclusions']['missing_catboost'],1)
+        self.assertEqual(value,before); self.assertEqual(self.protocol,protocol_before)
+        self.assertEqual(self.protocol['baseline'],'clubs')
+
+    def test_baseline_is_identical_and_calibration_includes_nonfavorites(self):
+        cohort=next(row for row in self.paired([entry()])['cohorts'] if row['challenger']=='clubs')
+        self.assertEqual(cohort['scores']['frequency']['evaluated'],cohort['scores']['clubs']['evaluated'])
+        for method in ('frequency','clubs'):
+            for label in VALUES:
+                self.assertEqual(sum(row['n'] for row in cohort['calibration'][method][label]),2)
+        self.assertEqual(cohort['uncertainty']['status'],'insufficient')
+        self.assertEqual(cohort['uncertainty']['blocks'],0)
+        self.assertTrue(all(row['lower'] is None for row in cohort['uncertainty']['gains'].values()))
+
+    def test_first_common_pending_is_retained_without_cherry_picking_later_result(self):
+        first=entry(identity='a',status='pending'); first['observed']=[]
+        later=entry(identity='b',created='2026-10-20T11:00:00Z')
+        report=self.paired([later,first])
+        self.assertEqual(report['duplicates_removed'],4)
+        self.assertTrue(all(row['pending']==2 and row['evaluated']==0 for row in report['cohorts']))
+
+    def test_bad_challenger_does_not_invalidate_other_paired_method(self):
+        value=entry(); value['methods']['catboost']['ranking'][0]['probability']=.999
+        report=self.paired([value])
+        self.assertEqual([row['challenger'] for row in report['cohorts']],['clubs'])
+        self.assertEqual(report['snapshot_exclusions']['invalid_catboost'],1)
+
+    def test_time_cutoff_forecast_creation_and_baseline_kind_are_enforced(self):
+        mutations=[lambda row:row.update(created_at='2026-10-20T08:00:00Z'),
+                   lambda row:row.update(created_at='2026-10-20T12:00:00Z'),
+                   lambda row:row.update(created_at='2026-10-25T10:00:00Z'),
+                   lambda row:row['methods']['frequency'].update(training_before='2026-10-21'),
+                   lambda row:row['methods'].update(frequency=deepcopy(row['methods']['clubs']))]
+        for mutate in mutations:
+            value=entry(); mutate(value)
+            self.assertFalse(self.paired([value])['cohorts'])
+        value=entry(); value['checked_at']='2026-10-25T16:00:00Z'
+        self.assertTrue(all(row['evaluated']==0 and row['excluded']==2
+                            for row in self.paired([value])['cohorts']))
+
+    def test_pair_versions_and_generations_are_separate_without_irrelevant_catboost_fragmentation(self):
+        first=entry(); second=entry(identity='other')
+        second['methods']['catboost']['generation']='next-generation'
+        report=self.paired([second,first])
+        self.assertEqual(len(report['cohorts']),3)
+        self.assertEqual(len([row for row in report['cohorts'] if row['challenger']=='clubs']),1)
+        self.assertEqual(report['duplicates_removed'],2)
+
+    def test_closed_weeks_use_paired_cluster_bootstrap_not_iid_match_intervals(self):
+        from datetime import timedelta
+        values=[self.weekly_entry(i) for i in range(20)]
+        current=datetime(2026,10,20,tzinfo=timezone.utc)+timedelta(weeks=21)
+        report=self.paired(values,now=current)
+        cohort=next(row for row in report['cohorts'] if row['challenger']=='clubs')
+        estimate=cohort['uncertainty']
+        self.assertEqual(estimate['blocks'],20)
+        self.assertEqual(estimate['matches'],40)
+        self.assertEqual(estimate['status'],'descriptive')
+        self.assertIsNotNone(estimate['gains']['logloss']['lower'])
+        self.assertAlmostEqual(estimate['gains']['logloss']['estimate'],
+            cohort['scores']['frequency']['logloss']-cohort['scores']['clubs']['logloss'])
+        repeated=next(row for row in self.paired(values,now=current)['cohorts'] if row['challenger']=='clubs')
+        self.assertEqual(estimate,repeated['uncertainty'])
+
+    def test_twenty_matches_in_one_week_are_one_block_and_pending_week_is_not_ignored(self):
+        from datetime import timedelta
+        values=[]
+        for i in range(10):
+            row=self.weekly_entry(0); row['id']=f'same-week-{i}'
+            for position,fixture in enumerate(row['fixtures']):
+                fixture['match_id']=str(i*2+position+1)
+                row['observed'][position]['match_id']=fixture['match_id']
+            values.append(row)
+        current=datetime(2026,10,27,tzinfo=timezone.utc)
+        cohort=self.paired(values,now=current)['cohorts'][0]
+        self.assertEqual(cohort['uncertainty']['blocks'],1)
+        values[-1].update(status='pending',observed=[])
+        cohort=self.paired(values,now=current)['cohorts'][0]
+        self.assertEqual(cohort['evaluated'],18)
+        self.assertEqual(cohort['uncertainty']['blocks'],0)
+        self.assertEqual(cohort['uncertainty']['excluded']['incomplete_block'],20)
+
+
 if __name__=='__main__':
     unittest.main()

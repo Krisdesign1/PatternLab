@@ -257,7 +257,7 @@ def run_once(root=None, *, dry_run=False, config=None, skip_models=False, max_du
 
 
 def _run_once(worker, root, *, dry_run, config, skip_models, max_duration_seconds=None):
-    arguments = {'root': _paths(root)['data'], 'dry_run': dry_run}
+    arguments = {'root': _paths(root)['data'], 'dry_run': dry_run, 'origin': 'service'}
     if config is not None:
         arguments['config'] = config
     if max_duration_seconds is not None:

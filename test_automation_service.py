@@ -204,7 +204,7 @@ class AutomationServiceTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(result, {"status": "completed", "requests": 3, "created": 2, "started_at": "2026-10-18T15:00:00+00:00", "issues": 1})
         self.assertNotIn("secret", json.dumps(result))
-        self.worker.run_cycle.assert_called_once_with(root=self.root / "data" / "api_football", dry_run=False)
+        self.worker.run_cycle.assert_called_once_with(root=self.root / "data" / "api_football", dry_run=False, origin='service')
 
     def test_service_runs_separate_bounded_model_phase_even_if_provider_is_unavailable(self):
         self.worker.run_cycle.return_value={'status':'error','requests':1,'issues':['safe error']}
@@ -226,7 +226,7 @@ class AutomationServiceTests(unittest.TestCase):
         with patch.object(service, "_command") as command:
             code, result = self.invoke(["--dry-run"])
         self.assertEqual((code, result["status"]), (0, "dry_run"))
-        self.worker.run_cycle.assert_called_once_with(root=self.root / "data" / "api_football", dry_run=True)
+        self.worker.run_cycle.assert_called_once_with(root=self.root / "data" / "api_football", dry_run=True, origin='service')
         command.assert_not_called()
 
     def test_cloud_duration_reaches_worker_without_a_request_count_budget(self):
@@ -234,7 +234,7 @@ class AutomationServiceTests(unittest.TestCase):
         result = service.run_once(root=self.root, skip_models=True, max_duration_seconds=240)
         self.assertEqual(result['requests'], 84)
         self.worker.run_cycle.assert_called_once_with(
-            root=self.root / 'data' / 'api_football', dry_run=False, max_duration_seconds=240)
+            root=self.root / 'data' / 'api_football', dry_run=False, origin='service', max_duration_seconds=240)
 
     def test_install_dry_run_stages_only_without_registering_or_running_worker(self):
         with patch.object(service, "install_service") as install, patch.object(service, "_command") as command:

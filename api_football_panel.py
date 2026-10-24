@@ -1,10 +1,14 @@
 """Explicit API-Football connection, preview and local import controls."""
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import json
 
 import streamlit as st
 import cloud_storage
 import admin_access
+import api_football as api
+import api_match_workspace as calendar
+import fixture_store
 
 from api_football import (
     ApiFootballClient, ApiFootballError, DATA_DIR, FINISHED_STATUSES,
@@ -182,15 +186,33 @@ def render_api_football():
                     st.dataframe(excluded, hide_index=True, width='stretch')
 
     try:
-        stored = load_fixtures()
+        database = api.active_store(STORE_PATH)
+        if database is not None:
+            stats = api._sqlite_call(fixture_store.statistics, database)
+            count, usable = stats['stored_count'], stats['usable_count']
+            st.caption(f'{count} matchs dans la base SQLite locale · {usable} résultats utilisables.')
+            stored = None
+        else:
+            stored = load_fixtures()
+            count = len(stored)
+            table, usable, excluded = fixture_preview(stored)
+            st.caption(f'{count} matchs enregistrés localement · {usable} résultats utilisables · '
+                       f'{len(excluded)} résultats exclus.')
     except ApiFootballError as error:
         st.error(str(error))
         return
-    if stored:
-        table, usable, excluded = fixture_preview(stored)
-        st.caption(f'{len(stored)} matchs enregistrés localement · {usable} résultats utilisables · '
-                   f'{len(excluded)} résultats exclus.')
-        with st.expander('Calendrier et résultats API enregistrés'):
-            st.dataframe(table, hide_index=True, width='stretch')
-            st.download_button('Sauvegarder les matchs API-Football', STORE_PATH.read_bytes(),
-                               file_name='api_football_fixtures.json', mime='application/json', key='api_backup')
+    if count:
+        preview = st.expander('Calendrier et résultats API enregistrés', on_change='rerun')
+        if preview.open:
+            with preview:
+                day = st.date_input('Journée à consulter', value=datetime.now(ZoneInfo(calendar.DEFAULT_TIMEZONE)).date(),
+                                    key='api_preview_day')
+                selected = calendar.local_day_matches(day, path=STORE_PATH)
+                table, _, _ = fixture_preview(selected)
+                st.dataframe(table, hide_index=True, width='stretch')
+                st.caption(f'{len(table)} matchs à cette date. La sauvegarde contient toute la base.')
+        st.download_button('Sauvegarder les matchs API-Football',
+                           lambda: json.dumps(api.export_store(STORE_PATH), ensure_ascii=False,
+                                              allow_nan=False).encode('utf-8'),
+                           file_name='api_football_fixtures.json', mime='application/json', key='api_backup',
+                           on_click='ignore', icon=':material/download:')
