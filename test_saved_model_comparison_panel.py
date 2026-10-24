@@ -1,0 +1,41 @@
+import unittest
+from unittest.mock import patch
+
+from streamlit.testing.v1 import AppTest
+
+import saved_model_comparison_panel as panel
+import saved_model_comparison as comparison
+import test_saved_model_comparison as fixtures
+
+
+class PanelTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture=fixtures.SavedComparisonTests('test_all_methods_use_identical_matches_and_expected_losses')
+        self.fixture.setUp(); self.addCleanup(self.fixture.doCleanups)
+
+    def test_three_methods_and_category_render_without_api_or_forecasting(self):
+        result = comparison.build([fixtures.entry()],self.fixture.protocol)
+        with patch.object(panel.journal_protocol,'load_protocol',return_value=self.fixture.protocol), \
+                patch.object(panel,'_load',return_value=result), \
+                patch('api_football.ApiFootballClient',side_effect=AssertionError('No API')), \
+                patch('catboost_scenarios.forecast',side_effect=AssertionError('No inference')):
+            app=AppTest.from_string('from saved_model_comparison_panel import render\nrender()').run()
+            self.assertFalse(app.exception)
+            table=next(node.value for node in app.dataframe if 'Matchs identiques' in node.value.columns)
+            self.assertEqual(list(table['Matchs identiques']),[2,2,2])
+            app.segmented_control(key='saved_model_comparison_outcome').set_value('Égal').run()
+            self.assertFalse(app.exception)
+            self.assertEqual(len(app.dataframe),2)
+            self.assertFalse(app.button)
+
+    def test_no_protocol_never_reads_or_writes_journal(self):
+        with patch.object(panel.journal_protocol,'load_protocol',return_value=None), \
+                patch.object(panel,'_load') as load:
+            app=AppTest.from_string('from saved_model_comparison_panel import render\nrender()').run()
+        self.assertFalse(app.exception)
+        self.assertTrue(any('Aucun protocole' in node.value for node in app.info))
+        load.assert_not_called()
+
+
+if __name__=='__main__':
+    unittest.main()

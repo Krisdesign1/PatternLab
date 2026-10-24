@@ -22,6 +22,7 @@ from coupon_sizes import validate_size
 from league_model import VALUES
 from league_patterns import repeated_scenarios
 from match_predictor import VERSION as CLUB_VERSION, estimate
+from club_identity import fixture_identity
 import scenario_features as features
 from scenario_predictor import best_sequences, fit_sequences, probability
 
@@ -93,7 +94,7 @@ def _implementation():
         catboost_version = None
     return dict(feature_version=features.FEATURE_VERSION, catboost_engine=ml.VERSION,
                 clubs_engine=CLUB_VERSION, frequency_engine='league-frequency-v1',
-                combined_engine='contextual-scenarios-v1', catboost_version=catboost_version,
+                combined_engine='contextual-scenarios-club-ids-v2', catboost_version=catboost_version,
                 loss_function='MultiClass', random_seed=20261018, thread_count=2,
                 has_time=True, allow_writing_files=False)
 
@@ -188,9 +189,11 @@ def _contexts(history, blocks_by_size):
             key = (str(row['match_id']), before)
             if key not in feature_cache:
                 feature_cache[key] = features._features(history_state, by_id[str(row['match_id'])])
-            club_key = (row['home'], row['away'], before)
+            club_key = (row.get('provider'), str(league), row.get('home_id'), row.get('away_id'),
+                        row['home'], row['away'], before)
             if club_key not in club_cache:
-                club_cache[club_key] = estimate(history, league, row['home'], row['away'], before)['probabilities']
+                club_cache[club_key] = estimate(history, league, row['home'], row['away'], before,
+                                               **fixture_identity(row))['probabilities']
             keys.append(key)
             values.append(feature_cache[key])
             clubs.append(club_cache[club_key])

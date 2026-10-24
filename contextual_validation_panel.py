@@ -3,6 +3,7 @@ from datetime import datetime
 import json
 
 import streamlit as st
+import admin_access
 
 import contextual_validation as evaluation
 import model_campaign as campaign
@@ -123,7 +124,8 @@ def render(rows, league, source):
         st.info('Une première campagne est verrouillée pour cette compétition. Le rapport enregistré est consultable ; '
                 'ses réglages ne seront pas remplacés par une nouvelle évaluation.')
     if st.button('Évaluer les répétitions par contexte', type='primary', icon=':material/analytics:',
-                 key=f'contextual_run_{league}', disabled=manifest is not None):
+                 key=f'contextual_run_{league}', disabled=manifest is not None or not admin_access.can_admin()):
+        admin_access.require_admin()
         progress = st.progress(0.0, text='Préparation des contextes…')
         try:
             if campaign.load_manifest(league) is not None:

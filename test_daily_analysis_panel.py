@@ -63,6 +63,8 @@ class DailyDataTests(unittest.TestCase):
 
 class DailyPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.entries=[]
         self.intents=[]
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))

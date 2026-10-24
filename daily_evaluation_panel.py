@@ -9,6 +9,7 @@ import daily_analysis_worker as worker
 import daily_evaluation_live as live
 import daily_evaluation_store as store
 import prediction_journal as journal
+import saved_model_comparison_panel
 from scenario_tables import METHOD_LABELS
 from ux_theme import render_page_header
 
@@ -163,11 +164,15 @@ def render_evaluation():
     render_page_header('Bilan de la sélection',
                        'Mesurer le regroupement des matchs, la qualité des probabilités et les résultats réellement observés.',
                        eyebrow='REJEU CHRONOLOGIQUE · COMPARAISON PAR TAILLE · SUIVI RÉEL', icon=':material/fact_check:')
-    modes = {'historical':'Rejeu historique', 'prospective':'Suivi réel'}
+    modes = {'historical':'Rejeu historique', 'prospective':'Suivi réel',
+             'methods':'Comparaison des modèles'}
     mode = st.segmented_control('Bilan à consulter', list(modes), format_func=modes.get,
                                 default='historical', required=True, key='daily_audit_view')
     if mode == 'prospective':
         _prospective()
+        return
+    if mode == 'methods':
+        saved_model_comparison_panel.render()
         return
     try:
         report = store.load_latest()

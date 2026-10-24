@@ -12,6 +12,8 @@ import model_training_panel as panel
 
 class ModelTrainingPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.rows = [dict(league='39', competition='Premier League', country='England') for _ in range(200)]
@@ -32,6 +34,9 @@ class ModelTrainingPanelTests(unittest.TestCase):
         self.campaign = self.patch(panel.campaign, 'load_manifest', return_value=None)
         self.loader = self.patch(panel.ml, 'load_report', return_value=None)
         self.trainer = self.patch(panel.ml, 'train', return_value=self.report)
+        # Register navigation without loading the real calendar on the initial
+        # default page. These tests exercise the isolated training panel only.
+        self.patch(__import__('scenario_workspace_panel'), 'render_workspace')
         self.at = AppTest.from_file(str(Path(__file__).parent / 'app.py'), default_timeout=15).run()
         self.at.switch_page('ui_pages/models.py').run()
         self.at.segmented_control(key='model_validation_view').set_value('deployment').run()

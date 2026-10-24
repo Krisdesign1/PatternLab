@@ -27,6 +27,13 @@ class MemoryBackend:
     def status(self):
         return dict(revision=self.revision, manifest=deepcopy(self.manifest), updated_at='2026-10-23T10:00:00+00:00')
 
+    @contextmanager
+    def committed_view(self):
+        # Model repeatable-read visibility, including blobs collected by a
+        # concurrent writer after the head was read.
+        head, blobs = self.status(), deepcopy(self.blobs)
+        yield dict(head, read_blobs=lambda digests:{digest:blobs[digest] for digest in digests})
+
     def acquire(self, owner):
         if self.owner is not None:
             raise BackendBusy('Busy')

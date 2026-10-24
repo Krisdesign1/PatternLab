@@ -21,6 +21,8 @@ def raw_fixture(match_id, status="FT"):
 
 class ApiFootballPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)

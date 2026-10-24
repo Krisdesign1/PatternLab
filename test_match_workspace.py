@@ -24,6 +24,8 @@ def raw(match_id=1, stamp="2026-10-18T12:00:00Z", status="TIMED", league=2021, c
 
 class WorkspaceCase(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "matches.json"
@@ -139,6 +141,8 @@ class WorkspaceTests(WorkspaceCase):
 
 class SynchronizationTests(WorkspaceCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         super().setUp()
         self.key = "workspace-test-token-never-real"
         self.client = MagicMock()

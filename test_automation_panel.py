@@ -15,6 +15,8 @@ import scenario_workspace_panel as workspace
 
 class AutomationPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.root = Path(folder.name)

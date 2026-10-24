@@ -23,6 +23,21 @@ def past_slate(count=8):
 
 
 class DailyReplayTests(unittest.TestCase):
+    def test_incremental_id_profiles_match_estimator_after_rename_and_collision(self):
+        raw=history(80)
+        for row in raw[40:]:row['teams']['home']['id']=999
+        rows=[api.normalize_fixture(row) for row in raw]
+        index=replay.HistoryIndex(rows);index.advance('2026-10-21')
+        fixture=replay.workspace.fixture_from_raw(future(2)[0])
+        fixture['home']='Renamed home';fixture['away']='Renamed away'
+        actual=index.estimate(fixture)
+        expected=clubs.estimate(rows,fixture['league'],fixture['home'],fixture['away'],'2026-10-21',
+                               home_id=fixture['home_id'],away_id=fixture['away_id'],provider=fixture['provider'])
+        self.assertEqual(actual['home_profile']['matches'],40)
+        self.assertEqual(actual['home_profile'],expected['home_profile'])
+        self.assertEqual(actual['away_profile'],expected['away_profile'])
+        self.assertEqual(actual['probabilities'],expected['probabilities'])
+
     def test_incremental_probabilities_match_the_production_clubs_estimator(self):
         raw=history(80,39)+history(80,61)
         rows=[api.normalize_fixture(row) for row in raw]

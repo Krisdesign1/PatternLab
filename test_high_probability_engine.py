@@ -13,10 +13,11 @@ NOW = datetime(2026, 10, 22, 9, tzinfo=timezone.utc)
 
 
 def fixture(mid, *, league=61, stamp='2026-10-22T15:00:00+00:00', status='NS',
-            home='Home', away='Away', ht=(0, 0), ft=(0, 0)):
+            home='Home', away='Away', ht=(0, 0), ft=(0, 0), home_id=None, away_id=None):
     return dict(fixture=dict(id=mid, date=stamp, status=dict(short=status)),
                 league=dict(id=league, name=f'League {league}', country='Country', season=2026),
-                teams=dict(home=dict(id=league*10+1, name=home), away=dict(id=league*10+2, name=away)),
+                teams=dict(home=dict(id=home_id or league*10+1, name=home),
+                           away=dict(id=away_id or league*10+2, name=away)),
                 score=dict(halftime=dict(zip(('home', 'away'), ht)),
                            fulltime=dict(zip(('home', 'away'), ft))),
                 goals=dict(home=9, away=9))
@@ -40,6 +41,23 @@ def ranked_row(mid, probabilities, *, rank=1, stamp='2026-10-22T15:00:00+00:00')
 
 
 class HighProbabilityEngineTests(unittest.TestCase):
+    def test_known_ids_distinguish_namesakes_and_preserve_renamed_history(self):
+        raw = history()
+        for index, row in enumerate(raw):
+            row['score'] = dict(halftime=dict(home=3 if index < 18 else 0, away=0),
+                                fulltime=dict(home=3, away=0))
+            if index >= 18:
+                row['teams']['home']['id'] = 999
+        result = engine.scan(raw+[fixture(100001), fixture(100002, home_id=999)], NOW)
+        by_id = {row['fixture']['home_id']: row for row in result['rows']}
+        self.assertEqual(by_id['611']['home_profile']['matches'], 18)
+        self.assertEqual(by_id['999']['home_profile']['matches'], 18)
+        self.assertGreater(by_id['611']['probabilities']['1st'], by_id['999']['probabilities']['1st'])
+        self.assertGreater(by_id['999']['probabilities']['2nd'], by_id['611']['probabilities']['2nd'])
+        result = engine.scan(history()+[fixture(100001, home='Renamed home', away='Renamed away')], NOW)
+        self.assertEqual(result['rows'][0]['home_profile']['matches'], 36)
+        self.assertEqual(result['rows'][0]['away_profile']['matches'], 36)
+
     def test_ranks_probability_across_competitions_without_support_or_count_cap(self):
         raw = history(league=1, count=30, equal=True)
         raw += history(league=2, count=180, start=1000)
@@ -107,7 +125,7 @@ class HighProbabilityEngineTests(unittest.TestCase):
                          fixture(100003, status='1H'), fixture(100004, status='HT'),
                          fixture(100005, status='PST'), fixture(100006, status='FT'),
                          fixture(100007, stamp=NOW.isoformat()),
-                         fixture(100008, home='TBD'), fixture(100009, away='Home')]
+                         fixture(100008, home='TBD'), fixture(100009, away='Home',away_id=611)]
         result = engine.scan(raw, NOW)
         self.assertEqual([row['fixture']['match_id'] for row in result['rows']], ['100001'])
         self.assertEqual(result['diagnostics']['day_count'], 9)
@@ -135,9 +153,9 @@ class HighProbabilityEngineTests(unittest.TestCase):
         raw += history(league=2, count=30, days=2, start=1000)
         raw += history(league=3, count=36, start=2000)
         raw += [fixture(100001, league=1), fixture(100002, league=2),
-                fixture(100003, league=3, home='New home club'),
-                fixture(100004, league=3, away='New away club'),
-                fixture(100005, league=3, home='Away', away='Home')]
+                fixture(100003, league=3, home='New home club', home_id=33),
+                fixture(100004, league=3, away='New away club', away_id=34),
+                fixture(100005, league=3, home='Away', away='Home', home_id=32, away_id=31)]
         result = engine.scan(raw, NOW)
         self.assertFalse(result['rows'])
         self.assertEqual(result['diagnostics']['excluded_counts'],

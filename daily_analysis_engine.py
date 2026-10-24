@@ -21,9 +21,11 @@ from zoneinfo import ZoneInfo
 import api_football as api
 import api_match_workspace as workspace
 from match_predictor import MIN_DAYS, MIN_LEAGUE, MIN_TEAM, SHRINK
+from club_identity import ClubProfiles
+from league_model import score
 
 
-VERSION = 'daily-data-support-partitions-v1'
+VERSION = 'daily-data-support-club-ids-v2'
 SOURCE = 'API-Football'
 TIMEZONE = 'Africa/Kinshasa'
 BUCKET_HOURS = 4
@@ -97,7 +99,7 @@ def _unique(raw, diagnostics):
 
 
 def _history(raw, before, now, diagnostics):
-    leagues = defaultdict(lambda: dict(matches=0, days=set(), home=Counter(), away=Counter()))
+    leagues = defaultdict(lambda: dict(matches=0, days=set(), profiles=ClubProfiles(provider='api-football')))
     issues = Counter()
     for item in raw:
         if api._status_short(item) not in api.FINISHED_STATUSES:
@@ -114,9 +116,8 @@ def _history(raw, before, now, diagnostics):
         value = leagues[row['league']]
         value['matches'] += 1
         value['days'].add(row['timestamp'][:10])
-        # Names deliberately match the current clubs model's role profiles.
-        value['home'][row['home']] += 1
-        value['away'][row['away']] += 1
+        ht, ft = score(row['ht']), score(row['ft'])
+        value['profiles'].add(row, ((ht[0], ft[0]-ht[0]), (ht[1], ft[1]-ht[1])))
     diagnostics['history_issues'] = [dict(league=league, matches=count)
                                       for league, count in sorted(issues.items(), key=lambda item: int(item[0]))]
     return leagues
@@ -126,8 +127,10 @@ def _support(fixture, leagues):
     league = leagues.get(fixture['league'])
     n = league['matches'] if league else 0
     days = len(league['days']) if league else 0
-    home = league['home'][fixture['home']] if league else 0
-    away = league['away'][fixture['away']] if league else 0
+    home = league['profiles'].profile(fixture['home'], 'home', team_id=fixture.get('home_id'),
+        league=fixture['league'], provider=fixture.get('provider'))['matches'] if league else 0
+    away = league['profiles'].profile(fixture['away'], 'away', team_id=fixture.get('away_id'),
+        league=fixture['league'], provider=fixture.get('provider'))['matches'] if league else 0
     minimum_role = min(home, away)
     score = 100 * (.50 * minimum_role / (minimum_role + SHRINK)
                    + .25 * n / (n + MIN_LEAGUE)

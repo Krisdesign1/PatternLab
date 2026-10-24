@@ -4,6 +4,7 @@ from datetime import datetime
 from math import isfinite
 
 import streamlit as st
+import admin_access
 from cloud_ui import guarded
 
 import api_football as api
@@ -153,7 +154,8 @@ def _detail(row, clock_day):
         with st.expander('Comprendre les méthodes indisponibles'):
             for name, reason in unavailable.items():
                 st.caption(f"{tables.METHOD_LABELS.get(name, name)} : {reason}")
-    if st.button('Actualiser les résultats de cette analyse', icon=':material/refresh:', key='daily_refresh'):
+    if st.button('Actualiser les résultats de cette analyse', icon=':material/refresh:', key='daily_refresh', disabled=not admin_access.can_admin()):
+        admin_access.require_admin()
         if _now().date() != clock_day:
             st.rerun()
         try:
@@ -177,7 +179,9 @@ def render_daily():
     mode = st.segmented_control('Consulter les analyses sélectionnées', list(modes), format_func=modes.get,
                                 default='today', required=True, key='daily_view', persist_state='page')
     try:
-        tracking.reconcile_local()
+        if admin_access.can_admin():
+            admin_access.require_admin()
+            tracking.reconcile_local()
         entries = journal.list_entries()
         selections = worker.load_selections(api.DATA_DIR)
         status = worker.load_status(api.DATA_DIR)
@@ -199,7 +203,8 @@ def render_daily():
         day = st.selectbox('Journée des analyses', dates, format_func=lambda value: value.strftime('%d/%m/%Y'),
                             key='daily_history_date', persist_state='page')
     else:
-        if st.button('Préparer les analyses du jour', icon=':material/auto_awesome:', key='daily_prepare'):
+        if st.button('Préparer les analyses du jour', icon=':material/auto_awesome:', key='daily_prepare', disabled=not admin_access.can_admin()):
+            admin_access.require_admin()
             try:
                 with st.spinner('Actualisation du calendrier et préparation des analyses…'):
                     report = worker.run_now()

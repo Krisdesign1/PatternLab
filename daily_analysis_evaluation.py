@@ -16,11 +16,12 @@ import api_match_workspace as workspace
 import daily_analysis_engine as engine
 from coupon_sizes import top_independent
 from league_model import VALUES, score
-from match_predictor import MIN_DAYS, MIN_LEAGUE, MIN_TEAM, SHRINK, half_probabilities
+from match_predictor import VERSION as CLUB_VERSION, MIN_DAYS, MIN_LEAGUE, MIN_TEAM, SHRINK, half_probabilities
+from club_identity import ClubProfiles
 from scenario_predictor import MIN_TRAIN
 
 
-VERSION = 'daily-selection-replay-v1'
+VERSION = 'daily-selection-club-ids-replay-v2'
 ZONE = ZoneInfo('Africa/Kinshasa')
 BINS = (0, 50, 65, 80, 100)
 
@@ -38,12 +39,8 @@ def _order(row):
 
 
 def _league():
-    return dict(matches=0, days=set(), counts=Counter(), home=Counter(), away=Counter(),
-                home_roles={}, away_roles={}, home_goals=[0,0], away_goals=[0,0])
-
-
-def _role():
-    return dict(matches=0, scored=[0,0], conceded=[0,0])
+    return dict(matches=0, days=set(), counts=Counter(), profiles=ClubProfiles(provider='api-football'),
+                home_goals=[0,0], away_goals=[0,0])
 
 
 class HistoryIndex:
@@ -63,12 +60,7 @@ class HistoryIndex:
             home = (ht[0], ft[0]-ht[0]);away = (ht[1], ft[1]-ht[1])
             league = self.leagues[row['league']]
             league['matches'] += 1;league['days'].add(row['timestamp'][:10]);league['counts'][row['value']] += 1
-            league['home'][row['home']] += 1;league['away'][row['away']] += 1
-            for role, team, scored, conceded in [('home_roles',row['home'],home,away),('away_roles',row['away'],away,home)]:
-                profile = league[role].setdefault(team,_role())
-                profile['matches'] += 1
-                for half in range(2):
-                    profile['scored'][half] += scored[half];profile['conceded'][half] += conceded[half]
+            league['profiles'].add(row, (home, away))
             for half in range(2):
                 league['home_goals'][half] += home[half];league['away_goals'][half] += away[half]
             self.position += 1
@@ -78,8 +70,10 @@ class HistoryIndex:
         league = self.leagues[fixture['league']]
         n = league['matches']
         baseline = {value:(league['counts'][value]+1)/(n+3) for value in VALUES}
-        home = league['home_roles'].get(fixture['home'],_role())
-        away = league['away_roles'].get(fixture['away'],_role())
+        home = league['profiles'].profile(fixture['home'], 'home', team_id=fixture.get('home_id'),
+            league=fixture['league'], provider=fixture.get('provider'))
+        away = league['profiles'].profile(fixture['away'], 'away', team_id=fixture.get('away_id'),
+            league=fixture['league'], provider=fixture.get('provider'))
         eligible = n >= MIN_LEAGUE and len(league['days']) >= MIN_DAYS
         personalized = eligible and min(home['matches'],away['matches']) >= MIN_TEAM
         probabilities = baseline.copy()
@@ -100,8 +94,8 @@ class HistoryIndex:
 
 
 def construct(eligible, supports):
-    """Mirror v1 partitions/buckets/coverage exactly; tested against its planner."""
-    if engine.VERSION != 'daily-data-support-partitions-v1':
+    """Mirror the versioned partitions/buckets/coverage; checked against planner."""
+    if engine.VERSION != 'daily-data-support-club-ids-v2':
         raise ValueError('La politique quotidienne a changé ; son rejeu doit être revu.')
     groups={}
     def add(members):
@@ -249,7 +243,7 @@ def evaluate(raw, *, today, start='2022-01-01', end=None, progress=None):
         row['clubs_loss']=row['clubs_loss_sum']/row['matches'] if row['matches'] else None
         row['baseline_loss']=row['baseline_loss_sum']/row['matches'] if row['matches'] else None
     protocol=dict(version=VERSION,start=start.isoformat(),end_exclusive=end.isoformat(),today=today.isoformat(),
-                  selection_policy=engine.VERSION,model='half-goals-v1 independent Clubs',sizes=list(range(2,21)),
+                  selection_policy=engine.VERSION,model=f'{CLUB_VERSION} independent Clubs',sizes=list(range(2,21)),
                   history_cutoff='strictly_before_first_target_UTC_day',
                   calendar='final_local_identities_reconstructed_as_NS_at_Kinshasa_day_start',
                   controlled_remainder='common_chronological_remainder_removed_before_both_sorts',

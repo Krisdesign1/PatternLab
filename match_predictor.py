@@ -4,20 +4,23 @@ from datetime import date
 from math import exp, log, prod
 from coupon_sizes import validate_size, top_independent
 from league_model import VALUES, score, outcome
+from club_identity import ClubProfiles, fixture_identity, identifier, provider_name, scoped_rows
 
 MIN_LEAGUE = 30
 MIN_DAYS = 3
 MIN_TEAM = 3
 SHRINK = 8
-VERSION = 'half-goals-v1'
+VERSION = 'half-goals-club-ids-v2'
 
 
-def training_rows(rows, league, before):
+def training_rows(rows, league, before, provider=None):
     date.fromisoformat(before)
     selected = {}
-    for row in rows:
-        if row['league'] != league or row['timestamp'][:10] >= before:
-            continue
+    # Scope identities only after excluding target-day/future rows. A later
+    # alias or source must not change an earlier estimate's legacy resolution.
+    candidates = [row for row in rows if str(row['league']) == str(league)
+                  and row['timestamp'][:10] < before]
+    for row in scoped_rows(candidates, league, provider):
         mid = str(row['match_id'])
         if mid in selected and selected[mid] != row:
             raise ValueError('Identifiant contradictoire')
@@ -32,12 +35,19 @@ def goals(row):
     return (ht[0], ft[0]-ht[0]), (ht[1], ft[1]-ht[1])
 
 
-def profile(rows, team, venue):
-    matches = [r for r in rows if r[venue] == team]
-    idx = 0 if venue == 'home' else 1
-    return {'matches': len(matches),
-            'scored': [sum(goals(r)[idx][i] for r in matches) for i in range(2)],
-            'conceded': [sum(goals(r)[1-idx][i] for r in matches) for i in range(2)]}
+def profile(rows, team, venue, *, team_id=None, league=None, provider=None):
+    rows = list(rows)
+    leagues = {str(row['league']) for row in rows}
+    if league is None:
+        if len(leagues) > 1:
+            raise ValueError('Choisissez une seule compétition pour ce profil.')
+        league = next(iter(leagues), '')
+    selected = scoped_rows(rows, league, provider)
+    providers = {provider_name(row.get('provider')) for row in selected} - {''}
+    index = ClubProfiles(provider=provider or next(iter(providers), None))
+    for row in selected:
+        index.add(row, goals(row))
+    return index.profile(team, venue, team_id=team_id, league=league, provider=provider)
 
 
 def poisson(mean):
@@ -58,14 +68,17 @@ def half_probabilities(first, second):
     return p
 
 
-def estimate(rows, league, home, away, before):
-    if not home or not away or home == away:
+def estimate(rows, league, home, away, before, *, home_id=None, away_id=None, provider=None):
+    home_id, away_id = identifier(home_id), identifier(away_id)
+    if (not home or not away or home_id is not None and home_id == away_id
+            or home == away and (home_id is None or away_id is None)):
         raise ValueError('Choisis deux équipes différentes')
-    train = training_rows(rows, league, before)
+    train = training_rows(rows, league, before, provider)
     n = len(train)
     counts = Counter(r['value'] for r in train)
     baseline = {v: (counts[v]+1)/(n+3) for v in VALUES}
-    h, a = profile(train, home, 'home'), profile(train, away, 'away')
+    h = profile(train, home, 'home', team_id=home_id, league=league, provider=provider)
+    a = profile(train, away, 'away', team_id=away_id, league=league, provider=provider)
     eligible = n >= MIN_LEAGUE and len({r['timestamp'][:10] for r in train}) >= MIN_DAYS
     personalized = eligible and min(h['matches'], a['matches']) >= MIN_TEAM
     p = baseline.copy()
@@ -90,15 +103,16 @@ def estimate(rows, league, home, away, before):
 
 
 def backtest(rows, league):
-    targets = sorted((r for r in rows if r['league'] == league),
+    targets = sorted((r for r in rows if str(r['league']) == str(league)),
                      key=lambda r: (r['timestamp'], int(r['match_id'])))
     records = []
     seen = set()
     for r in targets:
-        if r['match_id'] in seen:
+        identity = (provider_name(r.get('provider')), str(r['match_id']))
+        if identity in seen:
             continue
-        seen.add(r['match_id'])
-        e = estimate(rows, league, r['home'], r['away'], r['timestamp'][:10])
+        seen.add(identity)
+        e = estimate(rows, league, r['home'], r['away'], r['timestamp'][:10], **fixture_identity(r))
         if not e['eligible']:
             continue
         p, base, actual = e['probabilities'], e['baseline'], r['value']

@@ -26,6 +26,8 @@ def report_fixture():
 
 class SeasonalPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.report = report_fixture()
         partition = dict(seasons=[2022], matches=380, start='2022-08-01', end='2023-05-31')
         self.plan = dict(suitable=True, fingerprint='history', seasons=[dict(season=2022, matches=380)],

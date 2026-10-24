@@ -1,5 +1,9 @@
 # PatternLab : surfaces claires, bleu profond et typographie système.
 # Les variantes restent disponibles dans le menu de l’application.
+[runner]
+# Finish the current checkpoint before another page run replaces its fragments.
+fastReruns = false
+
 [theme]
 base = "light"
 font = "sans-serif"

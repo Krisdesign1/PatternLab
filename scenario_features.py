@@ -88,7 +88,8 @@ def _metadata(row, league, provider, *, require_id=False):
         home, away = home.strip(), away.strip()
         home_id = _identifier(row.get('home_id'), optional=True)
         away_id = _identifier(row.get('away_id'), optional=True)
-        if home == away or home_id is not None and home_id == away_id:
+        if (home_id is not None and home_id == away_id
+                or home == away and (home_id is None or away_id is None)):
             raise FeatureError('Les deux clubs doivent être différents.')
         season = row.get('season')
         if season is not None and (type(season) is not int or not 1900 <= season <= 2100):

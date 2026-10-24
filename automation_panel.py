@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 import cloud_storage
+import admin_access
 
 import api_football as api
 import automation_worker as worker
@@ -62,6 +63,7 @@ def _scheduler_status():
 
 
 def _configuration(config):
+    allowed = admin_access.can_admin()
     with st.form('automation_config', border=True):
         enabled = st.toggle('Autoriser les cycles automatiques', value=bool(config['enabled']), key='automation_enabled')
         models_enabled = st.toggle('Préparer et figer les modèles des compétitions prêtes',
@@ -79,8 +81,9 @@ def _configuration(config):
         st.caption('Les imports alternent entre les compétitions qui jouent dans les sept prochains jours et la file générale. '
                    'La préparation locale des modèles traite au maximum une compétition par passage du service. '
                    'Ses paramètres restent ensuite figés pour le suivi avant match.')
-        saved = st.form_submit_button('Enregistrer les réglages', icon=':material/save:', key='automation_save')
+        saved = st.form_submit_button('Enregistrer les réglages', icon=':material/save:', key='automation_save', disabled=not allowed)
     if saved:
+        admin_access.require_admin()
         candidate = dict(config, enabled=enabled, models_enabled=models_enabled, sizes=sizes, interval_minutes=int(interval),
                          history_seasons=seasons, history_enabled=history_enabled)
         try:
@@ -213,6 +216,7 @@ def render_automation():
                'Les historiques et le suivi des résultats déjà enregistrés sont conservés. '
                'Chaque première prévision reste verrouillée dans le journal.')
     _scheduler_status()
+    admin_access.read_only_notice()
     try:
         config = worker.load_config()
         with st.expander('Réglages des cycles', icon=':material/tune:'):
@@ -222,7 +226,7 @@ def render_automation():
         return
     with st.container(horizontal=True):
         run = st.button('Lancer un cycle maintenant', type='primary', icon=':material/play_arrow:',
-                         key='automation_run', disabled=not config['enabled'])
+                         key='automation_run', disabled=not config['enabled'] or not admin_access.can_admin())
         refresh = st.button('Relire l’état local', icon=':material/refresh:', key='automation_refresh')
     st.caption('Lancer un cycle utilise les requêtes nécessaires, selon les disponibilités d’API-Football. '
                'L’ouverture de cette page et « Relire l’état local » utilisent seulement les fichiers locaux.')
@@ -230,6 +234,7 @@ def render_automation():
     if refresh:
         _coverage.clear()
     if run:
+        admin_access.require_admin()
         try:
             with st.spinner('Préparation des données et enregistrement des groupes avant match…'):
                 report = worker.run_cycle(config=config)

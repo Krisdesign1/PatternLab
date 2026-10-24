@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from itertools import product
 from math import isfinite, log, prod, sqrt
 import unittest
+from unittest.mock import patch
 
 from contextual_scenarios import (
     _combined_model, _ranking, _sequence_details, evaluate, forecast,
@@ -36,6 +37,21 @@ def fixtures(early=True, day="2026-02-01", size=2):
 
 
 class ExactDistributionTests(unittest.TestCase):
+    def test_cache_identity_includes_provider_competition_and_known_club_ids(self):
+        import contextual_scenarios as engine
+        history = sample()
+        targets = fixtures()
+        for row in targets:
+            row.update(home_id='11', away_id='20')
+        cache = {}
+        with patch.object(engine, 'estimate', wraps=engine.estimate) as estimator:
+            engine._prepare(history, targets, estimate_cache=cache)
+            changed = copy.deepcopy(targets)
+            changed[0]['home_id'] = '12'
+            engine._prepare(history, changed, estimate_cache=cache)
+        self.assertEqual(estimator.call_count, 3)
+        self.assertEqual(estimator.call_args_list[-1].kwargs['home_id'], '12')
+
     def test_partition_function_matches_full_enumeration_for_two_and_four(self):
         for size in (2, 4):
             with self.subTest(size=size):

@@ -20,6 +20,8 @@ from test_prospective_models import context_method
 
 class JournalPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         folder=tempfile.TemporaryDirectory();self.addCleanup(folder.cleanup)
         self.root=Path(folder.name)
         self.patch(journal,'DB_PATH',self.root/'journal.sqlite3')

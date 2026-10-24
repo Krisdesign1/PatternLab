@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 
 import streamlit as st
+import admin_access
 
 import seasonal_validation as evaluation
 
@@ -121,7 +122,8 @@ def render(rows, league, source):
     st.caption('Groupes de 2, 4, 6 et 8 matchs. Calcul local, sans requête API. '
                'Les modèles utilisés pour les prochains matchs et le journal restent distincts de cette évaluation.')
     if st.button('Évaluer l’historique par saison', type='primary', icon=':material/analytics:',
-                 key=f'seasonal_run_{league}'):
+                 key=f'seasonal_run_{league}', disabled=not admin_access.can_admin()):
+        admin_access.require_admin()
         progress = st.progress(0.0, text='Préparation des évaluations…')
         try:
             report = evaluation.run(rows, league, source,

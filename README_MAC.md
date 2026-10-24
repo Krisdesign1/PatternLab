@@ -1017,3 +1017,44 @@ Les réglages permettent de sauvegarder les données API-Football en JSON.
 Le déploiement Streamlit seul ne suffit pas à conserver durablement l’historique ou à exécuter les traitements sans visiteur. Le [guide Cloud gratuit](docs/CLOUD_GRATUIT.md) explique l’import initial vers PostgreSQL, la connexion du site et l’activation de trois cycles quotidiens dans GitHub Actions.
 
 Cette intégration reste inactive tant que le stockage et ses secrets privés ne sont pas configurés. Le mode local habituel reste disponible. L’hébergement gratuit ne garantit pas une disponibilité 24 h/24.
+# Corrections de fiabilité — 24 octobre 2026
+
+Les profils Clubs utilisent désormais les identifiants API, avec séparation par
+fournisseur, compétition et rôle domicile/extérieur. Un changement de nom conserve
+les précédents du même club ; des identifiants distincts portant le même nom ne
+sont pas fusionnés. Les anciens enregistrements sans identifiant ne sont rapprochés
+par nom que lorsque l’historique disponible ne présente pas d’ambiguïté. Le moteur
+Clubs porte une nouvelle version ; les anciennes prévisions et leurs distributions
+restent inchangées.
+
+Pendant une mise à jour partagée, un aperçu en lecture seule donne accès au
+calendrier sauvegardé, aux probabilités calculées sur cet instantané et aux analyses
+déjà enregistrées. Les scores sont ceux de la sauvegarde datée affichée. Cet aperçu
+n’importe rien, ne publie rien et ne relance pas l’action interrompue. Les autres
+vues complètes reprennent après libération du stockage. Le minuteur de reprise est
+installé à un emplacement fixe, y compris sur Community Cloud où `fastReruns` est
+imposé. Le réglage local `runner.fastReruns=false` reste une protection complémentaire.
+
+Les commandes utilisant la clé API, les réglages partagés, les cycles et les
+entraînements sont réservés aux administrateurs. Sans connexion OIDC configurée,
+la consultation et les calculs locaux restent disponibles, mais ces commandes sont
+refusées. Le code ne crée pas un compte administrateur à partir de l’URL ou d’une
+valeur de session. La configuration privée est décrite dans [ADMINISTRATION.md](ADMINISTRATION.md).
+Les traitements autorisés en ligne de commande et GitHub Actions restent distincts
+des sessions web.
+
+Dans **Bilan de la sélection → Comparaison des modèles**, Répétitions, Clubs et
+CatBoost sont comparés sur les mêmes matchs déjà prévus avant leur coup d’envoi et
+après l’enregistrement du protocole prospectif. Une cohorte conserve une compétition,
+une taille et les mêmes versions et générations, y compris celles des composants
+d’un groupe mixte. Un match répété entre groupes compte une fois dans cette cohorte.
+Les méthodes absentes, les attentes et les résultats invalides sont explicités ;
+ils ne deviennent pas des échecs. Les marginales sont calculées à partir des
+distributions sauvegardées, sans nouvel entraînement ni reconstruction de prévision.
+Les résultats restent descriptifs : ils ne déclenchent aucune promotion de modèle
+et ne remplacent pas le protocole d’incertitude existant du journal.
+
+Le workflow **Vérifications PatternLab** lance les tests sur les propositions de
+modification et les envois vers `main`, avec une base PostgreSQL jetable et sans
+secret de production. Sa présence ne configure pas à elle seule les règles de
+protection de branche ou une attente du déploiement Streamlit.

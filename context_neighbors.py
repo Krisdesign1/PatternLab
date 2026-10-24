@@ -17,10 +17,11 @@ import catboost_scenarios as ml
 from coupon_sizes import top_independent, validate_size
 from league_model import VALUES, outcome, score
 from match_predictor import estimate
+from club_identity import fixture_identity
 import scenario_features as features
 
 
-VERSION = 'context-neighbors-v1'
+VERSION = 'context-neighbors-club-ids-v2'
 SCHEMA = 'context-neighbors-distribution-v1'
 DESCRIPTOR_VERSION = 'context-neighbors-descriptor-v1'
 SOURCE = 'API-Football'
@@ -388,7 +389,8 @@ def forecast(rows, fixtures, source=SOURCE, limit=3):
     groups = seasonal._groups(history, history, len(fixtures))
     contexts = seasonal._contexts(history, {len(fixtures): groups})[len(fixtures)] if history else []
     catalog = fit_catalog(contexts)
-    estimates = [estimate(history, league, row['home'], row['away'], before) for row in normalized]
+    estimates = [estimate(history, league, row['home'], row['away'], before,
+                          **fixture_identity(row)) for row in normalized]
     target_features = [features.feature_for_fixture(history, row, before=before) for row in fixtures]
     target = dict(block=dict(matches=fixtures), before=before, features=target_features,
                   clubs=[item['probabilities'] for item in estimates])

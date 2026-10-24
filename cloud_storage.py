@@ -5,6 +5,7 @@ closed: a local success is returned only after the corresponding remote commit.
 """
 from contextlib import contextmanager, closing
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
 from hashlib import sha256
 import fcntl
@@ -33,6 +34,7 @@ _PROJECT = Path(__file__).resolve().parent
 _data_root = _PROJECT / 'data'
 _backend_factory = PostgresBackend
 _current = ContextVar('patternlab_cloud_transaction', default=None)
+_read_only = ContextVar('patternlab_committed_snapshot', default=None)
 _local_lock = threading.RLock()
 _file_cache = {}
 
@@ -43,6 +45,105 @@ class CloudStorageError(RuntimeError):
 
 class CloudStorageBusy(CloudStorageError):
     pass
+
+
+class CloudStorageReadOnly(CloudStorageError):
+    pass
+
+
+@dataclass(frozen=True)
+class CommittedSnapshot:
+    root: Path
+    revision: int
+    updated_at: str | None
+    workspace: str
+
+
+def _assert_writable():
+    if _read_only.get() is not None:
+        raise CloudStorageReadOnly('Cet instantané est consultable uniquement ; aucune opération ne peut être enregistrée.')
+
+
+def snapshot_identity():
+    """Non-secret cache identity; constructing a backend performs no I/O."""
+    backend = _backend()
+    return getattr(backend, 'identity', ''), backend.workspace
+
+
+def committed_revision():
+    """Read only the head, so retries reuse unchanged snapshot contents."""
+    try:
+        with _backend().committed_view() as view:
+            revision = view['revision']
+            if type(revision) is not int or revision <= 0:
+                raise CloudStorageError('La version sauvegardée est invalide.')
+            return revision
+    except BackendError as error:
+        raise CloudStorageError(str(error)) from None
+
+
+@contextmanager
+def committed_snapshot(*, files=None):
+    """Yield an isolated, validated committed copy while a writer keeps its lease.
+
+    This does not redirect any application-global path or run existing page
+    bodies. Consumers must use explicit paths below snapshot.root. Mutation
+    boundaries reject operations throughout the consumer's read-only context.
+    """
+    if files is not None:
+        files = {_safe_path(name).as_posix() for name in files}
+    if not configured():
+        raise CloudStorageError('Aucun stockage partagé n’est configuré pour consulter un instantané.')
+    try:
+        backend = _backend()
+        with tempfile.TemporaryDirectory(prefix='patternlab-read-') as directory:
+            root = Path(directory)
+            with backend.committed_view() as view:
+                manifest = _manifest(view['manifest'])
+                revision = view['revision']
+                if type(revision) is not int or revision <= 0:
+                    raise CloudStorageError('La version sauvegardée est invalide.')
+                entries = {name: entry for name, entry in manifest['files'].items()
+                           if files is None or name in files}
+                objects = {}
+                for entry in entries.values():
+                    previous = objects.setdefault(entry['sha256'], entry)
+                    if previous != entry:
+                        raise CloudStorageError('Des fichiers sauvegardés ont des tailles incompatibles.')
+                # Stage one file per digest; validate hashes, sizes, SQLite and
+                # all requested objects before exposing even one to a consumer.
+                staging = root / '.objects'
+                staging.mkdir()
+                sqlite_digests = {entry['sha256'] for name, entry in entries.items()
+                                  if Path(name).suffix == '.sqlite3'}
+                for batch in _restore_batches(objects):
+                    contents = view['read_blobs'](list(batch))
+                    if not isinstance(contents, dict) or set(contents) != set(batch):
+                        raise CloudStorageError('L’instantané sauvegardé est incomplet.')
+                    for digest, entry in batch.items():
+                        encoded, raw_size = contents[digest]
+                        if raw_size != entry['size']:
+                            raise CloudStorageError('La taille d’un fichier sauvegardé est invalide.')
+                        path = staging / digest
+                        path.write_bytes(_decode(encoded, entry))
+                        if digest in sqlite_digests:
+                            with closing(sqlite3.connect(f'file:{path.as_posix()}?mode=ro', uri=True)) as con:
+                                if con.execute('PRAGMA quick_check').fetchone() != ('ok',):
+                                    raise CloudStorageError('Le journal sauvegardé est invalide.')
+                for name, entry in entries.items():
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(staging / entry['sha256'], path)
+            snapshot = CommittedSnapshot(root, revision, view.get('updated_at'), backend.workspace)
+            token = _read_only.set(snapshot)
+            try:
+                yield snapshot
+            finally:
+                _read_only.reset(token)
+    except BackendError as error:
+        raise CloudStorageError(str(error)) from None
+    except (OSError, sqlite3.Error, KeyError, TypeError, ValueError):
+        raise CloudStorageError('Impossible de consulter un instantané sauvegardé cohérent.') from None
 
 
 @contextmanager
@@ -384,6 +485,7 @@ class _Session:
 
 
 def assert_lease():
+    _assert_writable()
     session = _current.get()
     if session is not None:
         session.check()
@@ -392,6 +494,7 @@ def assert_lease():
 
 
 def checkpoint():
+    _assert_writable()
     session = _current.get()
     if session is None:
         if configured():
@@ -419,6 +522,7 @@ def checkpoint():
 
 @contextmanager
 def transaction():
+    _assert_writable()
     active = _current.get()
     if active is not None:
         active.check()
@@ -506,6 +610,7 @@ def persisted(function):
 
 def seed():
     """Explicitly initialize an EMPTY remote workspace from current local data."""
+    _assert_writable()
     if not configured():
         raise CloudStorageError('Configurez PATTERNLAB_DATABASE_URL avant l’initialisation distante.')
     if _current.get() is not None:

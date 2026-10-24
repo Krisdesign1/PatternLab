@@ -61,6 +61,8 @@ def prepared(report, ids, *, outcome='1st', minimum=0, choices=None):
 
 class HighProbabilityPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.value = report()
         self.clock = self.patch(panel, '_now', return_value=NOW)
         self.load = self.patch(workspace, 'load_scan', side_effect=lambda: deepcopy(self.value))

@@ -74,6 +74,11 @@ class DistributionTests(unittest.TestCase):
             ml._group_inputs(module, history, [block])
         self.assertEqual(module.cutoffs, ["2025-01-01"] * 4)
         self.assertTrue(all(call.args[-1] == "2025-01-01" for call in estimate.call_args_list))
+        self.assertEqual([call.kwargs['home_id'] for call in estimate.call_args_list],
+                         [row['home_id'] for row in block['matches']])
+        self.assertEqual([call.kwargs['away_id'] for call in estimate.call_args_list],
+                         [row['away_id'] for row in block['matches']])
+        self.assertTrue(all(call.kwargs['provider']=='api-football' for call in estimate.call_args_list))
 
     def test_source_scope_and_utc_cutoff_precede_result_validation(self):
         rows = sample(12)
@@ -98,6 +103,8 @@ class NativeRoundtripTests(unittest.TestCase):
         report = ml.load_report("API-Football", "39", self.directory.name)
         self.assertEqual(report, self.report)
         self.assertEqual(report["source"], "API-Football")
+        from match_predictor import VERSION as clubs_version
+        self.assertEqual(report['clubs_version'], clubs_version)
         self.assertEqual(set(report["validation"]), set(ml.METHODS))
         self.assertEqual(set(report["test"]), set(ml.METHODS))
         self.assertLess(report["split"]["train"]["end"], report["split"]["validation"]["start"])

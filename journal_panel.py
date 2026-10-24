@@ -3,6 +3,7 @@ import json
 from datetime import datetime
 
 import streamlit as st
+import admin_access
 from cloud_ui import guarded
 
 import api_football
@@ -125,7 +126,8 @@ def _detail(entry, day, daily, *, clock_day):
         st.info('Ce groupe est annulé du suivi et ne participe pas aux taux de réussite.')
     elif entry['status'] == 'unresolved':
         st.warning('Ce groupe nécessite une vérification des matchs indiqués ci-dessous. Il ne participe pas aux taux de réussite.')
-    if st.button('Actualiser les résultats API de ce groupe', icon=':material/refresh:', key='journal_refresh'):
+    if st.button('Actualiser les résultats API de ce groupe', icon=':material/refresh:', key='journal_refresh', disabled=not admin_access.can_admin()):
+        admin_access.require_admin()
         if _today() != clock_day:
             st.rerun()
         try:
@@ -209,7 +211,9 @@ def render_journal():
     st.caption('Source unique : API-Football. La première prévision de chaque groupe est conservée ; '
                'un nouveau clic ou un réentraînement ne la remplace pas.')
     try:
-        tracking.reconcile_local()
+        if admin_access.can_admin():
+            admin_access.require_admin()
+            tracking.reconcile_local()
         all_entries = journal.list_entries()
         entries = [entry for entry in all_entries if entry.get('group_kind') != 'mixed']
     except (journal.JournalError, api_football.ApiFootballError, ValueError) as error:

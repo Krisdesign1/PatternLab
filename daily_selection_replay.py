@@ -24,7 +24,7 @@ from league_patterns import repeated_scenarios
 import scenario_features as features
 from scenario_predictor import MIN_TRAIN, best_sequences, fit_sequences, probability
 
-VERSION = 'daily-selection-methods-replay-v1'
+VERSION = 'daily-selection-methods-club-ids-replay-v2'
 METHODS = ('frequency', 'clubs', 'combined', 'catboost', 'context_neighbors')
 PROTOCOL = dict(
     train_start='2022-01-01', train_end='2025-01-01',

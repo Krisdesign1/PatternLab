@@ -2,6 +2,7 @@
 import json
 
 import streamlit as st
+import admin_access
 
 import api_football as api
 import model_campaign as campaign
@@ -176,10 +177,11 @@ def render(rows, source='API-Football'):
     resumable = report and report.get('status') in ('building','error')
     action = st.button('Reprendre cette campagne figée' if resumable else 'Entraîner et figer cette compétition',
                        type='primary', icon=':material/model_training:', key='campaign_run',
-                       disabled=job['status'] != 'ready' and not resumable)
+                       disabled=(job['status'] != 'ready' and not resumable) or not admin_access.can_admin())
     st.caption('Une compétition par lancement. Les paramètres figés ne sont pas réajustés aux résultats suivants. '
                'Le journal conserve toutes les prévisions originales.')
     if action:
+        admin_access.require_admin()
         try:
             with st.spinner('Entraînement et validation sur le premier historique figé…'):
                 report = campaign.run_one(rows, league, sizes=tuple(sizes))

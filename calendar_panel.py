@@ -4,6 +4,7 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import admin_access
 
 import calendar_data
 import workspace_sources as sources
@@ -21,6 +22,7 @@ def mark_attempt(source, day):
 
 
 def update_journal():
+    admin_access.require_admin()
     import journal_tracking
     import prediction_journal
     try:
@@ -31,6 +33,9 @@ def update_journal():
 
 def maybe_refresh(source, day, today):
     """Only opt-in callers invoke this; reserve failures as well as successes."""
+    if not admin_access.can_admin():
+        return
+    admin_access.require_admin()
     context = (source, day.isoformat())
     if day != today:
         st.caption('Le suivi automatique est actif uniquement pour la journée en cours.')

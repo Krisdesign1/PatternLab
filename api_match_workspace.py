@@ -84,7 +84,7 @@ def fixture_from_raw(raw):
         if not all(isinstance(name, str) and name.strip() and name.strip().casefold() not in unknown
                    for name in (home_name, away_name)):
             raise ValueError("Les deux clubs doivent être confirmés")
-        if home_id == away_id or home_name.strip() == away_name.strip():
+        if home_id == away_id:
             raise ValueError("Les deux clubs doivent être différents")
         league = api._numeric_id(competition["id"], "de compétition")
         season = competition.get("season")

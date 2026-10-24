@@ -43,6 +43,20 @@ def candidate_sets(report):
 
 
 class DailyAnalysisEngineTests(unittest.TestCase):
+    def test_id_role_counts_distinguish_namesakes_and_keep_renamed_clubs(self):
+        past, targets = history(), future(2)
+        for row in past[2:]:
+            row['teams']['home']['id'] = 999
+        report = engine.plan(past+targets, now=NOW)
+        self.assertFalse(report['candidates'])
+        self.assertEqual(report['diagnostics']['excluded'][0]['support']['home_role_matches'], 2)
+        for row in targets:
+            row['teams']['home']['name'] = 'Renamed home'
+            row['teams']['away']['name'] = 'Renamed away'
+        report = engine.plan(history()+targets, now=NOW)
+        self.assertEqual(report['diagnostics']['eligible_matches'], 2)
+        self.assertEqual(report['candidates'][0]['selection']['support']['club_role_matches_min'], 60)
+
     def test_mono_and_mixed_groups_remain_available_with_competition_context(self):
         report = engine.plan(history(60, 39) + history(60, 61) + future(4, (39, 61)), now=NOW)
         self.assertGreater(len(report['candidates']), 1)

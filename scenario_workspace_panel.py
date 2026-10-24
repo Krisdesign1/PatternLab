@@ -4,6 +4,7 @@ import json
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import admin_access
 from cloud_ui import guarded
 
 import workspace_sources as sources
@@ -300,7 +301,8 @@ def _render_workspace(source, auto=False):
                           disabled=True, key='workspace_day', format='DD/MM/YYYY',
                           help='La journée en cours est définie par le fuseau Africa/Kinshasa.')
             day = today
-        if auto and not st.session_state.get('workspace_refresh', False):
+        if auto and admin_access.can_admin() and not st.session_state.get('workspace_refresh', False):
+            admin_access.require_admin()
             calendar.maybe_refresh(source, day, today)
         try:
             snapshot = _day_snapshot(_snapshot(day, _signature(), source), day)
@@ -332,7 +334,8 @@ def _render_workspace(source, auto=False):
             if options and league not in league_options:
                 league = calendar.ALL
         with controls[2]:
-            if st.button('Actualiser', icon=':material/refresh:', width='stretch', key='workspace_refresh'):
+            if st.button('Actualiser', icon=':material/refresh:', width='stretch', key='workspace_refresh', disabled=not admin_access.can_admin()):
+                admin_access.require_admin()
                 calendar.mark_attempt(source, day)
                 try:
                     with st.spinner('Actualisation des matchs de la journée…'):
@@ -482,11 +485,15 @@ def _render_workspace(source, auto=False):
                            width='stretch', disabled=not 2 <= count <= 20 or engine == 'catboost' and not report
                            or engine == 'context_neighbors' and not context_report,
                            key='workspace_predict')
-        st.caption('L’historique de la compétition est complété au premier calcul si nécessaire. '
-                   'Cette préparation utilise jusqu’à deux requêtes ; les calculs suivants restent locaux.')
-        st.caption('Pour les matchs du jour encore à venir, la première prévision est enregistrée automatiquement. '
-                   'Une requête API vérifie les affiches juste avant cet enregistrement. '
-                   'Les rencontres commencées ne peuvent pas être sélectionnées.')
+        if admin_access.can_admin():
+            st.caption('L’historique de la compétition est complété au premier calcul si nécessaire. '
+                       'Cette préparation utilise jusqu’à deux requêtes ; les calculs suivants restent locaux.')
+            st.caption('Pour les matchs du jour encore à venir, la première prévision est enregistrée automatiquement. '
+                       'Une requête API vérifie les affiches juste avant cet enregistrement. '
+                       'Les rencontres commencées ne peuvent pas être sélectionnées.')
+        else:
+            st.caption('Calcul sur les données déjà disponibles. La confirmation API et l’enregistrement avant match '
+                       'nécessitent une connexion administrateur.')
     context = (day.isoformat(), league, tuple(row['match_id'] for row in chosen), _signature(),
                engine, model_generation, status, query, source)
     if action:
@@ -499,7 +506,8 @@ def _render_workspace(source, auto=False):
             current = info.get('current_season')
             missing = sources.missing_history(source, info['code'], [current - 1, current]) \
                 if current and info.get('code') else []
-            if missing and info.get('code'):
+            if missing and info.get('code') and admin_access.can_admin():
+                admin_access.require_admin()
                 _require_today(day, chosen)
                 with st.spinner('Préparation des précédents des clubs et des scénarios de la compétition…'):
                     sources.ensure_history(source, info['code'], missing)
@@ -517,8 +525,10 @@ def _render_workspace(source, auto=False):
                 else:
                     estimate = _estimate(result, fixtures, source)
             _require_today(day, fixtures)
-            registered = None
-            if estimate['eligible']:
+            registered = (None if admin_access.can_admin() else dict(state='read_only',
+                message='Calcul local non enregistré : une connexion administrateur est nécessaire pour confirmer les rencontres dans l’API.'))
+            if estimate['eligible'] and admin_access.can_admin():
+                admin_access.require_admin()
                 try:
                     with st.spinner('Vérification avant match et enregistrement des méthodes comparables…'):
                         registered = tracking.register(rows, fixtures, estimate, engine, competition=info)

@@ -2,6 +2,7 @@
 import json
 
 import streamlit as st
+import admin_access
 
 import catboost_scenarios as ml
 import model_campaign as campaign
@@ -30,6 +31,8 @@ def comparison_table(metrics):
 
 def show_report(report):
     st.subheader('Résultats du test réservé', icon=':material/fact_check:')
+    st.caption(f"Version du moteur Clubs de ce comparatif figé : {report.get('clubs_version', 'half-goals-v1')}. "
+               'Les résultats enregistrés ne sont pas recalculés avec les versions suivantes.')
     st.caption(f"Source : {report['source']} · Compétition : {report['league']} · "
                'Scénarios de 4 matchs, dans leur ordre chronologique.')
     st.dataframe(comparison_table(report['test']), hide_index=True, width='stretch')
@@ -71,6 +74,7 @@ def render_training():
     render_page_header('Modèles et validation',
                        'Mesurer les répétitions d’une saison à l’autre et entraîner les modèles par compétition.',
                        eyebrow='APPRENTISSAGE · VALIDATION · TEST', icon=':material/model_training:')
+    admin_access.read_only_notice()
     try:
         source = sources.selected_source()
         st.caption(f'Source active : {source}. L’entraînement utilise uniquement les données locales de ce fournisseur.')
@@ -126,10 +130,11 @@ def render_training():
         st.caption('Les jours restent entiers. Les réglages sont fixés avant de consulter le test. '
                    'L’entraînement ne consomme aucune requête API et peut prendre quelques minutes.')
         action = st.button('Entraîner et évaluer CatBoost', type='primary', icon=':material/model_training:',
-                           key='model_train', disabled=locked or leagues[league]['count'] < 160)
+                           key='model_train', disabled=locked or leagues[league]['count'] < 160 or not admin_access.can_admin())
         if leagues[league]['count'] < 160:
             st.info('Cette compétition manque d’historique. Importez davantage de saisons avant l’entraînement.')
     if action:
+        admin_access.require_admin()
         try:
             if campaign.load_manifest(league) is not None:
                 raise campaign.CampaignError('Une campagne vient de verrouiller cette compétition ; le modèle est conservé.')

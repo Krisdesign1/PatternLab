@@ -21,7 +21,8 @@ import tempfile
 from coupon_sizes import top_independent, validate_size
 from league_model import VALUES, outcome, score
 from league_patterns import repeated_scenarios
-from match_predictor import estimate
+from match_predictor import VERSION as CLUB_VERSION, estimate
+from club_identity import different_clubs, fixture_identity, fixture_key
 from scenario_predictor import PRIOR_WEIGHT, best_sequences, fit_sequences, probability
 
 
@@ -200,7 +201,8 @@ def _group_inputs(module, rows, blocks):
     for block in blocks:
         before = min(row["timestamp"][:10] for row in block["matches"])
         features = [_feature(module, rows, row, before) for row in block["matches"]]
-        clubs = [estimate(rows, row["league"], row["home"], row["away"], before)["probabilities"]
+        clubs = [estimate(rows, row["league"], row["home"], row["away"], before,
+                          **fixture_identity(row))["probabilities"]
                  for row in block["matches"]]
         prepared.append(dict(block=block, before=before, features=features, clubs=clubs))
     return prepared
@@ -324,7 +326,8 @@ def train(rows, league, source, directory=None, *, before=None):
     test_fit = fit_sequences([block["sequence"] for block in train_val_groups], GROUP_SIZE)
     test_metrics, test_targets = _evaluate(frozen, test_inputs, test_fit, selection["alpha"], columns, categorical)
     deployment = _fit(examples, selection["params"], columns, categorical)
-    report = dict(version=VERSION, feature_version=module.FEATURE_VERSION, source=canonical, provider=provider,
+    report = dict(version=VERSION, clubs_version=CLUB_VERSION,
+                  feature_version=module.FEATURE_VERSION, source=canonical, provider=provider,
                   league=str(league), created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                   feature_columns=columns, categorical_columns=categorical, labels=list(VALUES),
                   split={name: _split_details(split[name], groups[name]) for name in groups},
@@ -410,9 +413,11 @@ def forecast(rows, fixtures, source, directory=None, limit=3):
     history = _rows(rows, league, source, before)
     seen, ids = set(), set()
     for row in fixtures:
-        identity = row.get("home"), row.get("away"), _utc_stamp(row["timestamp"])
+        identity = fixture_key(row, _utc_stamp(row["timestamp"]))
         mid = row.get("match_id")
-        if not row.get("home") or not row.get("away") or row["home"] == row["away"] or identity in seen or mid is not None and str(mid) in ids:
+        if (not row.get("home") or not row.get("away")
+                or not different_clubs(row['home'], row['away'], row.get('home_id'), row.get('away_id'))
+                or identity in seen or mid is not None and str(mid) in ids):
             raise ModelError("Choisis des affiches distinctes avec deux clubs différents.")
         seen.add(identity)
         if mid is not None:
@@ -432,9 +437,11 @@ def forecast(rows, fixtures, source, directory=None, limit=3):
     distribution = _distribution(fit, probabilities, report["selection"]["alpha"])
     estimates = []
     for fixture, p in zip(fixtures, probabilities):
-        metadata = estimate(history, league, fixture["home"], fixture["away"], before)
+        metadata = estimate(history, league, fixture["home"], fixture["away"], before,
+                            **fixture_identity(fixture))
         estimates.append(dict(metadata, probabilities=p, model_family="CatBoost"))
     return dict(eligible=True, version=VERSION, source=canonical, league=league, size=len(fixtures), before=before,
+                clubs_version=CLUB_VERSION, trained_clubs_version=report.get('clubs_version', 'half-goals-v1'),
                 method="CatBoost", model_label="CatBoost entraîné", validated_size=GROUP_SIZE,
                 training_groups=len(blocks), training_matches=deployment["rows"],
                 club_estimates=estimates, personalized_count=sum(row["personalized"] for row in estimates),

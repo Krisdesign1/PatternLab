@@ -28,6 +28,7 @@ CODE_FILES = (
     'match_predictor.py', 'scenario_predictor.py', 'league_patterns.py', 'league_model.py',
     'coupon_sizes.py', 'catboost_scenarios.py', 'scenario_features.py',
     'context_neighbors.py', 'contextual_scenarios.py', 'seasonal_validation.py', 'api_football.py', 'api_match_workspace.py',
+    'club_identity.py',
 )
 
 

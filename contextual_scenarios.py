@@ -15,10 +15,11 @@ from math import fsum, log, prod, sqrt
 from coupon_sizes import top_independent, validate_size
 from league_model import VALUES
 from match_predictor import MIN_DAYS, MIN_LEAGUE, estimate
+from club_identity import different_clubs, fixture_identity, fixture_key
 from scenario_predictor import MIN_TRAIN, PRIOR_WEIGHT, best_sequences, fit_sequences, probability
 
 
-VERSION = "contextual-scenarios-v1"
+VERSION = "contextual-scenarios-club-ids-v2"
 MODEL_NAMES = ("frequency", "clubs", "combined")
 
 
@@ -57,7 +58,8 @@ def _validate_inputs(result, fixtures, before):
         if not isinstance(fixture, dict):
             raise ValueError("Affiche absente ou invalide")
         home, away = fixture.get("home"), fixture.get("away")
-        if not all(isinstance(team, str) and team.strip() for team in (home, away)) or home == away:
+        if (not all(isinstance(team, str) and team.strip() for team in (home, away))
+                or not different_clubs(home, away, fixture.get('home_id'), fixture.get('away_id'))):
             raise ValueError("Choisis deux équipes différentes pour chaque affiche")
         stamp = fixture.get("timestamp")
         dates.append(_day(stamp))
@@ -71,7 +73,7 @@ def _validate_inputs(result, fixtures, before):
                 provider = fixture["provider"]
             elif fixture["provider"] != provider:
                 raise ValueError("Une seule source de matchs est autorisée")
-        identity = (home, away, stamp)
+        identity = fixture_key(fixture, stamp)
         mid = fixture.get("match_id")
         if identity in seen or mid is not None and str(mid) in ids:
             raise ValueError("Chaque affiche doit apparaître une seule fois")
@@ -150,11 +152,12 @@ def _prepare(result, fixtures, before=None, limit=3, estimate_cache=None, fit_ca
             fit_cache[before] = fit
     club_estimates = []
     for fixture in fixtures:
-        cache_key = (fixture["home"], fixture["away"], before)
+        cache_key = (fixture.get('provider'), str(league), fixture.get('home_id'), fixture.get('away_id'),
+                     fixture["home"], fixture["away"], before)
         if estimate_cache is not None and cache_key in estimate_cache:
             item = estimate_cache[cache_key]
         else:
-            item = estimate(rows, league, fixture["home"], fixture["away"], before)
+            item = estimate(rows, league, fixture["home"], fixture["away"], before, **fixture_identity(fixture))
             if estimate_cache is not None:
                 estimate_cache[cache_key] = item
         club_estimates.append(dict(item, home=fixture["home"], away=fixture["away"],

@@ -4,6 +4,7 @@ import json
 
 import streamlit as st
 import cloud_storage
+import admin_access
 
 from api_football import (
     ApiFootballClient, ApiFootballError, DATA_DIR, FINISHED_STATUSES,
@@ -63,6 +64,8 @@ def fixture_preview(fixtures):
 
 def render_api_football():
     st.subheader('Connexion API-Football')
+    admin_access.read_only_notice()
+    allowed = admin_access.can_admin()
     st.caption('Les appels sont effectués uniquement avec les boutons ci-dessous. '
                'API-Football est l’unique source du calendrier, des scénarios et des modèles.')
     try:
@@ -77,7 +80,8 @@ def render_api_football():
     st.caption('Clé locale configurée.')
     client = ApiFootballClient(key)
     report = _check_report()
-    if st.button('Vérifier l’accès et le quota', icon=':material/sync:', key='api_check'):
+    if st.button('Vérifier l’accès et le quota', icon=':material/sync:', key='api_check', disabled=not allowed):
+        admin_access.require_admin()
         report = {'checked_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
         try:
             with st.spinner('Vérification du compte…'):
@@ -112,8 +116,9 @@ def render_api_football():
                                key='api_league_query')
         country = st.text_input('Pays facultatif (nom anglais)', placeholder='France, England…',
                                 key='api_country_query')
-        searched = st.form_submit_button('Rechercher les compétitions', icon=':material/search:')
+        searched = st.form_submit_button('Rechercher les compétitions', icon=':material/search:', disabled=not allowed)
     if searched:
+        admin_access.require_admin()
         if len(search.strip()) < 3:
             st.warning('Saisis au moins trois caractères pour rechercher une compétition.')
         else:
@@ -140,7 +145,8 @@ def render_api_football():
             st.caption('L’accès aux saisons dépend de l’abonnement. Les scores à la pause '
                        'sont contrôlés avant utilisation dans les analyses.')
             context = (selected, season)
-            if st.button('Charger les matchs de cette saison', icon=':material/cloud_download:', key='api_fetch_season'):
+            if st.button('Charger les matchs de cette saison', icon=':material/cloud_download:', key='api_fetch_season', disabled=not allowed):
+                admin_access.require_admin()
                 st.session_state.pop('api_fixture_batch', None)
                 try:
                     with st.spinner('Chargement des résultats et du calendrier…'):
@@ -159,7 +165,8 @@ def render_api_football():
                 if table:
                     st.dataframe(table[:50], hide_index=True, width='stretch')
                     st.caption('Aperçu limité aux 50 premiers matchs ; l’import conserve tout le lot reçu, y compris le calendrier.')
-                    if st.button('Enregistrer ce lot dans PatternLab', icon=':material/save:', key='api_import'):
+                    if st.button('Enregistrer ce lot dans PatternLab', icon=':material/save:', key='api_import', disabled=not allowed):
+                        admin_access.require_admin()
                         try:
                             count = save_fixtures(batch['fixtures'], season_imports=[
                                 {'competition_code': selected, 'league': selected, 'season': season,

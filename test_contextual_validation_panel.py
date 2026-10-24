@@ -31,6 +31,8 @@ def fixture_report():
 
 class ContextualValidationPanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         self.report = fixture_report()
         self.plan = dict(suitable=True, fingerprint='same-history', seasons=[dict(season=2022, matches=380)])
         self.patch('plan', return_value=self.plan)

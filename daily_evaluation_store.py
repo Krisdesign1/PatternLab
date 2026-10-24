@@ -29,6 +29,7 @@ CODE_FILES = (
     'daily_analysis_engine.py', 'match_predictor.py', 'coupon_sizes.py',
     'league_patterns.py', 'scenario_predictor.py', 'league_model.py',
     'api_football.py', 'api_match_workspace.py', 'daily_evaluation_store.py',
+    'club_identity.py',
 )
 
 
@@ -159,13 +160,15 @@ def _paired_summary(records):
 
 
 def _protocol(today, start, end):
+    from daily_analysis_engine import VERSION as selection_version
+    from match_predictor import VERSION as clubs_version
     return dict(version=PROTOCOL_VERSION, source=SOURCE, timezone=ZONE.key,
         today=today.isoformat(), start=start.isoformat(), end_exclusive=end.isoformat(),
         sizes=list(range(2, 21)), history_cutoff='strictly_before_first_target_UTC_day',
         replay_clock='start_of_target_day_Africa/Kinshasa',
         calendar_policy='retrospective_reconstruction_from_frozen_final_provider_states',
         model_policy='causal_replayable_clubs_probabilities_only_no_saved_trained_artifacts',
-        selection_policy='daily-data-support-partitions-v1',
+        selection_policy=selection_version, clubs_version=clubs_version,
         interpretation='retrospective_exploratory_not_prospective_pre_match_evidence')
 
 

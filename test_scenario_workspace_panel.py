@@ -100,6 +100,8 @@ class WorkspaceDayProjectionTests(unittest.TestCase):
 
 class ScenarioWorkspacePanelTests(unittest.TestCase):
     def setUp(self):
+        admin = patch('admin_access.can_admin', return_value=True)
+        admin.start(); self.addCleanup(admin.stop)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)

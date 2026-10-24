@@ -1,5 +1,6 @@
 """Real PostgreSQL fencing tests opt in with an isolated local test DSN."""
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -75,6 +76,22 @@ class PublishBulkTests(unittest.TestCase):
             with self.assertRaises(BackendError):
                 self.backend.publish(self.lease, 0, self.manifest)
         self.assertEqual(con.execute.call_count, 2)
+
+    def test_committed_view_is_read_only_and_uses_same_connection_for_head_and_blobs(self):
+        con = Mock()
+        con.execute.side_effect = [Mock(), Mock(fetchone=Mock(return_value=(7,self.manifest,
+            datetime(2026,10,23,tzinfo=timezone.utc)))),
+            Mock(fetchall=Mock(return_value=[('a'*64,10,8)])),
+            Mock(fetchall=Mock(return_value=[('a'*64,b'12345678',10)]))]
+        with patch.object(self.backend,'_connection',return_value=nullcontext(con)) as connect, \
+                patch.object(self.backend,'initialize',side_effect=AssertionError('No DDL in a reader')):
+            with self.backend.committed_view() as view:
+                self.assertEqual(view['revision'],7)
+                self.assertEqual(view['read_blobs'](['a'*64]),{'a'*64:(b'12345678',10)})
+        connect.assert_called_once_with()
+        queries=[call.args[0] for call in con.execute.call_args_list]
+        self.assertIn('REPEATABLE READ, READ ONLY',queries[0])
+        self.assertFalse(any('UPDATE' in query or 'INSERT' in query or 'CREATE' in query for query in queries))
 
 
 @unittest.skipUnless(os.environ.get('PATTERNLAB_TEST_POSTGRES_DSN'), 'Isolated PostgreSQL test instance not configured')
@@ -159,6 +176,25 @@ class RealPostgresTests(unittest.TestCase):
         for entry in entries[1:]:
             self.assertEqual(self.backend.read_blob(entry['sha256'])[1], entry['size'])
         self.assertEqual(self.backend.status()['revision'], 3)
+
+    def test_committed_reader_does_not_block_writer_and_survives_garbage_collection(self):
+        lease,_,_=self.backend.acquire('active-writer')
+        first,entry,content=self.manifest('committed original')
+        self.backend.upload(lease,entry['sha256'],content,entry['size'])
+        self.backend.publish(lease,0,first)
+        with self.backend.committed_view() as view:
+            self.assertEqual(view['revision'],1)
+            self.backend.assert_lease(lease)
+            for revision in (1,2):
+                manifest,new_entry,new_content=self.manifest(f'new revision {revision}')
+                self.backend.upload(lease,new_entry['sha256'],new_content,new_entry['size'])
+                self.backend.publish(lease,revision,manifest)
+            self.assertEqual(view['read_blobs']([entry['sha256']]),
+                             {entry['sha256']:(content,entry['size'])})
+        with self.assertRaises(BackendError):
+            self.backend.read_blob(entry['sha256'])
+        self.backend.assert_lease(lease)
+        self.assertEqual(self.backend.status()['revision'],3)
 
     def test_full_workspace_seed_nested_commit_and_fresh_machine_restore(self):
         import cloud_storage as storage

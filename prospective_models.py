@@ -16,6 +16,7 @@ from coupon_sizes import top_independent, validate_size
 from league_model import VALUES
 from league_patterns import repeated_scenarios
 from match_predictor import VERSION as CLUB_VERSION, estimate as estimate_clubs
+from club_identity import different_clubs, fixture_identity, fixture_key
 from scenario_predictor import PRIOR_WEIGHT, fit_sequences
 
 
@@ -310,9 +311,10 @@ def _fixtures(fixtures, source, *, allow_mixed=False):
             if row['league'] in ('None', '') or int(row['match_id']) <= 0:
                 raise ValueError('Invalid identity')
             home, away = row['home'], row['away']
-            if not all(isinstance(name, str) and name.strip() for name in (home, away)) or home == away:
+            if (not all(isinstance(name, str) and name.strip() for name in (home, away))
+                    or not different_clubs(home, away, row.get('home_id'), row.get('away_id'))):
                 raise ValueError('Invalid clubs')
-            identity = (home, away, row['timestamp'])
+            identity = fixture_key(row, row['timestamp'])
             if row['match_id'] in ids or identity in identities:
                 raise SnapshotError('Chaque affiche doit apparaître une seule fois dans le groupe.')
             ids.add(row['match_id'])
@@ -507,7 +509,8 @@ def _mixed_component(rows, fixtures, league, before):
     provenance = dict(source=SOURCE, league=league, training_before=before,
                       history_fingerprint=ml._fingerprint(history), training_matches=len(history))
     if size == 1:
-        estimate = estimate_clubs(history, league, fixtures[0]['home'], fixtures[0]['away'], before)
+        estimate = estimate_clubs(history, league, fixtures[0]['home'], fixtures[0]['away'], before,
+                                  **fixture_identity(fixtures[0]))
         reason = 'Une seule affiche de cette compétition : seules les probabilités indépendantes des clubs sont composées.'
         unavailable = {name:reason for name in METHODS if name != 'clubs'}
         if not estimate['eligible']:

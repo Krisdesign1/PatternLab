@@ -10,6 +10,7 @@ import json
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import admin_access
 from cloud_ui import guarded
 
 import api_football as api
@@ -303,6 +304,8 @@ def _prepared_detail(report, indexed, now):
         st.caption('Ce scénario suit le résultat recherché pour chaque match. Il peut être différent des trois scénarios les mieux classés ci-dessous.')
     scenario_tables.render_matrix(saved['methods'] if saved else prepared['methods'], key='hp_scenario_matrix',
                                   title='Scénarios enregistrés avant match' if saved else 'Les trois scénarios les mieux classés · Clubs')
+    if not saved and not admin_access.can_admin():
+        st.caption('Calcul local non enregistré. Une connexion administrateur est nécessaire pour la confirmation API avant match.')
     if saved:
         if intent:
             st.success('Scénario enregistré sur la prévision figée du groupe. '
@@ -322,7 +325,8 @@ def _prepared_detail(report, indexed, now):
                 st.switch_page('ui_pages/daily.py')
             else:
                 st.switch_page('ui_pages/journal.py', query_params={'analysis': saved['id']})
-    elif st.button('Enregistrer avant match', icon=':material/bookmark_add:', type='primary', key='hp_record'):
+    elif st.button('Enregistrer avant match', icon=':material/bookmark_add:', type='primary', key='hp_record', disabled=not admin_access.can_admin()):
+        admin_access.require_admin()
         try:
             with st.spinner('Confirmation des rencontres dans l’API et enregistrement…'):
                 st.session_state['hp_saved'] = workspace.record_group(prepared)
@@ -345,7 +349,8 @@ def render_high_probabilities():
     except ERRORS as error:
         st.error(str(error))
         return
-    if st.button('Actualiser les matchs du jour', icon=':material/refresh:', key='hp_refresh'):
+    if st.button('Actualiser les matchs du jour', icon=':material/refresh:', key='hp_refresh', disabled=not admin_access.can_admin()):
+        admin_access.require_admin()
         try:
             with st.spinner('Actualisation du calendrier du jour et des probabilités…'):
                 report = workspace.refresh_scan()

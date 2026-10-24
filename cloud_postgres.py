@@ -110,6 +110,23 @@ class PostgresBackend:
             return dict(revision=0, manifest={}, updated_at=None)
         return dict(revision=row[0], manifest=row[1], updated_at=row[2].isoformat())
 
+    @contextmanager
+    def committed_view(self):
+        """Read one MVCC snapshot without taking or altering a writer's lease.
+
+        Keep this transaction open until every requested blob has been read:
+        concurrent publications can collect old blobs, but PostgreSQL retains
+        their visible versions for this repeatable-read transaction.
+        """
+        with self._connection() as con:
+            con.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            row = con.execute('SELECT revision,manifest,updated_at FROM patternlab.workspace_heads WHERE workspace=%s',
+                              (self.workspace,)).fetchone()
+            if row is None or row[0] <= 0:
+                raise BackendError('Aucune version sauvegardée des données n’est disponible.')
+            yield dict(revision=row[0], manifest=row[1], updated_at=row[2].isoformat(),
+                       read_blobs=lambda digests: self._read_blobs(con, digests))
+
     def acquire(self, owner):
         self.initialize()
         with self._connection() as con:
@@ -158,6 +175,15 @@ class PostgresBackend:
 
     def read_blobs(self, digests):
         """Read one bounded batch over a single authenticated connection."""
+        requested = self._requested_digests(digests)
+        if not requested:
+            return {}
+        with self._connection() as con:
+            return self._read_blobs(con, requested)
+
+    @staticmethod
+    def _requested_digests(digests):
+        """Reject malformed/oversized requests before any network access."""
         if not isinstance(digests, (list, tuple, set)) or any(
                 not isinstance(value, str) or not re.fullmatch(r'[a-f0-9]{64}', value)
                 for value in digests):
@@ -165,32 +191,36 @@ class PostgresBackend:
         requested = sorted(set(digests))
         if len(requested) > 32:
             raise BackendError('Le lot de fichiers demandé dépasse la limite de lecture.')
+        return requested
+
+    def _read_blobs(self, con, digests):
+        """Use the caller's connection, including a committed read-only view."""
+        requested = self._requested_digests(digests)
         if not requested:
             return {}
-        with self._connection() as con:
-            metadata = {digest: (raw_size, size) for digest, raw_size, size in con.execute(
+        metadata = {digest: (raw_size, size) for digest, raw_size, size in con.execute(
                 '''SELECT digest,raw_size,octet_length(content) FROM patternlab.workspace_blobs
                 WHERE workspace=%s AND digest=ANY(%s)''', (self.workspace, requested)).fetchall()}
-            if set(metadata) != set(requested):
-                raise BackendError('Un fichier du point de reprise distant est absent.')
-            total = 0
-            for raw_size, size in metadata.values():
-                if type(raw_size) is not int or raw_size < 0 or type(size) is not int or size < 0:
-                    raise BackendError('Les tailles du lot distant sont invalides.')
-                total += size
-            # Inspect sizes before fetching bytea values. One large object may
-            # exceed the normal batch target, but never the workspace limit.
-            limit = 96 * 1024 * 1024 if len(requested) == 1 else 4 * 1024 * 1024
-            if total > limit:
-                raise BackendError('Le lot de fichiers distant dépasse la limite de lecture.')
-            rows = con.execute(
+        if set(metadata) != set(requested):
+            raise BackendError('Un fichier du point de reprise distant est absent.')
+        total = 0
+        for raw_size, size in metadata.values():
+            if type(raw_size) is not int or raw_size < 0 or type(size) is not int or size < 0:
+                raise BackendError('Les tailles du lot distant sont invalides.')
+            total += size
+        # Inspect sizes before fetching bytea values. One large object may
+        # exceed the normal batch target, but never the workspace limit.
+        limit = 96 * 1024 * 1024 if len(requested) == 1 else 4 * 1024 * 1024
+        if total > limit:
+            raise BackendError('Le lot de fichiers distant dépasse la limite de lecture.')
+        rows = con.execute(
                 '''SELECT digest,content,raw_size FROM patternlab.workspace_blobs
                 WHERE workspace=%s AND digest=ANY(%s)''', (self.workspace, requested)).fetchall()
-            result = {digest: (bytes(content), raw_size) for digest, content, raw_size in rows}
-            if set(result) != set(requested) or any(
-                    (raw_size, len(content)) != metadata[digest]
-                    for digest, (content, raw_size) in result.items()):
-                raise BackendError('Le lot de fichiers distant est incomplet ou incohérent.')
+        result = {digest: (bytes(content), raw_size) for digest, content, raw_size in rows}
+        if set(result) != set(requested) or any(
+                (raw_size, len(content)) != metadata[digest]
+                for digest, (content, raw_size) in result.items()):
+            raise BackendError('Le lot de fichiers distant est incomplet ou incohérent.')
         return result
 
     def upload(self, lease, digest, content, raw_size):

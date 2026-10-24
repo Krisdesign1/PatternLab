@@ -16,41 +16,28 @@ import api_football as api
 import api_match_workspace as workspace
 from league_model import VALUES
 import match_predictor as predictor
+from club_identity import ClubProfiles, fixture_identity
 
 
-VERSION = 'high-probability-clubs-v1'
+VERSION = 'high-probability-club-ids-v2'
 SOURCE = 'API-Football'
 ZONE = ZoneInfo('Africa/Kinshasa')
-
-
-def _profile():
-    return dict(matches=0, scored=[0, 0], conceded=[0, 0])
-
-
-def _copy_profile(value):
-    return dict(matches=value['matches'], scored=list(value['scored']),
-                conceded=list(value['conceded']))
 
 
 def _aggregate(rows, league, before):
     """Exactly the training validation and integer sums used by estimate()."""
     train = predictor.training_rows(rows, league, before)
-    home, away = defaultdict(_profile), defaultdict(_profile)
+    profiles = ClubProfiles(provider='api-football')
     totals = [[0, 0], [0, 0]]
     for row in train:
         goals = predictor.goals(row)
-        for venue, name, index in ((home, row['home'], 0), (away, row['away'], 1)):
-            current = venue[name]
-            current['matches'] += 1
-            for half in range(2):
-                current['scored'][half] += goals[index][half]
-                current['conceded'][half] += goals[1-index][half]
+        profiles.add(row, goals)
         for index in range(2):
             for half in range(2):
                 totals[index][half] += goals[index][half]
     counts, n = Counter(row['value'] for row in train), len(train)
     days = len({row['timestamp'][:10] for row in train})
-    return dict(training=n, history_days=days, home=home, away=away,
+    return dict(training=n, history_days=days, profiles=profiles, league=league,
                 means=[[value/n for value in side] for side in totals] if n else None,
                 baseline={value: (counts[value]+1)/(n+3) for value in VALUES},
                 history_fingerprint=sha256(json.dumps(train, sort_keys=True, ensure_ascii=False,
@@ -58,10 +45,10 @@ def _aggregate(rows, league, before):
                 last_training_day=train[-1]['timestamp'][:10] if train else None)
 
 
-def _estimate(state, home, away, before):
+def _estimate(state, home, away, before, *, home_id=None, away_id=None, provider=None):
     """Preserve predictor.estimate arithmetic, including shrinkage and fallback."""
-    h = _copy_profile(state['home'].get(home, _profile()))
-    a = _copy_profile(state['away'].get(away, _profile()))
+    h = state['profiles'].profile(home, 'home', team_id=home_id, league=state['league'], provider=provider)
+    a = state['profiles'].profile(away, 'away', team_id=away_id, league=state['league'], provider=provider)
     eligible = (state['training'] >= predictor.MIN_LEAGUE
                 and state['history_days'] >= predictor.MIN_DAYS)
     personalized = eligible and min(h['matches'], a['matches']) >= predictor.MIN_TEAM
@@ -184,7 +171,7 @@ def scan(raw, now=None):
     rows = []
     for fixture, _ in upcoming:
         state = states[fixture['league']]
-        estimate = _estimate(state, fixture['home'], fixture['away'], before)
+        estimate = _estimate(state, fixture['home'], fixture['away'], before, **fixture_identity(fixture))
         if state['training'] < predictor.MIN_LEAGUE:
             exclude(fixture['match_id'], 'insufficient_league_history',
                     f"{state['training']}/{predictor.MIN_LEAGUE} résultats historiques exploitables.", fixture)

@@ -1,0 +1,148 @@
+from copy import deepcopy
+from datetime import datetime, timezone
+from itertools import product
+from math import fsum, log
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import patch
+
+from league_model import VALUES
+import journal_protocol
+import prospective_models as models
+import saved_model_comparison as comparison
+from scenario_predictor import fit_sequences
+from test_probability_reliability import entry as original_entry
+
+
+def entry(**kwargs):
+    value = original_entry(**kwargs)
+    value['size'] = 2
+    provenance = dict(source='API-Football', league='39', training_before='2026-10-20')
+    distribution = value['methods']['clubs']['distribution']
+    value['methods'] = {
+        'clubs': models._method('clubs-v2', distribution, provenance),
+        'frequency': models._method('frequency-v1', models._distribution('frequency', 2,
+            fit=fit_sequences([('1st','2nd'), ('2nd','2nd'), ('Égal','1st')], 2)), provenance),
+        'catboost': models._method('catboost-v1', dict(distribution,
+            distributions=[dict(zip(VALUES, (.1,.2,.7))), dict(zip(VALUES,(.8,.1,.1)))]),
+            provenance, generation='fixed-model', trained_through='2026-10-19'),
+    }
+    return value
+
+
+class SavedComparisonTests(unittest.TestCase):
+    def setUp(self):
+        temporary = TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        # The custom isolated path is required for deterministic registration.
+        with patch('cloud_storage.configured', return_value=False):
+            self.protocol = journal_protocol.register_protocol(Path(temporary.name)/'protocol.json',
+                now=datetime(2026,10,20,9,tzinfo=timezone.utc))
+
+    def build(self, entries):
+        with patch('api_football.ApiFootballClient', side_effect=AssertionError('No API')), \
+                patch('catboost_scenarios.forecast', side_effect=AssertionError('No inference')):
+            return comparison.build(entries, self.protocol)
+
+    def test_all_methods_use_identical_matches_and_expected_losses(self):
+        value = entry(); before = deepcopy(value)
+        cohort = self.build([value])['cohorts'][0]
+        self.assertEqual(cohort['evaluated'],2)
+        self.assertEqual(cohort['match_ids'], ['1','2'])
+        self.assertAlmostEqual(cohort['scores']['clubs']['logloss'],(-log(.5)-log(.6))/2)
+        self.assertAlmostEqual(cohort['scores']['catboost']['logloss'],(-log(.7)-log(.8))/2)
+        self.assertGreater(cohort['loss_gain_vs_clubs']['catboost'],0)
+        for method in comparison.METHODS:
+            self.assertEqual(cohort['scores'][method]['evaluated'],2)
+            self.assertEqual([row['label'] for row in cohort['scores'][method]['categories']],list(VALUES))
+        self.assertEqual(value,before)
+
+    def test_marginals_match_exhaustive_joint_for_frequency_corrected_and_independent(self):
+        fit = fit_sequences([('1st','2nd'),('2nd','Égal'),('2nd','2nd')],2)
+        base = [dict(zip(VALUES,(.3,.2,.5))),dict(zip(VALUES,(.1,.6,.3)))]
+        _,_,normalization = models._normalization(fit,base,models.PRIOR_WEIGHT,.5)
+        distributions = [models._distribution('frequency',2,fit=fit),
+            models._distribution('independent',2,distributions=base),
+            models._distribution('corrected',2,fit=fit,distributions=base,alpha=.5,normalization=normalization),
+            dict(schema=models.DISTRIBUTION_VERSION,type='context_mixture',size=2,baseline=base,
+                 eta=.25,local_mass=[dict(sequence=['1st','2nd'],probability=1)])]
+        for distribution in distributions:
+            with self.subTest(kind=distribution['type']):
+                actual = comparison.marginals(models._method('test-v1',distribution,{}))
+                for index in range(2):
+                    for label in VALUES:
+                        expected = fsum(models.probability(distribution,sequence)
+                                        for sequence in product(VALUES,repeat=2) if sequence[index] == label)
+                        self.assertAlmostEqual(actual[index][label],expected)
+
+    def test_twenty_match_marginals_do_not_enumerate_the_joint_outcomes(self):
+        base = [dict(zip(VALUES,(.2,.3,.5))) for _ in range(20)]
+        method = models._method('test-v1',models._distribution('independent',20,distributions=base),{})
+        with patch.object(models,'_rank',return_value=method['ranking']), \
+                patch.object(models,'probability',side_effect=AssertionError('No 3**20 enumeration')):
+            self.assertEqual(comparison.marginals(method),base)
+
+    def test_overlapping_groups_deduplicate_and_first_pending_is_retained(self):
+        first = entry(identity='a',status='pending'); first['observed']=[]
+        later = entry(identity='b',created='2026-10-20T11:00:00Z')
+        report = self.build([later,first])
+        self.assertEqual(report['duplicates_removed'],2)
+        self.assertEqual(report['cohorts'][0]['pending'],2)
+        self.assertIsNone(report['cohorts'][0]['scores']['clubs']['logloss'])
+
+    def test_missing_catboost_is_explicit_and_never_fabricated(self):
+        value = entry(); del value['methods']['catboost']
+        report = self.build([value])
+        self.assertEqual(report['cohorts'],[])
+        self.assertEqual(report['snapshot_exclusions']['missing_catboost'],1)
+
+    def test_before_protocol_postkickoff_foreign_source_and_tampering_are_excluded(self):
+        for mutate,reason in (
+                (lambda row:row.update(created_at='2026-10-20T08:00:00Z'),'before_protocol'),
+                (lambda row:row.update(created_at='2026-10-20T12:00:00Z'),'invalid_snapshot'),
+                (lambda row:row.update(source='other'),'invalid_snapshot'),
+                (lambda row:row['methods']['catboost'].update(trained_through='2026-10-20'),'invalid_snapshot'),
+                (lambda row:row['methods']['clubs']['ranking'][0].update(probability=.999),'invalid_snapshot')):
+            value = entry(); mutate(value)
+            result = self.build([value])
+            self.assertEqual(result['cohorts'],[])
+            self.assertEqual(result['snapshot_exclusions'][reason],1)
+
+    def test_versions_generations_sizes_and_competitions_are_never_pooled(self):
+        first=entry(); second=entry(identity='new')
+        second['methods']['catboost']['generation']='next-model'
+        result=self.build([first,second])
+        self.assertEqual(len(result['cohorts']),2)
+        self.assertEqual(result['duplicates_removed'],0)
+
+    def test_mixed_components_keep_their_real_generations_and_exact_marginals(self):
+        value=entry(); value['fixtures'][1]['league']='61'
+        base=[dict(zip(VALUES,(.2,.3,.5))),dict(zip(VALUES,(.6,.3,.1)))]
+        for method in comparison.METHODS:
+            blocks=[]
+            for index,fixture in enumerate(value['fixtures']):
+                component=models._method(method+'-v1',models._distribution('independent',1,
+                    distributions=[base[index]]),dict(source='API-Football',league=fixture['league'],
+                    training_before='2026-10-20'),_component=True,generation='first-generation')
+                blocks.append(dict(indices=[index],league=fixture['league'],method=component))
+            distribution=dict(schema=models.DISTRIBUTION_VERSION,type='block_product',size=2,components=blocks)
+            value['methods'][method]=models._method('mixed-container-v1',distribution,
+                dict(source='API-Football',provider='api-football',league='mixed',
+                     assumes_block_independence=True,fixtures=deepcopy(value['fixtures']),training_before='2026-10-20'))
+            self.assertEqual(comparison.marginals(value['methods'][method]),base)
+        changed=deepcopy(value); changed['id']='another-generation'
+        changed['methods']['catboost']['distribution']['components'][0]['method']['generation']='second-generation'
+        report=self.build([value,changed])
+        self.assertEqual(len(report['cohorts']),4)
+        self.assertEqual(report['duplicates_removed'],0)
+
+    def test_invalid_or_missing_results_do_not_become_failures(self):
+        value=entry(status='unresolved'); value['observed'].pop()
+        cohort=self.build([value])['cohorts'][0]
+        self.assertEqual(cohort['evaluated'],1)
+        self.assertEqual(cohort['excluded'],1)
+        self.assertEqual(cohort['scores']['catboost']['accuracy'],1)
+
+
+if __name__=='__main__':
+    unittest.main()
