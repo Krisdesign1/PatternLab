@@ -7,6 +7,7 @@ import streamlit as st
 import api_football as api
 import automation_health as health
 import cloud_storage
+import automation_observation_panel
 
 
 STATES = {'completed': 'Terminé', 'paused': 'En pause', 'busy': 'Déjà occupé',
@@ -98,3 +99,4 @@ def render(config, *, scheduler=None):
         st.caption('Les écarts comparent le rythme enregistré lors de chaque cycle du service. '
                    'Aucune disponibilité n’est supposée avant le premier passage observé. '
                    'La lecture de ce suivi ne lance ni requête API ni cycle.')
+    automation_observation_panel.render(api.STORE_PATH.parent,days=days)

@@ -16,7 +16,7 @@ from ux_theme import render_page_header
 
 READINESS = {'ready': 'Prête pour Clubs + répétitions', 'partial': 'Prête pour certaines tailles',
              'insufficient': 'Historique statistique à compléter', 'no_upcoming': 'Sans groupe à venir'}
-STATES = {'completed': 'Terminé', 'paused': 'En pause', 'busy': 'Cycle déjà en cours',
+STATES = {'completed': 'Terminé', 'running':'En cours', 'paused': 'En pause', 'busy': 'Cycle déjà en cours',
           'disabled': 'Désactivé', 'dry_run': 'Simulation locale', 'error': 'Erreur',
           'pending': 'En attente', 'recorded': 'Enregistré', 'insufficient': 'Historique ou modèles insuffisants',
           'ineligible': 'Groupe non admissible', 'changed': 'Affiches modifiées'}
@@ -107,6 +107,9 @@ def _show_report(report):
         st.warning(report['monitoring_warning'])
     st.caption(f"État : {STATES.get(report.get('status'), report.get('status', 'Inconnu'))} · "
                f"Début : {report.get('started_at', '—')} · Fin : {report.get('finished_at') or '—'}")
+    if report.get('last_daily_refresh_at'):
+        st.caption(f"{report.get('day_refreshes',0)} relève(s) entre les imports historiques · "
+                   f"Dernière relève terminée : {report['last_daily_refresh_at']} · UTC")
     with st.container(horizontal=True):
         st.metric('Requêtes API', report.get('requests', 0))
         st.metric('Nouveaux groupes verrouillés', report.get('created', 0))

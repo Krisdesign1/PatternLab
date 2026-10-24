@@ -30,6 +30,9 @@ DEFAULT_CONFIG = dict(enabled=True, sizes=[2, 4, 6, 8], interval_minutes=15,
                       history_seasons=[2022, 2023, 2024, 2025, 2026],
                       history_enabled=True, models_enabled=True, model_jobs_per_cycle=1)
 TIMEZONE = workspace.DEFAULT_TIMEZONE
+# Scheduling cadence, not a budget: every history item is still processed.
+# One provider request / one forecast calculation remains indivisible.
+DAY_REFRESH_SECONDS = 60
 
 
 class AutomationError(ValueError):
@@ -269,6 +272,9 @@ class _Gate:
     def __init__(self, root, state, config, client, clock, report, *, deadline=None):
         self.root, self.state, self.config, self.client, self.clock, self.report = root, state, config, client, clock, report
         self.deadline = deadline
+        self.forecast_jobs = {}
+        self.created_ids = set()
+        self.reported_existing_ids = set()
 
     def save(self):
         _write(self.root / 'automation_state.json', self.state)
@@ -312,7 +318,7 @@ class _Gate:
             self.save()
 
 
-def _history(root, config, gate, report, info, clock):
+def _history(root, config, gate, report, info, clock, *, after_batch=None):
     """Progressive, fair queue across ALL locally known league IDs and seasons."""
     imported = {(m['competition_code'], m['season']): m for m in api.load_season_imports(root / 'fixtures.json')}
     attempts = gate.state.setdefault('history_attempts', {})
@@ -357,6 +363,7 @@ def _history(root, config, gate, report, info, clock):
         else:
             chosen = min(pool)
         pools[kind].remove(chosen)
+        report['history_pending'] = len(pools[False])+len(pools[True])
         prefer_refresh = not kind
         prefer_upcoming = chosen[-3] not in upcoming
         is_refresh, *_, code, year, key = chosen
@@ -365,7 +372,8 @@ def _history(root, config, gate, report, info, clock):
             raw = gate.call(league=code, season=year, timezone='UTC')
         except api.ApiFootballError:
             report['issues'].append(f'Historique {code}, saison {year} indisponible ; tentative différée de six heures.')
-            continue
+            # The finally below commits the failed attempt before yielding.
+            raw = None
         finally:
             # A provider or host pause before the call is not an attempted import.
             if report['requests'] > before:
@@ -373,6 +381,10 @@ def _history(root, config, gate, report, info, clock):
                 gate.state['history_prefer_refresh'] = not is_refresh
                 gate.state['history_prefer_upcoming'] = code not in upcoming
                 gate.save()
+        if raw is None:
+            if after_batch is not None:
+                after_batch()
+            continue
         if any(api._season_identity(item) != (code, year) for item in raw):
             raise AutomationError('Une réponse historique ne correspond pas à la compétition et saison demandées.')
         api.save_fixtures(raw, root / 'fixtures.json', season_imports=[dict(
@@ -381,9 +393,12 @@ def _history(root, config, gate, report, info, clock):
         report['history_received'] += len(raw)
         report.setdefault('history_jobs', []).append(dict(league=code, season=year, received=len(raw),
             priority='upcoming' if code in upcoming else 'background'))
+        report['history_pending'] = len(pools[False])+len(pools[True])
+        if after_batch is not None:
+            after_batch()
 
 
-def _refresh_results(root, gate, clock, report):
+def _refresh_results(root, gate, clock, report, *, after_batch=None):
     due = {}
     checks = gate.state.setdefault('result_checks', {})
     for entry in journal.list_entries(root / 'predictions.sqlite3'):
@@ -408,6 +423,8 @@ def _refresh_results(root, gate, clock, report):
         api.save_fixtures(raw, root / 'fixtures.json')
         checks.update({mid: clock().timestamp() for mid in ids})
         gate.save()
+        if after_batch is not None:
+            after_batch()
 
 
 def _forecast(root, config, gate, report, clock, today, now):
@@ -442,10 +459,17 @@ def _forecast(root, config, gate, report, clock, today, now):
         gate.check_time()
         _same_day(today, clock)
         fixtures = _fixtures(group, raw_ids, clock())
-        job = dict(league=group['league'], competition=info[group['league']]['competition'],
-                   day=group['day'], size=group['size'], state='ineligible', reason='')
-        report['jobs'].append(job)
-        report['groups_considered'] += 1
+        job_key = (group['day'], group['league'], group['size'], tuple(group['ids']))
+        job = gate.forecast_jobs.get(job_key)
+        if job is None:
+            job = {}
+            gate.forecast_jobs[job_key] = job
+            report['jobs'].append(job)
+            report['groups_considered'] += 1
+        job.clear()
+        job.update(league=group['league'], competition=info[group['league']]['competition'],
+                   day=group['day'], size=group['size'], match_ids=list(group['ids']),
+                   state='ineligible', reason='')
         if fixtures is None:
             job['reason'] = 'Coup d’envoi passé, clubs non confirmés ou statut incompatible.'
             continue
@@ -456,7 +480,9 @@ def _forecast(root, config, gate, report, clock, today, now):
             continue
         if key in entries:
             job.update(state='recorded', id=key, reason='Première prévision déjà verrouillée.')
-            report['already_recorded'] += 1
+            if key not in gate.created_ids and key not in gate.reported_existing_ids:
+                report['already_recorded'] += 1
+                gate.reported_existing_ids.add(key)
             continue
         try:
             frozen = models.build_methods(rows[group['league']], fixtures)
@@ -487,8 +513,94 @@ def _forecast(root, config, gate, report, clock, today, now):
             continue
         entries[entry['id']] = entry
         report['created'] += int(entry['created'])
+        if entry['created']:
+            gate.created_ids.add(entry['id'])
         job.update(state='recorded', id=entry['id'], methods=list(entry['methods']),
                    unavailable=frozen['unavailable'], reason='Prévision verrouillée avant match.')
+
+
+def _calendar(root, gate, clock, today):
+    _same_day(today, clock)
+    raw = gate.call(date=today.isoformat(), timezone=TIMEZONE)
+    if any(workspace._stamp(r).astimezone(ZoneInfo(TIMEZONE)).date() != today for r in raw):
+        raise AutomationError('Un calendrier contient des matchs hors de la date demandée.')
+    api.save_fixtures(raw, root / 'fixtures.json')
+    workspace._mark_calendar_refresh(root / 'fixtures.json', today, TIMEZONE)
+    _same_day(today, clock)
+
+
+def _reconcile(root, report, now):
+    settled = journal.reconcile(api.load_fixtures(root / 'fixtures.json'), now=now,
+                                path=root / 'predictions.sqlite3')
+    report.update(settled=settled['settled'], pending=settled['pending'], unresolved=settled['unresolved'])
+
+
+class _DayRefresh:
+    """Cooperative fresh-day passes between durable historical season imports.
+
+    No queue is truncated. Resume markers remain the existing imports/attempts;
+    no timer or pending in-memory queue is required to survive a restart.
+    """
+    def __init__(self, root, config, gate, report, clock, today, now, pulse):
+        self.root, self.config, self.gate, self.report = root, config, gate, report
+        self.clock, self.today, self.now, self.pulse = clock, today, now, pulse
+        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.last_imports = report['history_imports']
+
+    def mark(self, field):
+        if self.gate.state.get('day_service',{}).get('day') != self.today.isoformat():
+            self.gate.state['day_service'] = {}
+        latest = self.gate.state['day_service']
+        latest.update(day=self.today.isoformat(), **{field:self.clock().isoformat()})
+        self.report['day_service'] = dict(latest)
+        self.gate.save()
+        phase = {'calendar_at':'calendar','results_at':'results','forecasts_at':'forecasts',
+                 'reconciled_at':'reconcile'}[field]
+        if not cloud_storage.configured() and not health.record_refresh(self.root, phase=phase, when=latest[field],
+                cycle_started_at=self.report['started_at'], day=self.today.isoformat(), counters=self.report):
+            self.report['monitoring_warning'] = health.MONITORING_WARNING
+
+    def during_results(self):
+        self.mark('results_at')
+        self(final=False,refresh_results=False)
+        self.pulse.progress('results')
+
+    def __call__(self, *, final=False, refresh_results=True):
+        self.gate.check_time()
+        _same_day(self.today, self.clock)
+        if time.monotonic() < self.due and not (final and self.report['history_imports'] > self.last_imports):
+            return
+        self.gate.state['next_phase'] = 'results'
+        self.gate.save()
+        self.pulse.progress('calendar')
+        _calendar(self.root, self.gate, self.clock, self.today)
+        self.mark('calendar_at')
+        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        if refresh_results:
+            self.pulse.progress('results')
+            self.gate.state['next_phase'] = 'forecasts'
+            self.gate.save()
+            _refresh_results(self.root, self.gate, self.clock, self.report,after_batch=self.during_results)
+            self.mark('results_at')
+        self.pulse.progress('reconcile')
+        _reconcile(self.root, self.report, self.now)
+        self.mark('reconciled_at')
+        self.pulse.progress('forecasts')
+        _same_day(self.today, self.clock)
+        # Leave history the next turn if the host interrupts this finite pass.
+        self.gate.state['next_phase'] = 'history'
+        self.gate.save()
+        _forecast(self.root, self.config, self.gate, self.report, self.clock, self.today, self.now)
+        self.mark('forecasts_at')
+        self.gate.state['next_phase'] = 'results'
+        self.gate.save()
+        self.report['day_refreshes'] = self.report.get('day_refreshes',0)+1
+        self.report['last_daily_refresh_at'] = self.clock().isoformat()
+        _write(self.root/'automation_status.json', dict(self.report,status='running',
+                                                       last_updated_at=self.clock().isoformat()))
+        self.last_imports = self.report['history_imports']
+        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.pulse.progress('history')
 
 
 @cloud_storage.persisted
@@ -516,7 +628,18 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
         raise AutomationError('Origine du cycle invalide.')
     with health.monitor(root, report, interval_minutes=config['interval_minutes'], clock=clock,
                         origin=origin, enabled=not cloud_storage.configured()) as pulse:
-        return _execute_cycle(root, config, client, clock, report, deadline, now, pulse)
+        try:
+            return _execute_cycle(root, config, client, clock, report, deadline, now, pulse)
+        except Exception:
+            # A late write/checkpoint/unlock failure must not leave the JSON
+            # claiming success while the execution ledger records an error.
+            report.update(status='error',finished_at=clock().isoformat())
+            report['issues'].append('Une erreur de fin de passage a été détectée ; la fin normale du cycle n’est pas confirmée.')
+            try:
+                _write(root/'automation_status.json',report)
+            except Exception:
+                report['monitoring_warning'] = health.MONITORING_WARNING
+            raise
 
 
 def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
@@ -533,13 +656,9 @@ def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
                     gate.client = api.ApiFootballClient(api.load_key())
                 today = _local_day(clock())
                 pulse.progress('calendar')
-                _same_day(today, clock)
-                raw = gate.call(date=today.isoformat(), timezone=TIMEZONE)
-                if any(workspace._stamp(r).astimezone(ZoneInfo(TIMEZONE)).date() != today for r in raw):
-                    raise AutomationError('Un calendrier contient des matchs hors de la date demandée.')
-                api.save_fixtures(raw, root / 'fixtures.json')
-                workspace._mark_calendar_refresh(root / 'fixtures.json', today, TIMEZONE)
-                _same_day(today, clock)
+                _calendar(root, gate, clock, today)
+                day_refresh = _DayRefresh(root, config, gate, report, clock, today, now, pulse)
+                day_refresh.mark('calendar_at')
                 phases = ('results', 'forecasts', 'history')
                 next_phase = state.get('next_phase', 'results')
                 if next_phase not in phases:
@@ -555,13 +674,16 @@ def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
                     state['next_phase'] = phases[(phases.index(phase)+1) % len(phases)]
                     gate.save()
                     if phase == 'results':
-                        _refresh_results(root, gate, clock, report)
+                        _refresh_results(root, gate, clock, report,after_batch=day_refresh.during_results)
+                        day_refresh.mark('results_at')
                     elif phase == 'forecasts':
                         _forecast(root, config, gate, report, clock, today, now)
+                        day_refresh.mark('forecasts_at')
                     else:
                         raw = api.load_fixtures(root / 'fixtures.json')
                         info, _, _ = _inventory(raw, clock())
-                        _history(root, config, gate, report, info, clock)
+                        _history(root, config, gate, report, info, clock, after_batch=day_refresh)
+                        day_refresh(final=True)
                 state['next_phase'] = 'results'
                 gate.save()
             except _Pause as error:
@@ -586,10 +708,10 @@ def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
                 # Local reconciliation also runs after a provider or host pause.
                 try:
                     pulse.progress('reconcile')
-                    settled = journal.reconcile(api.load_fixtures(root / 'fixtures.json'), now=now,
-                                                path=root / 'predictions.sqlite3')
-                    report.update(settled=settled['settled'], pending=settled['pending'],
-                                  unresolved=settled['unresolved'], quota=state.get('quota', {}),
+                    _reconcile(root, report, now)
+                    if 'day_refresh' in locals():
+                        day_refresh.mark('reconciled_at')
+                    report.update(quota=state.get('quota', {}),
                                   requests_today=state.get('requests_today', 0))
                 except (api.ApiFootballError, journal.JournalError, ValueError, OSError):
                     report['status'] = 'error'

@@ -19,7 +19,7 @@ FILENAME = '.automation_health.sqlite3'
 ORIGINS = {'direct', 'manual', 'service'}
 STATUSES = {'running', 'completed', 'paused', 'busy', 'error', 'interrupted'}
 COUNTERS = ('requests', 'created', 'already_recorded', 'history_imports',
-            'history_received', 'groups_considered', 'settled', 'pending')
+            'history_received', 'groups_considered', 'settled', 'pending', 'day_refreshes')
 PHASES = {'starting':'Démarrage', 'calendar':'Calendrier', 'results':'Résultats',
           'forecasts':'Prévisions', 'history':'Historique', 'reconcile':'Rapprochement local', 'finished':'Fin du passage'}
 HEARTBEAT_SECONDS = 30
@@ -72,6 +72,10 @@ def _connection(root):
             interval_minutes INTEGER NOT NULL, reasons TEXT NOT NULL,
             counters TEXT NOT NULL)''')
         connection.execute('CREATE INDEX IF NOT EXISTS cycles_started ON cycles(started_at)')
+        connection.execute('''CREATE TABLE IF NOT EXISTS refresh_events (
+            id TEXT PRIMARY KEY, observed_at TEXT NOT NULL, cycle_started_at TEXT NOT NULL,
+            day TEXT NOT NULL, phase TEXT NOT NULL, counters TEXT NOT NULL)''')
+        connection.execute('CREATE INDEX IF NOT EXISTS refresh_events_observed ON refresh_events(observed_at)')
         # Additive migration remains compatible with a v1 worker finishing its
         # already running cycle. Reads never change a schema.
         columns = {row[1] for row in connection.execute('PRAGMA table_info(cycles)')}
@@ -83,6 +87,29 @@ def _connection(root):
     except BaseException:
         connection.close()
         raise
+
+
+def record_refresh(root, *, phase, when, cycle_started_at, day, counters):
+    """Append evidence of a completed operation, never infer uptime from it.
+
+    The observation ledger is best effort and deliberately contains no provider
+    payload, error text, credential, model output or arbitrary counter key.
+    """
+    try:
+        from datetime import date
+        if phase not in ('calendar','results','forecasts','reconcile') or date.fromisoformat(day).isoformat()!=day:
+            raise HealthError('Observation locale invalide.')
+        observed, started = _stamp(when), _stamp(cycle_started_at)
+        if observed < started:
+            raise HealthError('Observation antérieure au cycle.')
+        safe = {key:counters[key] for key in COUNTERS
+                if type(counters.get(key)) is int and counters[key]>=0}
+        with closing(_connection(root)) as connection, connection:
+            connection.execute('INSERT INTO refresh_events VALUES (?,?,?,?,?,?)',
+                (uuid4().hex,observed.isoformat(),started.isoformat(),day,phase,json.dumps(safe,sort_keys=True)))
+        return True
+    except (OSError,sqlite3.Error,HealthError,ValueError,TypeError,AttributeError):
+        return False
 
 
 def _reason_codes(report, interrupted=False):

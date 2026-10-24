@@ -33,6 +33,22 @@ class AutomationHealthTests(unittest.TestCase):
         with self.assertRaises(cloud_storage.CloudStorageError):
             cloud_storage._safe_path('api_football/' + health.FILENAME)
 
+    def test_completed_refresh_observations_append_only_controlled_counts(self):
+        for offset in (0,61):
+            self.assertTrue(health.record_refresh(self.root,phase='calendar',when=NOW+timedelta(seconds=offset),
+                cycle_started_at=NOW,day=NOW.date().isoformat(),counters=dict(requests=2+offset,secret='hidden',created=True)))
+        with sqlite3.connect(health.path(self.root)) as connection:
+            rows = connection.execute('SELECT observed_at,phase,counters FROM refresh_events ORDER BY observed_at').fetchall()
+        self.assertEqual(len(rows),2)
+        self.assertEqual([r[1] for r in rows],['calendar','calendar'])
+        self.assertNotIn('hidden',str(rows))
+        self.assertNotIn('created',str(rows))
+        self.assertFalse(health.record_refresh(self.root,phase='uncontrolled',when=NOW,
+            cycle_started_at=NOW,day=NOW.date().isoformat(),counters={}))
+        with patch.object(health,'_connection',side_effect=OSError('disk full')):
+            self.assertFalse(health.record_refresh(self.root,phase='calendar',when=NOW,
+                cycle_started_at=NOW,day=NOW.date().isoformat(),counters={}))
+
     def test_attempt_retains_duration_counters_origin_and_only_controlled_reasons(self):
         report = self.record(status='paused', issues=['Quota API par minute épuisé secret abc123'])
         self.assertEqual(report['duration_seconds'], 2)

@@ -1079,6 +1079,64 @@ Les anciennes exécutions sans signal restent de fin inconnue. L’intervalle du
 service règle la fréquence de lancement : un cycle long peut dépasser cet
 intervalle, sans qu’un second cycle parallèle soit lancé.
 
+### Alterner l’historique et les besoins du jour
+
+Un import de compétition/saison forme un lot indivisible. Entre les lots, le
+worker vérifie si 60 secondes se sont écoulées depuis sa dernière relève du
+jour. Il actualise alors le calendrier, récupère les résultats arrivés à échéance,
+rapproche les scores et prépare les prévisions encore possibles avant match.
+Il reprend ensuite la file historique. Une dernière relève suit les nouveaux
+imports en fin de file, pour utiliser l’historique collecté sans attendre le
+prochain lancement du service.
+
+Une longue file de résultats cède également la main entre ses lots de 20
+identifiants lorsque la relève est due. Le calendrier et les prévisions peuvent
+ainsi avancer avant la fin de tous les contrôles des anciens résultats ; les
+identifiants restant à contrôler ne sont pas supprimés.
+
+Cette cadence est une règle d’alternance, **pas un plafond de requêtes ou
+d’imports**. Toutes les compétitions et saisons de la file restent à traiter.
+Un appel API ou un calcul individuel peut dépasser cette durée ; la cadence ne
+garantit donc pas une actualisation exactement chaque minute. Les quotas réels
+du fournisseur et les pauses de connexion restent respectés. Les lots validés,
+les tentatives et les ancrages des groupes sont conservés pour la reprise après
+arrêt. Un changement de journée interrompt les anciennes prévisions ; un relevé
+du nouveau jour sera demandé au passage suivant.
+
+Les groupes déjà enregistrés conservent leur première prévision. Les relèves ne
+les réécrivent pas et ne multiplient pas les groupes dans les compteurs du cycle.
+L’état en cours est publié après chaque relève terminée. Les traitements des
+modèles restent séparés et un entraînement individuel peut également durer.
+
+### Observer plusieurs journées réelles
+
+Dans **Pilotage → Automatisation → Observations par journée et preuves
+prédictives**, les tableaux présentent les opérations terminées observées,
+les matchs uniques prédits avant coup d’envoi, leurs délais et leurs résultats.
+Le panneau reste sans calcul tant qu’il est fermé. Ouvert, il lit les données
+locales, avec un cache de 60 secondes, et propose un export JSON.
+
+Les fins d’opérations sont ajoutées dans `refresh_events`, dans le journal privé
+`data/api_football/.automation_health.sqlite3`. Le suivi commence avec cette
+version : les journées antérieures ne sont pas reconstruites. Le lecteur couvre
+au plus 31 jours et 100 000 événements et signale une éventuelle troncature ;
+cette borne de lecture ne limite pas la collecte. Les écarts entre opérations
+sont descriptifs ; ni la disponibilité continue ni la cause d’une absence ne
+sont déduites. Une journée calendaire close ne signifie pas une journée entière
+de stabilité vérifiée.
+
+Pour créer une observation datée sans lancer de cycle ni contacter l’API :
+
+```bash
+.venv/bin/python scripts/observe_local_operation.py --days 7 --output audit/observation_locale_2026-10-24.json
+```
+
+Choisir une nouvelle destination à chaque fois ; un rapport existant n’est
+jamais écrasé. Le comparatif lit les prévisions figées et le protocole existant,
+sans réentraîner, réoptimiser, ajouter d’ancien résultat à l’apprentissage ou
+changer les critères. Les effectifs par cohorte, leur recouvrement et leur
+maturité restent visibles avant toute conclusion prédictive.
+
 ## Données conservées et appels API
 
 Le relevé initial du 18 octobre 2026 contient 4 828 rencontres API-Football, dont

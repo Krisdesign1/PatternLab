@@ -437,7 +437,8 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual((second['status'],second['created'],second['history_imports']), ('completed',3,2))
         self.assertTrue('date' in next_client.calls[0])
         self.assertTrue(all('ids' in params for params in next_client.calls[1:4]))
-        self.assertTrue(all('league' in params for params in next_client.calls[4:]))
+        self.assertEqual(sum('league' in params for params in next_client.calls[4:]), 2)
+        self.assertIn('date', next_client.calls[-1])  # Fresh-day pass after the finite history queue.
         self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'], 'results')
 
     def test_last_unavailable_forecast_keeps_history_priority_if_its_first_call_cannot_start(self):
@@ -482,7 +483,7 @@ class WorkerTests(unittest.TestCase):
     def test_results_deadline_rotates_to_forecasts_then_history_on_successive_passages(self):
         self.config.update(sizes=[4],history_enabled=True,history_seasons=[2024])
         elapsed, events = [0], []
-        def slow_results(root, gate, clock, report):
+        def slow_results(root, gate, clock, report, **kwargs):
             events.append('results')
             elapsed[0] = 241
             gate.check_time()
@@ -530,7 +531,8 @@ class WorkerTests(unittest.TestCase):
              patch.object(worker,'_forecast',side_effect=tracked('forecasts',forecast)):
             report = self.run_cycle()
         self.assertEqual((report['status'],report['created'],report['history_imports']),('completed',3,1))
-        self.assertEqual(events,['forecasts','history','results'])
+        self.assertEqual(events,['forecasts','history','results','forecasts','results'])
+        self.assertEqual(report['day_refreshes'],1)
         self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'],'results')
 
     def test_full_due_results_queue_uses_twenty_id_batches_without_forty_match_cap(self):
@@ -545,6 +547,157 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(report['requests'], 4)
         self.assertEqual([len(params['ids'].split('-')) for params in client.calls], [20,20,20,5])
         self.assertEqual(set(state['result_checks']), {row['match_id'] for row in fixtures})
+
+    def test_long_results_queue_yields_to_calendar_and_forecasts_between_batches(self):
+        rows = [raw_match(12000+i,stamp='2025-03-20T08:00:00Z',status='FT',league=39,season=2025)
+                for i in range(45)]
+        selected = [dict(match_id=str(row['fixture']['id']),timestamp=row['fixture']['date']) for row in rows]
+        state, report, elapsed, forecasts = {}, dict(requests=0,created=0,history_imports=0,started_at=BEFORE.isoformat()), [0], []
+        client = Client(rows)
+        original = client.fixtures
+        def response(**params):
+            result = original(**params)
+            if 'ids' in params:
+                elapsed[0] += 61
+            return result
+        client.fixtures = response
+        clock = lambda:BEFORE+timedelta(seconds=elapsed[0])
+        gate = worker._Gate(self.root,state,self.config,client,clock,report)
+        from types import SimpleNamespace
+        with patch.object(worker.time,'monotonic',side_effect=lambda:elapsed[0]), \
+                patch.object(journal,'list_entries',return_value=[dict(status='pending',fixtures=selected)]), \
+                patch.object(worker,'_reconcile'), \
+                patch.object(worker,'_forecast',side_effect=lambda *args:forecasts.append(len(client.calls))):
+            refresh = worker._DayRefresh(self.root,self.config,gate,report,clock,BEFORE.date(),BEFORE,
+                                         SimpleNamespace(progress=lambda phase:None))
+            worker._refresh_results(self.root,gate,clock,report,after_batch=refresh.during_results)
+        self.assertEqual(len(forecasts),3)
+        self.assertEqual([('ids' if 'ids' in p else 'date') for p in client.calls],['ids','date']*3)
+        self.assertEqual([len(p['ids'].split('-')) for p in client.calls if 'ids' in p],[20,20,5])
+        self.assertEqual(len(state['result_checks']),45)
+        self.assertEqual(report['history_imports'],0)
+
+    def test_slow_history_yields_to_today_and_new_history_unlocks_forecasts_once(self):
+        root = self.root/'new'
+        api.save_fixtures(self.future, root/'fixtures.json')
+        config = dict(self.config, history_enabled=True, history_seasons=[2023,2024,2025])
+        elapsed, frozen = [0], []
+        client = Client(self.future)
+        original = client.fixtures
+        def response(**params):
+            if 'league' in params:
+                if not frozen and (root/'predictions.sqlite3').exists():
+                    frozen.extend(journal.list_entries(root/'predictions.sqlite3'))
+                client.calls.append(params)
+                elapsed[0] += 61
+                return payload(self.history if params['season']==2025 else [])
+            return original(**params)
+        client.fixtures = response
+        clock = lambda:BEFORE+timedelta(seconds=elapsed[0])
+        with patch.object(worker.time,'monotonic',side_effect=lambda:elapsed[0]), \
+                patch.object(worker,'_time',side_effect=lambda now=None:clock()), \
+                patch.object(journal,'_now',side_effect=lambda now=None:clock() if now is None else now):
+            report = worker.run_cycle(root=root,config=config,client=client)
+        self.assertEqual(report['status'],'completed',report)
+        self.assertEqual((report['history_imports'],report['created'],report['groups_considered']),(3,3,3))
+        self.assertEqual(report['already_recorded'],0)
+        self.assertEqual(report['day_refreshes'],3)
+        history_indices = [i for i,p in enumerate(client.calls) if 'league' in p]
+        for left,right in zip(history_indices,history_indices[1:]):
+            self.assertTrue(any('date' in p for p in client.calls[left+1:right]))
+        self.assertTrue(any('ids' in p for p in client.calls[history_indices[0]+1:history_indices[1]]))
+        final = journal.list_entries(root/'predictions.sqlite3')
+        self.assertEqual(len(frozen),3)
+        for before,after in zip(frozen,final):
+            for field in ('id','created_at','methods','fixtures','metadata'):
+                self.assertEqual(before[field],after[field])
+        state = worker._read(root/'automation_state.json',{})
+        self.assertEqual(len(state['history_attempts']),3)
+        self.assertEqual(state['next_phase'],'results')
+        self.assertEqual(set(state['day_service']),{'day','calendar_at','results_at','forecasts_at','reconciled_at'})
+        # A restart skips all successful imports and cannot duplicate forecasts.
+        again = worker.run_cycle(root=root,config=config,client=Client(self.future),now=BEFORE+timedelta(minutes=15))
+        self.assertEqual((again['history_imports'],again['created']),(0,0))
+        self.assertEqual(len(journal.list_entries(root/'predictions.sqlite3')),3)
+
+    def test_midnight_between_history_batches_saves_import_then_stops_old_day_work(self):
+        start = BEFORE.replace(hour=22,minute=59,second=30)
+        worker._write(self.root/'automation_state.json',dict(version=worker.VERSION,next_phase='history'))
+        self.config.update(history_enabled=True,history_seasons=[2024,2025])
+        elapsed = [0]
+        client = Client(self.future)
+        original = client.fixtures
+        def response(**params):
+            value = original(**params)
+            if 'league' in params:
+                elapsed[0] = 40
+            return value
+        client.fixtures = response
+        with patch.object(worker.time,'monotonic',side_effect=lambda:elapsed[0]), \
+                patch.object(worker,'_time',side_effect=lambda now=None:start+timedelta(seconds=elapsed[0])):
+            report = worker.run_cycle(root=self.root,config=self.config,client=client)
+        self.assertEqual((report['status'],report['history_imports'],report['created']),('paused',1,0))
+        self.assertIn('journée de Kinshasa', report['issues'][0])
+        self.assertEqual(len(api.load_season_imports(self.root/'fixtures.json')),1)
+        self.assertEqual(len(client.calls),2)
+
+    def test_day_service_clears_previous_day_timestamps(self):
+        state = dict(day_service=dict(day='2025-03-19',forecasts_at='2025-03-19T09:00:00+00:00'))
+        report = dict(started_at=BEFORE.isoformat(),history_imports=0)
+        gate = worker._Gate(self.root,state,self.config,None,lambda:BEFORE,report)
+        refresh = worker._DayRefresh(self.root,self.config,gate,report,lambda:BEFORE,
+                                    BEFORE.date(),BEFORE,None)
+        refresh.mark('calendar_at')
+        self.assertEqual(state['day_service'],dict(day='2025-03-20',calendar_at=BEFORE.isoformat()))
+
+    def test_late_failure_cannot_leave_a_success_report_or_expose_exception_text(self):
+        execute = worker._execute_cycle
+        def late_failure(*args):
+            execute(*args)
+            raise RuntimeError('private diagnostic must not be displayed')
+        with patch.object(worker,'_execute_cycle',side_effect=late_failure), self.assertRaises(RuntimeError):
+            self.run_cycle()
+        report = worker.load_status(self.root)
+        self.assertEqual(report['status'],'error')
+        self.assertIn('fin normale',report['issues'][-1])
+        self.assertNotIn('private diagnostic',json.dumps(report))
+        self.assertEqual(worker.health.load(self.root,now=BEFORE)['rows'][0]['status'],'error')
+
+    def test_history_yield_fetches_and_reconciles_due_past_results_before_next_import(self):
+        old = copy.deepcopy(fixtures()[:2])
+        for row in old:
+            row['match_id'] = str(int(row['match_id'])+10000)
+            row['timestamp'] = row['timestamp'].replace('2025-03-20','2025-03-19')
+        methods = models.build_methods(sample(),old)['methods']
+        before = journal.record(old,methods,path=self.root/'predictions.sqlite3',
+                                now=BEFORE-timedelta(days=1),raw_fixtures=raw_fixtures(old))
+        self.config.update(history_enabled=True,history_seasons=[2024,2025])
+        elapsed, settled_before_second_import = [0], []
+        client = Client(self.future+raw_fixtures(old))
+        original = client.fixtures
+        def response(**params):
+            if 'league' in params:
+                client.calls.append(params)
+                if elapsed[0]:
+                    settled_before_second_import.extend(journal.list_entries(self.root/'predictions.sqlite3'))
+                elapsed[0] += 901
+                for raw in client.matches:
+                    if str(raw['fixture']['id']) in {r['match_id'] for r in old}:
+                        raw['fixture']['status']['short'] = 'FT'
+                return payload([])
+            return original(**params)
+        client.fixtures = response
+        clock = lambda:BEFORE+timedelta(seconds=elapsed[0])
+        with patch.object(worker.time,'monotonic',side_effect=lambda:elapsed[0]), \
+                patch.object(worker,'_time',side_effect=lambda now=None:clock()), \
+                patch.object(journal,'_now',side_effect=lambda now=None:clock() if now is None else now):
+            report = worker.run_cycle(root=self.root,config=self.config,client=client)
+        self.assertEqual(report['status'],'completed',report)
+        retained = next(row for row in settled_before_second_import if row['id']==before['id'])
+        self.assertEqual(retained['status'],'settled')
+        self.assertEqual(retained['methods'],before['methods'])
+        self.assertEqual(retained['created_at'],before['created_at'])
+        self.assertEqual(report['history_imports'],2)
 
     def test_previous_start_year_season_is_refreshed_in_january(self):
         marker_raw = copy.deepcopy(self.future)
