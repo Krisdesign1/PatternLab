@@ -15,6 +15,7 @@ from coupon_sizes import validate_size
 from league_model import VALUES
 from scenario_odds import DEFAULT_ODDS, format_odds, scenario_odds_text
 import prospective_models as prospective
+import group_probability_diagnostics as group_diagnostics
 
 
 METHOD_ORDER = ('frequency', 'clubs', 'combined', 'catboost', 'context_neighbors')
@@ -255,6 +256,42 @@ def matrix_html(matrix, *, theme='dark', rows=None, title=None):
             f'<tbody>{"".join(body)}</tbody></table></div></div>')
 
 
+def render_group_coverage(methods, *, key):
+    """Whole-scenario mass, separate from per-match probabilities and success."""
+    diagnostics = group_diagnostics.inspect_methods(methods)
+    valid = diagnostics['methods']
+    if not valid:
+        return
+    size = next(iter(valid.values()))['size']
+    st.caption(f'Groupe de {size} matchs · {3**size:,} scénarios possibles. '
+               'Les probabilités ci-dessous concernent le scénario entier, dans l’ordre enregistré.')
+    st.dataframe([{'Méthode': METHOD_LABELS.get(name, name),
+                   'Premier scénario (%)': 100*row['top1_probability'],
+                   'Les 3 scénarios (%)': 100*row['top3_probability'],
+                   'Autres scénarios (%)': 100*row['remaining_probability']}
+                  for name, row in valid.items()], hide_index=True, width='stretch', key=f'{key}_coverage',
+                 column_config={name: st.column_config.NumberColumn(format='%.4f') for name in
+                     ('Premier scénario (%)', 'Les 3 scénarios (%)', 'Autres scénarios (%)')})
+    st.caption('Ces masses viennent de chaque distribution figée, sans redistribution entre les choix affichés. '
+               'Un scénario classé premier peut rester peu probable. Les probabilités de groupes de tailles différentes '
+               'ne se comparent pas directement et ne mesurent pas une précision validée.')
+    details = st.expander('Probabilité du groupe et probabilités par match', on_change='rerun')
+    if details.open:
+        with details:
+            name = st.selectbox('Méthode du diagnostic de groupe', list(valid),
+                                format_func=lambda item: METHOD_LABELS.get(item, item), key=f'{key}_coverage_method')
+            row = valid[name]
+            st.dataframe([{'Position enregistrée': value['position'], 'Résultat du premier scénario': value['result'],
+                           'Probabilité marginale (%)': 100*value['probability']}
+                          for value in row['top1_match_probabilities']], hide_index=True, width='stretch',
+                         key=f'{key}_coverage_marginals', column_config={
+                             'Probabilité marginale (%)': st.column_config.NumberColumn(format='%.2f')})
+            for assumption in row['assumptions']:
+                st.caption(assumption)
+            st.caption('Les probabilités marginales ne se multiplient directement que dans les distributions '
+                       'supposant les matchs indépendants. Les méthodes corrigées utilisent leur distribution conjointe.')
+
+
 def render_matrix(methods, *, actual=None, key='scenario_matrix', title=None):
     """Render a frozen-method matrix and return its complete, unfiltered model."""
     try:
@@ -267,6 +304,7 @@ def render_matrix(methods, *, actual=None, key='scenario_matrix', title=None):
     if not matrix['rows']:
         st.caption('Aucun scénario enregistré à comparer.')
         return matrix
+    render_group_coverage(methods, key=key)
     rows = matrix['rows']
     if len(rows) > 3:
         mode = st.segmented_control('Scénarios affichés', ['Tous les choix', 'Premiers choix'],

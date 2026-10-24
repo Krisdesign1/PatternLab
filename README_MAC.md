@@ -146,6 +146,16 @@ exclusions. Les profils et tendances restent calculés dans leur compétition.
 L’historique s’arrête avant le premier jour UTC des rencontres à venir et avant
 le jour UTC actuel ; aucun score de la journée cible n’entre dans le calcul.
 
+Dans **Fortes probabilités**, le filtre d’historique ouvre désormais sur un
+réglage prudent : **100 résultats de compétition, 10 journées UTC et 8 précédents
+par club dans son rôle**. Les effectifs restent visibles. **Tous les matchs
+calculables** permet de consulter les profils sous ces seuils ; **Personnalisé**
+permet de les régler, sans descendre sous les minima du moteur. Ces seuils
+décrivent la quantité de données, pas une précision validée. Ils ne modifient ni
+les pourcentages, ni leur tri, ni les anciennes prévisions, ni les règles de
+l’automatisation. Le filtre s’applique aux groupes préparés depuis cette page,
+y compris au panier mixte, et ses critères sont conservés à l’enregistrement.
+
 **Analyser les premiers matchs** utilise les 2 à 20 premières rencontres selon
 les filtres choisis. La sélection manuelle permet de réunir d’autres rencontres
 du classement, y compris de compétitions différentes. Les matchs du groupe
@@ -176,7 +186,8 @@ calcul local inchangé ne supprime pas le groupe préparé.
 
 Dans **Composer mon scénario mixte**, sélectionne de 2 à 20 matchs parmi les
 rencontres évaluables du jour, puis choisis `1st`, `Égal` ou `2nd` pour chacun.
-Ce panier est indépendant des filtres du classement. Les rencontres sont
+Ce panier partage le filtre d’historique, mais reste indépendant du résultat
+recherché, du seuil de probabilité et de la recherche du classement. Les rencontres sont
 remises dans leur ordre chronologique ; chaque résultat reste attaché à son
 identifiant de match. **Calculer mon scénario mixte** affiche la probabilité
 du scénario complet et, séparément, les trois premiers choix du moteur.
@@ -264,6 +275,13 @@ scénario classé par une autre méthode. « Hors des 3 choix » n’est pas une
 probabilité nulle. Si seule la liste des propositions a été conservée, un tiret
 indique une valeur indisponible ; les probabilités ne sont jamais redistribuées
 entre les seules lignes du tableau.
+
+Un récapitulatif présente aussi la probabilité du premier scénario, la somme
+des trois propositions et la probabilité restante, selon chaque distribution
+figée. Les détails donnent les probabilités par match et les hypothèses du
+modèle. La probabilité d’un scénario complet reste distincte de celle de chacun
+de ses matchs ; elle n’est pas un score permettant de comparer directement des
+groupes de tailles différentes.
 
 Les cotes fixes de référence renseignées manuellement sont **1st : 3,10**,
 **2nd : 2,10** et **Égal : 3,00**. La colonne « Cote cumulée » multiplie les
@@ -800,8 +818,13 @@ requête pour le groupe affiché, y compris dans l’historique. L’automatisat
 les résultats des anciennes prévisions. Les groupes ne sont évalués que
 lorsque tous leurs matchs disposent de scores HT et à 90 minutes cohérents.
 Les prolongations et tirs au but ne changent pas la définition de `1st/Égal/2nd`.
-Un match annulé ou abandonné retire le groupe des mesures ; un report, un horaire
-modifié, un résultat manquant ou incohérent reste à vérifier. Une correction de
+Un match annulé ou abandonné retire le groupe des mesures ; un report ou un
+résultat manquant ou incohérent reste à vérifier. Un changement d’horaire seul
+peut être rapproché une fois le résultat final confirmé : même identifiant API,
+même compétition et mêmes clubs dans leurs rôles, prévision antérieure aux deux
+horaires et historique compatible. La fiche montre les deux horaires et la règle
+appliquée. L’ordre des matchs et les prévisions restent ceux de l’enregistrement.
+Une inversion domicile/extérieur reste à vérifier. Une correction de
 score ajoute une révision de l’évaluation, sans modifier les prévisions d’origine.
 
 La comparaison sépare compétition, longueur et versions des méthodes. Elle porte
@@ -827,6 +850,13 @@ ne doivent pas être interprétés comme des observations indépendantes ou comm
 la précision de tous les groupes possibles. Aucun modèle n’est réentraîné dans
 ce suivi. Le service d’automatisation ci-dessous permet également de recevoir les
 résultats et de mettre à jour le journal quand la fenêtre de l’application est fermée.
+
+Dans le comparatif prospectif complémentaire, les compteurs globaux distinguent
+les matchs uniques, les groupes et les matchs présents dans plusieurs groupes.
+Les scores restent séparés par cohorte ; aucun taux global mélangeant les
+versions ou multipliant les observations communes n’est produit. Les blocs
+hebdomadaires clos disponibles restent affichés avant toute conclusion sur un
+avantage prédictif.
 
 Le bouton **Exporter le journal complet** sauvegarde les prévisions, les versions
 et les révisions de résultats en JSON. Le stockage persistant est spécifique à
@@ -1040,6 +1070,14 @@ observés depuis l’activation de ce suivi. Les anciens rapports ne sont pas
 transformés en observations. La préparation séparée des modèles n’est pas incluse
 dans la durée du cycle de données. Ce journal n’est ni une mesure de disponibilité
 24 h/24, ni une preuve de précision prédictive.
+
+Pendant un cycle, un signal local est écrit toutes les 30 secondes. Le suivi
+distingue **dernier signal** et **dernière progression** (changement de phase ou
+de compteur). Un signal récent confirme que le processus répond, pas que les
+données avancent ; un signal ancien ne suffit pas à déclarer le cycle arrêté.
+Les anciennes exécutions sans signal restent de fin inconnue. L’intervalle du
+service règle la fréquence de lancement : un cycle long peut dépasser cet
+intervalle, sans qu’un second cycle parallèle soit lancé.
 
 ## Données conservées et appels API
 

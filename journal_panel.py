@@ -147,6 +147,17 @@ def _detail(entry, day, daily, *, clock_day):
                   for i, row in enumerate(entry['fixtures'])],key='journal_match_results')
     for issue in entry.get('issues', []):
         st.warning(issue)
+    corrections = [row['schedule_resolution'] for row in entry.get('observed', [])
+                   if row.get('schedule_resolution')]
+    if corrections:
+        st.info('Résultats rapprochés après une correction horaire confirmée : mêmes matchs, mêmes clubs et même compétition. '
+                'Les scénarios conservent leur ordre et leurs probabilités d’origine.')
+        with st.expander('Horaires corrigés et règle de rapprochement'):
+            st.dataframe([{'Match API': row['match_id'], 'Horaire enregistré · UTC': row['original_timestamp'],
+                           'Horaire confirmé · UTC': row['effective_timestamp'], 'Règle': row['version']}
+                          for row in corrections], hide_index=True, width='stretch', key='journal_schedule_audit')
+            st.caption('Prévision antérieure aux deux horaires, coupure historique compatible avec le match, '
+                       'statut final et scores à 90 minutes vérifiés. Les changements de clubs restent à vérifier.')
     scenario_tables.render_matrix(entry['methods'],actual=outcome.get('actual'),key='journal_scenarios',
                                   title='Scénarios enregistrés avant match')
     diagnostic_methods=[name for name in NAMES if name in entry['methods']]

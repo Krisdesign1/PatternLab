@@ -515,11 +515,11 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
     if origin not in health.ORIGINS:
         raise AutomationError('Origine du cycle invalide.')
     with health.monitor(root, report, interval_minutes=config['interval_minutes'], clock=clock,
-                        origin=origin, enabled=not cloud_storage.configured()):
-        return _execute_cycle(root, config, client, clock, report, deadline, now)
+                        origin=origin, enabled=not cloud_storage.configured()) as pulse:
+        return _execute_cycle(root, config, client, clock, report, deadline, now, pulse)
 
 
-def _execute_cycle(root, config, client, clock, report, deadline, now):
+def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
     """Original pipeline, independent of the local diagnostics ledger."""
     try:
         with _lock(root):
@@ -532,6 +532,7 @@ def _execute_cycle(root, config, client, clock, report, deadline, now):
                 if gate.client is None:
                     gate.client = api.ApiFootballClient(api.load_key())
                 today = _local_day(clock())
+                pulse.progress('calendar')
                 _same_day(today, clock)
                 raw = gate.call(date=today.isoformat(), timezone=TIMEZONE)
                 if any(workspace._stamp(r).astimezone(ZoneInfo(TIMEZONE)).date() != today for r in raw):
@@ -548,6 +549,7 @@ def _execute_cycle(root, config, client, clock, report, deadline, now):
                 # A long results queue therefore cannot consume every passage;
                 # a host/provider pause resumes with the following phase.
                 for phase in phases[start:]+phases[:start]:
+                    pulse.progress(phase)
                     gate.check_time()
                     _same_day(today, clock)
                     state['next_phase'] = phases[(phases.index(phase)+1) % len(phases)]
@@ -583,6 +585,7 @@ def _execute_cycle(root, config, client, clock, report, deadline, now):
             finally:
                 # Local reconciliation also runs after a provider or host pause.
                 try:
+                    pulse.progress('reconcile')
                     settled = journal.reconcile(api.load_fixtures(root / 'fixtures.json'), now=now,
                                                 path=root / 'predictions.sqlite3')
                     report.update(settled=settled['settled'], pending=settled['pending'],

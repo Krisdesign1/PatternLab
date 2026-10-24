@@ -55,8 +55,17 @@ def render(config, *, scheduler=None):
     if not summary['service_observations']:
         st.info('Les passages affichés ne confirment pas encore le fonctionnement automatique du service.')
     if counts['running']:
-        st.warning(f"{counts['running']} passage(s) sans fin confirmée. Ils peuvent être en cours ou avoir été arrêtés ; "
-                   'ils ne sont pas comptés comme terminés.')
+        active = [row for row in view['rows'] if row['status']=='running']
+        recent = sum(row.get('signal_state')=='recent' for row in active)
+        stale = sum(row.get('signal_state')=='stale' for row in active)
+        if recent:
+            st.info(f'{recent} passage(s) en cours avec un signal récent. Leur fin reste à confirmer.')
+        if len(active)>recent:
+            st.warning(f'{len(active)-recent} passage(s) sans fin confirmée et sans signal récent. '
+                       'Ils peuvent être en cours ou avoir été arrêtés ; ils ne sont pas comptés comme terminés.')
+        st.caption(f'{recent} passage(s) avec signal récent · {stale} avec signal ancien. '
+                   'Un signal récent confirme la présence du processus, pas la progression des données. '
+                   'Les anciens cycles sans signal restent de fin inconnue.')
     if summary['gaps']:
         st.warning(f"{len(summary['gaps'])} écart(s) au rythme configuré entre les passages du service. "
                    'Un Mac en veille, un cycle long ou un arrêt peuvent expliquer une absence ; ce journal seul ne permet pas d’en attribuer la cause.')
@@ -66,7 +75,12 @@ def render(config, *, scheduler=None):
         rows = view['rows'][:50]
         st.dataframe([{'Début · Kinshasa': _local(row['started_at']),
                        'Fin · Kinshasa': _local(row['finished_at']),
-                       'Durée (s)': row['duration_seconds'], 'État': STATES[row['status']],
+                       'Durée (s)': row.get('elapsed_seconds', row['duration_seconds']),
+                       'État': ('En cours · signal récent' if row['status']=='running' and row.get('signal_state')=='recent'
+                                else STATES[row['status']]),
+                       'Dernier signal': _local(row.get('last_seen_at')),
+                       'Dernière progression': _local(row.get('last_progress_at')),
+                       'Phase': health.PHASES.get(row.get('phase'),'—'),
                        'Origine': ORIGINS[row['origin']],
                        'Requêtes API': row['counters'].get('requests'),
                        'Prévisions ajoutées': row['counters'].get('created'),

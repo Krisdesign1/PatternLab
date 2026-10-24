@@ -229,6 +229,33 @@ class SavedFrequencyPairsTests(unittest.TestCase):
         self.assertEqual(len([row for row in report['cohorts'] if row['challenger']=='clubs']),1)
         self.assertEqual(report['duplicates_removed'],2)
 
+    def test_coverage_counts_unique_matches_and_groups_without_multiplying_model_pairs(self):
+        first=entry(identity='a',status='pending'); first['observed']=[]
+        later=entry(identity='b',created='2026-10-20T11:00:00Z')
+        later['methods']['catboost']['generation']='other-generation'
+        report=self.paired([later,first])
+        coverage=report['coverage']
+        self.assertEqual(coverage['unique_matches'],2)
+        self.assertEqual(coverage['comparable_groups'],2)
+        self.assertEqual(coverage['group_match_appearances'],4)
+        self.assertEqual(coverage['repeated_match_appearances'],2)
+        self.assertEqual(coverage['overlapping_matches'],2)
+        self.assertEqual(coverage['overlapping_groups'],2)
+        self.assertEqual(coverage['cohort_match_observations'],6)
+        self.assertEqual(coverage['pending_unique_matches'],2)
+        self.assertEqual(coverage['evaluated_unique_matches'],0)
+        self.assertEqual(coverage['mature_cohorts'],0)
+        self.assertEqual(coverage['max_closed_blocks'],0)
+
+    def test_coverage_does_not_count_excluded_groups_or_missing_methods_as_failures(self):
+        missing=entry(identity='missing'); missing['methods'].pop('frequency')
+        old=entry(identity='old',created='2026-10-20T08:00:00Z')
+        report=self.paired([entry(),missing,old])
+        self.assertEqual(report['coverage']['comparable_groups'],1)
+        self.assertEqual(report['coverage']['unique_matches'],2)
+        self.assertEqual(report['coverage']['evaluated_unique_matches'],2)
+        self.assertEqual(report['coverage']['excluded_unique_matches'],0)
+
     def test_closed_weeks_use_paired_cluster_bootstrap_not_iid_match_intervals(self):
         from datetime import timedelta
         values=[self.weekly_entry(i) for i in range(20)]

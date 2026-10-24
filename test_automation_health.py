@@ -114,6 +114,56 @@ class AutomationHealthTests(unittest.TestCase):
         self.assertEqual((view['total'], len(view['rows'])), (4, 2))
         self.assertEqual(view['first_started_at'], NOW.isoformat())
 
+    def test_live_signal_distinguishes_presence_from_progress_and_never_creates_a_gap(self):
+        report = dict(started_at=NOW.isoformat(),status='completed',requests=0,issues=[])
+        current = NOW
+        with health.monitor(self.root,report,clock=lambda:current,interval_minutes=15,origin='service') as pulse:
+            pulse.progress('history')
+            current = NOW+timedelta(hours=2)
+            pulse.beat()
+            view = health.load(self.root,now=current)
+            self.assertEqual(view['rows'][0]['signal_state'],'recent')
+            self.assertEqual(view['rows'][0]['phase'],'history')
+            self.assertEqual(view['rows'][0]['last_progress_at'],NOW.isoformat())
+            self.assertEqual(view['rows'][0]['elapsed_seconds'],7200)
+            self.assertEqual(health.summarize(view,now=current,schedule_expected=True)['gaps'],[])
+            report['requests'] = 2
+            pulse.beat()
+            self.assertEqual(health.load(self.root,now=current)['rows'][0]['last_progress_at'],current.isoformat())
+            stale = health.load(self.root,now=current+timedelta(minutes=3))
+            self.assertEqual(stale['rows'][0]['signal_state'],'stale')
+            self.assertEqual(stale['rows'][0]['status'],'running')
+        row = health.load(self.root,now=current)['rows'][0]
+        self.assertEqual(row['status'],'completed')
+        self.assertEqual(row['counters'],{'requests':2})
+
+    def test_legacy_journal_remains_readable_without_migration_on_read(self):
+        target = health.path(self.root)
+        with sqlite3.connect(target) as con:
+            con.execute('CREATE TABLE cycles (id,started_at,finished_at,duration_seconds,status,origin,interval_minutes,reasons,counters)')
+            con.execute('PRAGMA user_version=1')
+            con.execute('INSERT INTO cycles VALUES (?,?,?,?,?,?,?,?,?)',
+                        ('old',NOW.isoformat(),None,None,'running','service',15,'[]','{}'))
+        before = target.read_bytes()
+        view = health.load(self.root,now=NOW+timedelta(hours=2))
+        self.assertEqual(view['rows'][0]['signal_state'],'unavailable')
+        self.assertEqual(view['rows'][0]['phase'],None)
+        self.assertEqual(target.read_bytes(),before)
+        self.assertEqual(health.summarize(view,now=NOW+timedelta(hours=2),schedule_expected=True)['gaps'],[])
+
+    def test_confirmed_maintenance_stop_only_changes_explicit_unfinished_service_attempt(self):
+        report = dict(started_at=NOW.isoformat(),status='completed',issues=[])
+        with health.monitor(self.root,report,clock=lambda:NOW,interval_minutes=15,origin='service'):
+            identity = health.load(self.root,now=NOW)['rows'][0]['id']
+            self.assertEqual(health.confirm_service_interruption(self.root,[identity],confirmed_at=NOW),1)
+            row = health.load(self.root,now=NOW)['rows'][0]
+            self.assertEqual(row['status'],'interrupted')
+            self.assertEqual(row['reasons'],['interrupted','maintenance'])
+            self.assertIsNone(row['duration_seconds'])
+        # A late monitor finalization cannot undo an explicitly confirmed stop.
+        self.assertEqual(health.load(self.root,now=NOW)['rows'][0]['status'],'interrupted')
+        self.assertEqual(health.confirm_service_interruption(self.root,[identity],confirmed_at=NOW),0)
+
     def test_corrupted_ledger_is_reported_without_schema_writes(self):
         health.path(self.root).write_bytes(b'invalid sqlite data')
         before = health.path(self.root).read_bytes()

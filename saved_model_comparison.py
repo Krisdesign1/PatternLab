@@ -19,7 +19,7 @@ import journal_uncertainty as uncertainty
 
 VERSION = 'saved-paired-match-comparison-v1'
 METHODS = ('frequency', 'clubs', 'catboost')
-PAIRED_VERSION = 'saved-frequency-pairs-v1'
+PAIRED_VERSION = 'saved-frequency-pairs-v2'
 CHALLENGERS = ('clubs', 'combined', 'catboost', 'context_neighbors')
 
 
@@ -322,6 +322,36 @@ def _frequency_reference(payload):
     return distribution['type'] == 'frequency'
 
 
+def _coverage(candidates, grouped, cohorts, protocol):
+    """Coverage counts only, with no pooled score or outcome-based selection.
+
+    The same fixture can belong to several model pairs, sizes or versions. Count
+    its ID once globally; retain its earliest comparable observation for status
+    counts. Repeated IDs across groups are not new independent observations.
+    """
+    groups = defaultdict(set)
+    for record in candidates:
+        groups[record['entry_id']].add(record['match_id'])
+    membership = Counter(mid for ids in groups.values() for mid in ids)
+    records = [record for rows in grouped.values() for record in rows]
+    first = {}
+    for record in sorted(records,key=lambda row:(row['created'],row['entry_id'])):
+        first.setdefault(record['match_id'],record)
+    return dict(unique_matches=len(first),comparable_groups=len(groups),
+        retained_groups=len({row['entry_id'] for row in records}),
+        group_match_appearances=sum(membership.values()),
+        repeated_match_appearances=sum(membership.values())-len(membership),
+        overlapping_matches=sum(count>1 for count in membership.values()),
+        overlapping_groups=sum(any(membership[mid]>1 for mid in ids) for ids in groups.values()),
+        cohort_match_observations=len(records),cohorts=len(cohorts),
+        evaluated_unique_matches=sum(row['state']=='evaluated' for row in first.values()),
+        pending_unique_matches=sum(row['state']=='pending' for row in first.values()),
+        excluded_unique_matches=sum(row['state']=='excluded' for row in first.values()),
+        mature_cohorts=sum(row['uncertainty']['blocks']>=protocol['min_blocks'] for row in cohorts),
+        max_closed_blocks=max((row['uncertainty']['blocks'] for row in cohorts),default=0),
+        required_blocks=protocol['min_blocks'])
+
+
 def build_pairs(entries, protocol, *, now=None):
     """Supplementary prospective pairs versus the saved no-club frequency method.
 
@@ -405,11 +435,14 @@ def build_pairs(entries, protocol, *, now=None):
             forecasts=len(records),evaluated=len(evaluated),
             pending=sum(row['state']=='pending' for row in records),
             excluded=sum(row['state']=='excluded' for row in records),
+            result_exclusions=dict(Counter(row.get('reason','unknown') for row in records
+                                           if row['state']=='excluded')),
             dates=len({saved._stamp(row['fixture']['timestamp']).date() for row in evaluated}),
             match_ids=sorted(row['match_id'] for row in records),scores=scores,calibration=calibration,
             uncertainty=_paired_uncertainty(records,challenger,protocol,current)))
     return dict(version=PAIRED_VERSION,protocol_version=protocol['version'],
         registered_at=protocol['registered_at'],as_of=current.isoformat(),
         entries_read=len(entries),cohorts=cohorts,duplicates_removed=len(candidates)-len(first),
+        coverage=_coverage(candidates,grouped,cohorts,protocol),
         snapshot_exclusions=dict(excluded),
         interpretation='Supplementary descriptive pairs; original Clubs/top3 protocol is unchanged.')

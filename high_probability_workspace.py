@@ -196,6 +196,7 @@ def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choic
                          probabilities=row['probabilities'], choice=row['choice'],
                          max_probability=row['max_probability'], search_outcome=row['search_outcome'],
                          search_probability=row['search_probability'], baseline=row.get('baseline'),
+                         training=row.get('training'), history_days=row.get('history_days'),
                          home_profile=row.get('home_profile'), away_profile=row.get('away_profile'),
                          delta_points=(100*(row['search_probability']-row['baseline'][row['search_outcome']])
                                        if row['search_outcome'] and row.get('baseline') else None)) for row in chosen],

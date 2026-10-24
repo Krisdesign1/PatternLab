@@ -74,6 +74,22 @@ class AutomationHealthPanelTests(unittest.TestCase):
         self.assertTrue(any('Journal invalide' in node.value for node in at.warning))
         self.assertFalse(at.dataframe)
 
+    def test_recent_signal_distinguishes_a_live_cycle_from_an_unknown_end(self):
+        row = dict(id='live', started_at=NOW.isoformat(), finished_at=None, duration_seconds=None,
+                   status='running', origin='service', interval_minutes=15, reasons=[], counters={'requests':12},
+                   last_seen_at=NOW.isoformat(), last_progress_at=NOW.isoformat(),
+                   phase='history', signal_state='recent', elapsed_seconds=120)
+        self.view = dict(rows=[row],total=1,first_started_at=NOW.isoformat(),truncated=False)
+        at = self.open()
+        self.assertFalse(at.exception)
+        self.assertTrue(any('en cours avec un signal récent' in node.value for node in at.info))
+        self.assertFalse(any('sans fin confirmée' in node.value for node in at.warning))
+        table = next(node.value for node in at.dataframe if 'Origine' in node.value.columns)
+        self.assertEqual(table.iloc[0]['État'], 'En cours · signal récent')
+        self.assertEqual(table.iloc[0]['Phase'], 'Historique')
+        self.assertEqual(table.iloc[0]['Durée (s)'], 120)
+        self.runner.assert_not_called(); self.network.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

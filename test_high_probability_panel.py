@@ -25,7 +25,7 @@ def row(number, probabilities, *, league='39', country='England', competition='P
                    status='TIMED', selectable=True, is_upcoming=True, is_historical=False)
     return dict(fixture=fixture, probabilities=probabilities, max_probability=max(probabilities.values()),
                 choice=max(panel.VALUES, key=probabilities.get), baseline={'1st': .3, 'Égal': .3, '2nd': .4},
-                training=100 + number, history_days=30, home_profile={'matches': 5}, away_profile={'matches': 6},
+                training=100 + number, history_days=30, home_profile={'matches': 10}, away_profile={'matches': 12},
                 before='2026-10-22', personalized=True)
 
 
@@ -146,6 +146,32 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.prepare.assert_not_called()
         self.record.assert_not_called()
         self.refresh.assert_not_called()
+        self.readonly()
+
+    def test_fragile_profiles_remain_consultable_without_changing_their_probabilities(self):
+        self.value['rows'][0]['home_profile']['matches'] = 3
+        original = deepcopy(self.value)
+        at = self.open()
+        self.assertEqual(len(self.table(at)),3)
+        at.selectbox(key='hp_support_preset').set_value('minimum').run()
+        self.assertFalse(at.exception)
+        table = self.table(at)
+        self.assertEqual(len(table),4)
+        fragile = table[table['Match']=='Home 1 — Away 1'].iloc[0]
+        self.assertEqual(fragile['Précédents domicile'],3)
+        self.assertEqual(fragile['Historique · filtre prudent'],'Sous les seuils')
+        self.assertEqual(fragile['2nd'],70)
+        self.assertEqual(self.value,original)
+        self.readonly()
+
+    def test_custom_history_filter_keeps_probability_ranking_and_resets_prepared_selection(self):
+        at = self.open()
+        at.selectbox(key='hp_support_preset').set_value('custom').run()
+        at.number_input(key='hp_support_team').set_value(11).run()
+        self.assertFalse(at.exception)
+        self.assertFalse(any('Probabilité recherchée (%)' in node.value.columns for node in at.dataframe))
+        self.assertTrue(any('Aucun match ne satisfait' in node.value for node in at.info))
+        self.assertTrue(at.button(key='hp_mix_prepare').disabled)
         self.readonly()
 
     def test_changing_page_size_from_last_page_keeps_valid_match_ranges(self):

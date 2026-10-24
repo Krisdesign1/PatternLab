@@ -10,6 +10,10 @@ import saved_model_comparison as comparison
 
 NAMES = {'frequency':'Répétitions seules', 'clubs':'Clubs', 'combined':'Clubs + répétitions',
          'catboost':'CatBoost', 'context_neighbors':'Contextes voisins'}
+RESULT_REASONS={'void':'Groupe annulé','unknown_result_status':'Statut du résultat inconnu',
+    'invalid_observed':'Observation invalide','missing_or_unresolved_result':'Résultat absent ou non résolu',
+    'invalid_or_conflicting_result':'Scores invalides ou contradictoires',
+    'observation_after_bilan':'Observation postérieure au bilan'}
 
 
 @st.cache_data(ttl=60, max_entries=4, show_spinner=False)
@@ -135,9 +139,29 @@ def _explanations(report,protocol,challenger=None,cohort=None):
                    'nombre de matchs évalués puis de dates, jamais par performance.')
         st.caption('Les scores utilisent les mêmes matchs au sein d’une paire. Les cohortes peuvent '
                    'partager des matchs entre elles : leurs effectifs et scores ne doivent pas être additionnés.')
+        coverage=report['coverage']
+        st.caption(f"Couverture globale : {coverage['unique_matches']} matchs uniques dans "
+                   f"{coverage['comparable_groups']} groupes admissibles; "
+                   f"{coverage['overlapping_matches']} matchs figurent dans plusieurs groupes. "
+                   f"Les {coverage['group_match_appearances']} apparitions match/groupe et "
+                   f"{coverage['cohort_match_observations']} observations par paire/cohorte "
+                   'ne constituent pas autant de matchs indépendants.')
+        st.caption(f"Pour ces matchs uniques, le premier enregistrement comparable donne "
+                   f"{coverage['evaluated_unique_matches']} évalués, "
+                   f"{coverage['pending_unique_matches']} en attente et "
+                   f"{coverage['excluded_unique_matches']} exclus. Ce sont des comptes de couverture, "
+                   'pas un taux global de réussite.')
+        st.caption('Sont exclus du calcul : source ou identifiants incompatibles, enregistrement '
+                   'antérieur au protocole ou postérieur au coup d’envoi, distribution ou classement '
+                   'invalide, référence absente, coupure historique non vérifiable. Les absences de '
+                   'méthodes sont comptées par paire et leurs compteurs peuvent se chevaucher.')
         if cohort is not None:
             estimate=cohort['uncertainty']
             st.caption(estimate['reason'])
+            if cohort['result_exclusions']:
+                st.caption('Résultats exclus dans cette cohorte : '+', '.join(
+                    f"{RESULT_REASONS.get(name,'Résultat inexploitable')} : {count}"
+                    for name,count in sorted(cohort['result_exclusions'].items())))
             st.caption(f"{estimate['matches']} match(s) dans les blocs clos complets · "
                        f"{estimate['excluded'].get('open_week',0)} dans une semaine encore ouverte · "
                        f"{estimate['excluded'].get('incomplete_block',0)} dans un bloc incomplet. "
@@ -163,6 +187,12 @@ def _render_pairs():
     except (ValueError,OSError,journal.JournalError):
         st.warning('Le bilan prospectif ne peut pas être lu. Aucune donnée n’a été modifiée.')
         return
+    coverage=report['coverage']
+    st.caption(f"Couverture : {coverage['unique_matches']} matchs uniques · "
+               f"{coverage['comparable_groups']} groupes admissibles · "
+               f"{coverage['overlapping_matches']} matchs communs à plusieurs groupes. "
+               f"{coverage['mature_cohorts']}/{coverage['cohorts']} cohortes atteignent le minimum "
+               'de recul; aucun gain prédictif confirmé.')
     if not report['cohorts']:
         st.info('Pas encore de paire exploitable enregistrée avant match depuis le protocole. '
                 'Une méthode absente ou un résultat en attente ne compte pas comme un échec.')

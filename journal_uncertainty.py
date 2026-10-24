@@ -45,6 +45,12 @@ def _metadata(entry, created):
             raise ValueError('Un match ne peut apparaître deux fois dans un groupe.')
         ids.add(identity)
         stamps.append(_stamp(fixture['timestamp'], naive_utc=True))
+        for observation in entry.get('observed') or []:
+            if (str(observation.get('match_id')) == identity and observation.get('schedule_resolution') is not None):
+                from fixture_schedule_resolution import observation_kickoff
+                # Keep original and effective weeks connected: a postponed
+                # fixture cannot mature an earlier dependency block early.
+                stamps.append(observation_kickoff(entry, fixture, observation))
     if created >= min(stamps):
         raise ValueError('Une prévision doit être enregistrée avant le premier coup d’envoi.')
     start, end = _week(min(stamps)), _week(max(stamps))

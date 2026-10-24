@@ -128,10 +128,11 @@ def _result(entry, fixture):
         return dict(state='excluded' if entry.get('status') in ('settled', 'unresolved') else 'pending',
                     reason='missing_or_unresolved_result' if entry.get('status') != 'pending' else None)
     try:
-        if _stamp(entry.get('checked_at')) < _stamp(fixture['timestamp']):
-            raise ValueError('Observation before kickoff')
         signatures = set()
         for row in matching:
+            from fixture_schedule_resolution import observation_kickoff
+            if _stamp(entry.get('checked_at')) < observation_kickoff(entry, fixture, row):
+                raise ValueError('Observation before kickoff')
             ht, ft = score(row.get('ht')), score(row.get('ft'))
             value = outcome(ht, ft)
             if row.get('value') != value:

@@ -287,9 +287,13 @@ def _settle(entry, raw, now):
             continue
         try:
             check = workspace.fixture_from_raw(item)
-            if any(str(check[k]) != str(fixture[k]) for k in ('league', 'home_id', 'away_id', 'timestamp')):
+            if any(str(check[k]) != str(fixture[k]) for k in ('match_id', 'league', 'home_id', 'away_id')):
                 raise ValueError('Les clubs, la compétition ou l’horaire ont changé.')
             short = api._status_short(item)
+            schedule = None
+            if check['timestamp'] != fixture['timestamp']:
+                from fixture_schedule_resolution import resolve
+                schedule = resolve(entry, fixture, check, status=short, checked_at=now.isoformat())
             if short in ('CANC', 'ABD', 'AWD', 'WO'):
                 statuses.append('void')
                 issues.append(f"Match {fixture['match_id']} annulé, abandonné ou attribué.")
@@ -299,11 +303,14 @@ def _settle(entry, raw, now):
             elif short not in api.FINISHED_STATUSES:
                 statuses.append('pending')
             else:
-                if _stamp(fixture['timestamp']) > now:
+                if _stamp(check['timestamp']) > now:
                     raise ValueError('Résultat annoncé avant le coup d’envoi enregistré.')
                 result = api.normalize_fixture(item)
                 actual.append(result['value'])
-                observed.append({k: result[k] for k in ('match_id', 'ht', 'ft', 'value')})
+                observation = {k: result[k] for k in ('match_id', 'ht', 'ft', 'value')}
+                if schedule is not None:
+                    observation['schedule_resolution'] = schedule
+                observed.append(observation)
                 statuses.append('settled')
         except (ValueError, TypeError, KeyError) as error:
             statuses.append('unresolved')

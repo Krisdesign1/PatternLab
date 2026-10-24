@@ -17,6 +17,7 @@ import api_football as api
 import high_probability_engine as engine
 import high_probability_workspace as workspace
 import scenario_tables
+import history_support as support
 from probability_reliability_panel import render_probability_reliability
 from ux_theme import render_page_header
 
@@ -126,6 +127,8 @@ def _table_rows(rows, *, offset=0, outcome=None):
         searched = outcome or row.get('search_outcome') or row['choice']
         probability = row['probabilities'][searched]
         baseline = (row.get('baseline') or {}).get(searched)
+        history = support.assess(row)
+        counts = history['counts']
         values.append({'Rang': rank,
                        'Heure (Kinshasa)': _stamp(fixture['timestamp']).astimezone(LOCAL_ZONE).strftime('%H:%M'),
                        'Match': f"{fixture['home']} — {fixture['away']}",
@@ -136,7 +139,13 @@ def _table_rows(rows, *, offset=0, outcome=None):
                        'Écart à la tendance (points)': 100 * (probability - baseline) if baseline is not None else None,
                        **{value: 100 * row['probabilities'][value] for value in VALUES},
                        'Résultat le plus probable': [row['choice']],
-                       'Maximum (%)': 100 * row['max_probability']})
+                       'Maximum (%)': 100 * row['max_probability'],
+                       'Résultats de compétition': counts['league_matches'],
+                       'Journées historiques': counts['history_days'],
+                       'Précédents domicile': counts['home_matches'],
+                       'Précédents extérieur': counts['away_matches'],
+                       'Historique · filtre prudent': 'Seuils atteints' if history['eligible'] else
+                           'Effectifs inconnus' if history['missing'] else 'Sous les seuils'})
     return values
 
 
@@ -160,6 +169,7 @@ def _prepare(report, chosen, outcome, minimum):
             prepared = workspace.prepare_group(report, chosen, outcome=outcome, minimum=minimum)
         prepared.setdefault('metadata', {}).setdefault('selection', {}).setdefault('search', {}).update(
             minimum=minimum, outcome=outcome, query=st.session_state.get('hp_search', '').strip())
+        prepared['metadata']['selection']['history_filter'] = st.session_state.get('hp_support_criteria', {})
         st.session_state['hp_prepared'] = prepared
         st.session_state['hp_prepared_kind'] = 'ranking'
         st.session_state.pop('hp_saved', None)
@@ -184,10 +194,11 @@ def _remember_mixed_choice(identity):
 
 
 def _mixed_builder(report, rows, now):
-    """A separate basket: ranking filters never narrow or reset its choices."""
+    """A separate basket within the selected history support population."""
     st.subheader('Composer mon scénario mixte', icon=':material/tune:')
     st.caption('Choisissez de 2 à 20 matchs parmi toutes les compétitions, puis un résultat pour chacun. '
-               'Ce panier est indépendant du classement et de ses filtres.')
+               'Le filtre d’historique s’applique aussi à ce panier ; le résultat recherché, '
+               'le seuil de probabilité et la recherche du classement ne le limitent pas.')
     ordered = sorted(rows, key=lambda row: (_stamp(row['fixture']['timestamp']), int(_id(row))))
     indexed = {_id(row): row for row in ordered}
     day = now.date().isoformat()
@@ -242,7 +253,8 @@ def _mixed_builder(report, rows, now):
                                f'Tendance du championnat : {100 * baseline:.2f} % · '
                                f'Écart : {100 * (probability - baseline):+.2f} points')
         st.session_state['hp_mix_choices'] = choices
-        context = (_fingerprint(report, rows, 0, None, ''), tuple((identity, choices[identity]) for identity in chosen))
+        context = (_fingerprint(report, rows, 0, None, ''), tuple((identity, choices[identity]) for identity in chosen),
+                   tuple(sorted(st.session_state.get('hp_support_criteria', {}).items())))
         if st.session_state.get('hp_mix_context') != context:
             st.session_state['hp_mix_context'] = context
             _clear_prepared(kind='mixed')
@@ -254,6 +266,8 @@ def _mixed_builder(report, rows, now):
                 with st.spinner('Calcul du scénario choisi et des trois premiers scénarios…'):
                     prepared = workspace.prepare_group(report, chosen,
                                                        choices={identity: choices[identity] for identity in chosen})
+                prepared.setdefault('metadata', {}).setdefault('selection', {})['history_filter'] = dict(
+                    st.session_state.get('hp_support_criteria', {}))
                 st.session_state['hp_prepared'] = prepared
                 st.session_state['hp_prepared_kind'] = 'mixed'
                 st.session_state.pop('hp_saved', None)
@@ -372,9 +386,36 @@ def render_high_probabilities():
         return
     if not rows:
         _show_unavailable(report)
+    all_rows = rows
+    with st.container(border=True):
+        preset = st.selectbox('Historique utilisé pour la sélection', ['prudent', 'minimum', 'custom'],
+            format_func={'prudent':'Filtre prudent · 100 résultats, 10 journées, 8 précédents par club',
+                         'minimum':'Tous les matchs calculables · minimum du modèle',
+                         'custom':'Seuils personnalisés'}.get, key='hp_support_preset')
+        criteria = dict(support.PRUDENT if preset == 'prudent' else support.MINIMUM)
+        if preset == 'custom':
+            with st.container(horizontal=True):
+                criteria['league_matches'] = st.number_input('Résultats de compétition minimum', min_value=30,
+                    value=100, step=10, key='hp_support_league')
+                criteria['history_days'] = st.number_input('Journées historiques minimum', min_value=3,
+                    value=10, step=1, key='hp_support_days')
+                criteria['team_matches'] = st.number_input('Précédents minimum par club dans son rôle', min_value=3,
+                    value=8, step=1, key='hp_support_team')
+        st.session_state['hp_support_criteria'] = dict(version=support.VERSION, **criteria)
+        rows = support.select(rows, criteria)
+        st.caption(f'{len(rows)} / {len(all_rows)} matchs calculables satisfont ces effectifs. '
+                   'Ces seuils filtrent la quantité d’historique ; ils ne certifient ni la précision ni la calibration. '
+                   'Le tri reste fondé sur la probabilité du résultat choisi.')
+        if len(rows) < len(all_rows):
+            st.caption('Choisissez « Tous les matchs calculables » pour consulter les profils sous le filtre prudent. '
+                       'Aucun pourcentage n’est modifié et les prévisions enregistrées restent inchangées.')
+        if all_rows and not rows:
+            st.info('Aucun match ne satisfait ces effectifs pour le moment. '
+                    'Les autres matchs restent consultables avec « Tous les matchs calculables ».')
     current_report = dict(report, rows=rows)
     st.subheader('Trois classements indépendants', icon=':material/leaderboard:')
-    st.caption('Chaque classement examine tous les matchs évaluables, même si le résultat recherché n’est pas leur résultat le plus probable.')
+    st.caption('Chaque classement examine les matchs retenus par le filtre d’historique, '
+               'même si le résultat recherché n’est pas leur résultat le plus probable.')
     with st.container(horizontal=True):
         for category in VALUES:
             ranked = engine.filter_rows(current_report, minimum=0, outcome=category)
@@ -404,7 +445,7 @@ def render_high_probabilities():
     if needle:
         visible = [row for row in visible if needle in (
             row['fixture']['home'] + ' ' + row['fixture']['away'] + ' ' + _competition(row['fixture'])).casefold()]
-    context = _fingerprint(report, rows, minimum, outcome, needle)
+    context = (_fingerprint(report, rows, minimum, outcome, needle), tuple(sorted(criteria.items())))
     if st.session_state.get('hp_context') != context:
         st.session_state['hp_context'] = context
         _clear_prepared(kind='ranking')
