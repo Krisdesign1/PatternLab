@@ -372,12 +372,18 @@ def _render_workspace(source, auto=False):
         st.page_link('ui_pages/settings.py', label='Configurer la connexion aux données', icon=':material/tune:')
         return
     try:
-        browser_rows=_readiness_history(_signature(),source)
+        requested = None
         if league == calendar.ALL:
+            browser_rows=_readiness_history(_signature(),source)
             requested=competition_browser.render(snapshot,browser_rows,day,selected_league=league)
         else:
-            with st.expander('Comparer les compétitions de cette journée',icon=':material/trophy:'):
-                requested=competition_browser.render(snapshot,browser_rows,day,selected_league=league)
+            comparison = st.expander('Comparer les compétitions de cette journée',
+                                     icon=':material/trophy:', key='workspace_comparison_open',
+                                     on_change='rerun')
+            if comparison.open:
+                with comparison:
+                    browser_rows=_readiness_history(_signature(),source)
+                    requested=competition_browser.render(snapshot,browser_rows,day,selected_league=league)
         if requested is not None and requested in competitions and requested != league:
             st.session_state['workspace_requested_league']={'context':(source,day.isoformat()),'league':requested}
             st.rerun()

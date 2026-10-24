@@ -1,5 +1,6 @@
 # Credentials and machine-specific settings
 .streamlit/secrets.toml
+.local_backups/
 .env
 .env.*
 !.env.example

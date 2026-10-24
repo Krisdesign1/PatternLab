@@ -17,17 +17,46 @@ la pause et à 90 minutes, en excluant les prolongations et les tirs au but.
 
 ## Lancement sur Mac
 
-Double-clique sur `Lancer_PatternLab.command`, ou utilise le Terminal :
+Double-clique sur `Lancer_PatternLab.command`. Le lanceur ouvre l’application sur
+ce Mac, avec une base locale et un serveur lié à `127.0.0.1`. Les dépendances
+ne sont réinstallées que si elles manquent ou si `requirements.txt` a changé.
+
+Pour une première installation depuis le Terminal :
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py
+python scripts/configure_local_storage.py --owner
+streamlit run app.py --server.address 127.0.0.1
+```
+
+Pour les lancements suivants, une seule commande suffit :
+
+```bash
+.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1
 ```
 
 Si macOS bloque le lanceur, fais un clic droit sur le fichier puis **Ouvrir**.
 Streamlit 1.64 ou une version 1.x plus récente est nécessaire.
+
+### Base locale autonome
+
+Le réglage privé `PATTERNLAB_STORAGE_MODE = "local"`, à la racine de
+`.streamlit/secrets.toml`, désactive les restaurations, les transferts et les
+verrous du stockage distant. Les anciens identifiants PostgreSQL peuvent rester
+dans ce fichier privé ; ils sont inactifs en mode local. L’historique, les
+prévisions et les modèles du dossier `data/` sont la référence de ce Mac.
+
+`--owner` autorise les commandes d’administration sur un serveur lié
+explicitement à la boucle locale. Ce réglage privé ne donne aucun droit au
+site hébergé. API-Football reste nécessaire pour collecter des données nouvelles ;
+la consultation des données présentes n’attend aucune base distante.
+
+La bascule ne télécharge, ne fusionne ni ne supprime de données. Elle n’envoie
+pas les nouvelles analyses locales au site. Sauvegarder régulièrement le
+dossier `data/` ; les copies privées placées dans `.local_backups/` restent
+exclues de Git. Voir aussi [ADMINISTRATION.md](ADMINISTRATION.md).
 
 ## Connexion API-Football
 
@@ -39,7 +68,7 @@ key = "VOTRE_CLE_API_FOOTBALL"
 ```
 
 La variable `API_FOOTBALL_KEY` prend la priorité. Le fichier de secrets est privé et
-exclu de Git. Il contient uniquement la configuration API-Football.
+exclu de Git. Il conserve aussi le mode de stockage et les droits locaux.
 Les compétitions, saisons et limites d’accès dépendent du compte du fournisseur.
 
 ## Les pages de l’application

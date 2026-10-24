@@ -32,6 +32,9 @@ def status_app():
 
 class CloudUiTests(unittest.TestCase):
     def setUp(self):
+        configured = patch.object(cloud_storage, 'configured', return_value=True)
+        configured.start()
+        self.addCleanup(configured.stop)
         # Busy behavior tests never contact the configured real storage.
         preview = patch.object(cloud_ui, '_render_snapshot_preview', return_value=None)
         preview.start()
@@ -212,7 +215,23 @@ class CloudUiTests(unittest.TestCase):
                 patch.object(cloud_storage, 'status', side_effect=AssertionError('No remote network')):
             app = AppTest.from_function(status_app).run()
         self.assertFalse(app.exception)
-        self.assertIn('local uniquement', app.warning[0].value)
+        self.assertIn('Base locale active', app.success[0].value)
+        self.assertFalse(app.warning)
+
+    def test_local_mode_does_not_install_cloud_polling(self):
+        def local_app():
+            import streamlit as st
+            import cloud_ui
+            st.session_state['_cloud_retry_due'] = 0
+            st.session_state['_cloud_retry_watchdog'] = True
+            cloud_ui.install_retry_watchdog()
+            st.success('Local ready')
+        with patch.object(cloud_storage, 'configured', return_value=False), \
+                patch.object(cloud_ui, '_retry_watchdog', side_effect=AssertionError('No cloud polling')):
+            app = AppTest.from_function(local_app).run()
+        self.assertFalse(app.exception)
+        self.assertNotIn('_cloud_retry_due', app.session_state)
+        self.assertNotIn('_cloud_retry_watchdog', app.session_state)
 
     def test_installed_watchdog_avoids_conditional_fragment_and_clears_on_success(self):
         with patch.object(cloud_ui, '_retry_timer') as conditional, \

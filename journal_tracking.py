@@ -1,12 +1,71 @@
 """Explicit network checks around immutable forecasts; local result updates."""
 
 import cloud_storage
+from collections import OrderedDict
 from datetime import datetime, timezone
+from pathlib import Path
+from threading import RLock
 
 import api_football as api
 import api_match_workspace as workspace
 import prediction_journal as journal
 import prospective_models as models
+
+
+_RECONCILIATIONS = OrderedDict()
+_RECONCILIATION_LOCK = RLock()
+
+
+def _file_revision(path):
+    path = Path(path)
+    try:
+        stat = path.stat()
+        return str(path.resolve()), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    except FileNotFoundError:
+        return str(path.resolve()), None
+
+
+def _reconciliation_signature():
+    return tuple(_file_revision(path) for path in
+                 (api.STORE_PATH, journal.DB_PATH, str(journal.DB_PATH) + '-wal'))
+
+
+def _cached_reconciliation():
+    """Reconcile once per committed local revision, shared by journal pages."""
+    key = str(Path(api.STORE_PATH).resolve()), str(Path(journal.DB_PATH).resolve())
+    with _RECONCILIATION_LOCK:
+        before = _reconciliation_signature()
+        current = datetime.now(timezone.utc)
+        previous = _RECONCILIATIONS.get(key)
+        if (previous and previous['signature'] == before
+                and previous['checked_at'] <= current
+                and (previous['deadline'] is None or current < previous['deadline'])):
+            _RECONCILIATIONS.move_to_end(key)
+            return dict(previous['result'], changed=0)
+        _RECONCILIATIONS.pop(key, None)
+        entries_before = journal.list_entries()
+        result = journal.reconcile()
+        after = _reconciliation_signature()
+        entries_after = journal.list_entries()
+        old = {entry['id']: entry for entry in entries_before}
+        new = {entry['id']: entry for entry in entries_after}
+        own_revisions_only = (old.keys() == new.keys()
+            and sum(len(entry['result_history']) for entry in entries_after)
+                - sum(len(entry['result_history']) for entry in entries_before) == result.get('changed', 0)
+            and all(new[key]['result_history'][:len(entry['result_history'])] == entry['result_history']
+                    for key, entry in old.items()))
+        # Do not cache a concurrent import or a prediction added during the
+        # reconciliation. Append-only result revisions must account for exactly
+        # our own writes, too: any other writer's result forces a new pass.
+        if (before[0][1] is not None and before[0] == after[0] and after == _reconciliation_signature()
+                and own_revisions_only):
+            future = [journal._stamp(fixture['timestamp']) for entry in entries_after
+                      for fixture in entry['fixtures'] if journal._stamp(fixture['timestamp']) > current]
+            _RECONCILIATIONS[key] = dict(signature=after, checked_at=current,
+                                        deadline=min(future, default=None), result=dict(result))
+            while len(_RECONCILIATIONS) > 8:
+                _RECONCILIATIONS.popitem(last=False)
+        return result
 
 
 @cloud_storage.persisted
@@ -43,8 +102,14 @@ def register(rows, fixtures, estimate, engine, *, competition=None):
 
 
 @cloud_storage.persisted
-def reconcile_local():
-    return journal.reconcile()
+def reconcile_local(*, if_changed=False):
+    if if_changed:
+        return _cached_reconciliation()
+    # Explicit refreshes and workers always perform their requested check.
+    key = str(Path(api.STORE_PATH).resolve()), str(Path(journal.DB_PATH).resolve())
+    with _RECONCILIATION_LOCK:
+        _RECONCILIATIONS.pop(key, None)
+        return journal.reconcile()
 
 
 @cloud_storage.persisted

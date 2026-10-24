@@ -77,6 +77,81 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(final['methods'],entry['methods'])
         self.assertEqual(self.build.call_count,1)
 
+    def test_page_reconciliation_reuses_local_revision_and_rechecks_new_api_scores(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        before=journal.list_entries()[0]
+        self.client.fixtures.reset_mock()
+        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile, \
+             patch.object(api,'load_fixtures',wraps=api.load_fixtures) as read:
+            tracking.reconcile_local(if_changed=True)
+            signature=tracking._reconciliation_signature()
+            again=tracking.reconcile_local(if_changed=True)
+            self.assertEqual(again['changed'],0)
+            self.assertEqual(reconcile.call_count,1)
+            self.assertEqual(read.call_count,1)
+            self.assertEqual(tracking._reconciliation_signature(),signature)
+            api.save_fixtures(raw_fixtures(status='FT'),api.STORE_PATH)
+            with patch.object(journal,'_now',return_value=AFTER):
+                settled=tracking.reconcile_local(if_changed=True)
+                tracking.reconcile_local(if_changed=True)
+            self.assertEqual(settled['changed'],1)
+            self.assertEqual(reconcile.call_count,2)
+        after=journal.list_entries()[0]
+        self.assertEqual(after['status'],'settled')
+        self.assertEqual(after['methods'],before['methods'])
+        self.client.fixtures.assert_not_called()
+
+    def test_page_reconciliation_detects_journal_wal_revision_without_minute_timer(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile:
+            tracking.reconcile_local(if_changed=True)
+            # A WAL revision is input even when the main SQLite file is unchanged.
+            wal=Path(str(journal.DB_PATH)+'-wal')
+            original=tracking._file_revision
+            with patch.object(tracking,'_file_revision',side_effect=lambda path:
+                ('wal-revision',2) if Path(path)==wal else original(path)):
+                tracking.reconcile_local(if_changed=True)
+                tracking.reconcile_local(if_changed=True)
+            self.assertEqual(reconcile.call_count,2)
+
+    def test_explicit_reconciliation_is_never_skipped_and_failure_is_retried(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile:
+            tracking.reconcile_local(if_changed=True)
+            tracking.reconcile_local()
+            self.assertEqual(reconcile.call_count,2)
+        with patch.object(journal,'reconcile',side_effect=[journal.JournalError('retry'),{'entries':1,'changed':0}]) as reconcile:
+            with self.assertRaises(journal.JournalError):tracking.reconcile_local(if_changed=True)
+            tracking.reconcile_local(if_changed=True)
+            self.assertEqual(reconcile.call_count,2)
+
+    def test_clock_crossing_a_kickoff_rechecks_unchanged_saved_results(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile:
+            tracking.reconcile_local(if_changed=True)
+            with patch.object(tracking,'datetime',wraps=datetime) as clock, \
+                 patch.object(journal,'_now',return_value=AFTER):
+                clock.now.return_value=AFTER
+                tracking.reconcile_local(if_changed=True)
+                tracking.reconcile_local(if_changed=True)
+            self.assertEqual(reconcile.call_count,2)
+        self.assertEqual(journal.list_entries()[0]['status'],'pending')
+
+    def test_concurrent_result_revision_is_not_marked_as_our_reconciled_input(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        original=journal.reconcile
+        def another_writer():
+            result=original()
+            # Another writer appends scores after our transaction commits,
+            # before the page samples the resulting file signature.
+            with patch.object(journal,'_now',return_value=AFTER):
+                original(raw_fixtures(status='FT'),now=AFTER)
+            return result
+        with patch.object(journal,'reconcile',side_effect=another_writer) as reconcile:
+            tracking.reconcile_local(if_changed=True)
+            tracking.reconcile_local(if_changed=True)
+            self.assertEqual(reconcile.call_count,2)
+
     def test_selected_context_is_required_before_any_provider_request(self):
         with self.assertRaises(journal.JournalError):
             tracking.register(sample(),fixtures(),{},'context_neighbors')

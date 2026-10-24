@@ -25,6 +25,10 @@ def _retry_watchdog():
 
 def install_retry_watchdog():
     """Call once, at a stable entrypoint position before guarded(page.run)."""
+    if not cloud_storage.configured():
+        st.session_state.pop(_RETRY_DUE, None)
+        st.session_state.pop(_WATCHDOG, None)
+        return
     st.session_state[_WATCHDOG] = True
     _retry_watchdog()
 
@@ -196,11 +200,10 @@ def render_storage_status():
     with st.container(border=True):
         st.markdown('#### Conservation des données')
         if not cloud_storage.configured():
-            st.warning('Stockage local uniquement. L’historique et les prévisions ne sont '
-                       'pas encore conservés dans une base distante.')
-            st.caption('Le déploiement gratuit peut perdre ses fichiers locaux. '
-                       'Le guide docs/CLOUD_GRATUIT.md décrit la connexion au stockage partagé '
-                       'et l’import initial de l’historique existant.')
+            st.success('Base locale active. L’historique, les prévisions et les modèles restent sur cet ordinateur.')
+            st.caption('La consultation utilise le dossier data du projet, sans synchronisation distante. '
+                       'Conservez une sauvegarde de ce dossier. API-Football reste utilisé pour '
+                       'les collectes et les actualisations demandées.')
             return
         try:
             state = cloud_storage.status()

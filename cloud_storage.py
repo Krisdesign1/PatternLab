@@ -1,6 +1,7 @@
 """Optional durable workspace with fenced PostgreSQL checkpoints.
 
-Local use is unchanged when no database URL is configured. Cloud mode fails
+Explicit local mode never opens a remote connection, even if old credentials
+remain configured. Cloud mode fails
 closed: a local success is returned only after the corresponding remote commit.
 """
 from contextlib import contextmanager, closing
@@ -165,17 +166,32 @@ def _options():
         except (OSError, ValueError):
             raise CloudStorageError('Les secrets du stockage distant sont illisibles.') from None
     return {key: os.environ.get(key, values.get(key)) for key in (
-        'PATTERNLAB_DATABASE_URL', 'PATTERNLAB_WORKSPACE', 'PATTERNLAB_CLOUD_ADOPT_LOCAL',
+        'PATTERNLAB_STORAGE_MODE', 'PATTERNLAB_DATABASE_URL', 'PATTERNLAB_WORKSPACE', 'PATTERNLAB_CLOUD_ADOPT_LOCAL',
         'PATTERNLAB_CLOUD_ALLOW_INSECURE_LOCALHOST_TEST', 'PATTERNLAB_CLOUD_REQUIRED')}
+
+
+def _mode(options):
+    value = options.get('PATTERNLAB_STORAGE_MODE')
+    if value is None:
+        return 'auto'
+    if not isinstance(value, str) or value not in ('local', 'shared', 'auto'):
+        raise CloudStorageError('Le mode de stockage doit être local, shared ou auto.')
+    return value
 
 
 def configured():
     options = _options()
-    return bool(options.get('PATTERNLAB_DATABASE_URL')) or str(options.get('PATTERNLAB_CLOUD_REQUIRED')).lower() == 'true'
+    mode = _mode(options)
+    if mode == 'local':
+        return False
+    return (mode == 'shared' or bool(options.get('PATTERNLAB_DATABASE_URL'))
+            or str(options.get('PATTERNLAB_CLOUD_REQUIRED')).lower() == 'true')
 
 
 def _backend():
     options = _options()
+    if _mode(options) == 'local':
+        raise CloudStorageError('Le stockage distant est désactivé en mode local.')
     try:
         return _backend_factory(options['PATTERNLAB_DATABASE_URL'], options['PATTERNLAB_WORKSPACE'] or 'patternlab-main',
                                 allow_localhost=str(options['PATTERNLAB_CLOUD_ALLOW_INSECURE_LOCALHOST_TEST']).lower() == 'true')

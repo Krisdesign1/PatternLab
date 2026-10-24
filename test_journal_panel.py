@@ -25,6 +25,7 @@ class JournalPanelTests(unittest.TestCase):
         folder=tempfile.TemporaryDirectory();self.addCleanup(folder.cleanup)
         self.root=Path(folder.name)
         self.patch(journal,'DB_PATH',self.root/'journal.sqlite3')
+        self.patch(api,'STORE_PATH',self.root/'fixtures.json')
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.network=self.patch(api.ApiFootballClient,'get',side_effect=AssertionError('No automatic API calls'))
         self.raw=[]
@@ -258,8 +259,8 @@ class JournalPanelTests(unittest.TestCase):
         self.seed()
         new=self.seed(offset=100,day=date(2025,3,21),finished=False)
         original=panel.tracking.reconcile_local
-        def cross_midnight():
-            result=original()
+        def cross_midnight(**kwargs):
+            result=original(**kwargs)
             self.day.return_value=date(2025,3,21)
             return result
         self.patch(panel.tracking,'reconcile_local',side_effect=cross_midnight)

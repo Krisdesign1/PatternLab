@@ -5,8 +5,9 @@ displayed probabilities; no model selection, training or history import occurs.
 """
 
 import cloud_storage
+from collections import Counter
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from functools import lru_cache
 from hashlib import sha256
 import json
@@ -37,26 +38,42 @@ def _root(root):
 
 
 @lru_cache(maxsize=4)
-def _cached_scan(path, modified, size, minute):
-    return engine.scan(api.load_fixtures(Path(path)), now=datetime.fromisoformat(minute))
+def _cached_scan(path, modified, size, period_start):
+    # History has an exclusive UTC-day cutoff. Within that UTC/Kinshasa
+    # calendar period, unchanged data yield exactly the same probabilities.
+    # Include all NS targets from the period's start, then expire their
+    # kickoffs on every read instead of rescanning the history every minute.
+    report = engine.scan(api.load_fixtures(Path(path)), now=datetime.fromisoformat(period_start))
+    report['generated_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    return report
 
 
 def load_scan(root=None, now=None):
-    """Read local data only, caching by file revision and UTC minute."""
+    """Read locally; reuse probabilities until the file or either day changes."""
     current = _now(now)
     path = _root(root) / 'fixtures.json'
     stat = path.stat() if path.exists() else None
-    minute = current.replace(second=0, microsecond=0).isoformat()
+    local_day = current.astimezone(ZONE).date()
+    period_start = max(datetime.combine(local_day, time.min, ZONE).astimezone(timezone.utc),
+                       datetime.combine(current.date(), time.min, timezone.utc)).isoformat()
     report = deepcopy(_cached_scan(str(path), stat.st_mtime_ns if stat else 0,
-                                  stat.st_size if stat else 0, minute))
-    # A cached minute must never keep a match whose kickoff has just passed.
+                                  stat.st_size if stat else 0, period_start))
+    # A cached period must never keep a match whose kickoff has just passed.
     kept, expired = [], []
     for row in report['rows']:
         (kept if journal._stamp(row['fixture']['timestamp']) > current else expired).append(row)
     report['rows'] = kept
+    expired_count = len(expired)
+    for item in report['excluded']:
+        fixture = item.get('fixture')
+        if fixture and journal._stamp(fixture['timestamp']) <= current:
+            expired_count += 1
+            item.update(reason='kickoff_elapsed', detail='Horaire dépassé sans confirmation d’un match à venir.')
     report['excluded'].extend(dict(match_id=row['fixture']['match_id'], reason='kickoff_passed',
                                   detail='Le coup d’envoi est passé.', fixture=row['fixture']) for row in expired)
     report['diagnostics']['eligible_count'] = len(kept)
+    report['diagnostics']['upcoming_count'] -= expired_count
+    report['diagnostics']['excluded_counts'] = dict(Counter(item['reason'] for item in report['excluded']))
     report['checked_at'] = current.isoformat()
     report['calendar_updated_at'] = calendar._calendar_updates(path).get((report['day'], ZONE.key))
     return report

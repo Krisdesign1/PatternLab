@@ -213,7 +213,7 @@ def render_journal():
     try:
         if admin_access.can_admin():
             admin_access.require_admin()
-            tracking.reconcile_local()
+            tracking.reconcile_local(if_changed=True)
         all_entries = journal.list_entries()
         entries = [entry for entry in all_entries if entry.get('group_kind') != 'mixed']
     except (journal.JournalError, api_football.ApiFootballError, ValueError) as error:

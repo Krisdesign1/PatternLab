@@ -248,6 +248,24 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.journal_register.assert_not_called()
         self._assert_idle_network()
 
+    def test_closed_competition_comparison_does_not_load_or_calculate_history(self):
+        with patch.object(panel, '_readiness_history', side_effect=AssertionError('Hidden history read')), \
+             patch.object(panel.competition_browser, 'render', side_effect=AssertionError('Hidden comparison')):
+            self.at.run()
+        self.assertFalse(self.at.exception)
+        self.assertFalse(any(item.key == 'competition_browser_size' for item in self.at.selectbox))
+        self._assert_idle_network()
+
+    def test_open_competition_comparison_loads_history_without_analyzing(self):
+        with patch.object(panel, '_readiness_history', return_value=self.rows) as read:
+            self.at.session_state['workspace_comparison_open'] = True
+            self.at.run()
+        self.assertFalse(self.at.exception)
+        read.assert_called_once()
+        self.assertTrue(any(item.key == 'competition_browser_size' for item in self.at.selectbox))
+        self.estimate.assert_not_called()
+        self._assert_idle_network()
+
     def test_real_forecast_uses_ordered_score_free_fixtures_and_persists_on_rerun(self):
         self._select(102, 101)
         self._predict()
@@ -544,7 +562,7 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.ensure.assert_not_called()
         self.missing.assert_not_called()
         self.api_network.assert_not_called()
-        self.assertEqual(read.call_count,2)  # Competition browser and selected group's readiness.
+        self.assertEqual(read.call_count,1)  # Only the selected group's readiness; comparison stays closed.
 
     def test_selected_group_ready_state_does_not_claim_measured_accuracy(self):
         self._select(101,102)

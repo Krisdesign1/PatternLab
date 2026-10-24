@@ -181,7 +181,7 @@ def render_daily():
     try:
         if admin_access.can_admin():
             admin_access.require_admin()
-            tracking.reconcile_local()
+            tracking.reconcile_local(if_changed=True)
         entries = journal.list_entries()
         selections = worker.load_selections(api.DATA_DIR)
         status = worker.load_status(api.DATA_DIR)

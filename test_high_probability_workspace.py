@@ -1,6 +1,6 @@
 """Probability search preserves displayed values and pre-match journal guards."""
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta
 import math
 from pathlib import Path
 import tempfile
@@ -59,6 +59,41 @@ class HighProbabilityWorkspaceTests(unittest.TestCase):
             self.assertEqual(calculate.call_count, 1)
         self.assertEqual((self.root/'fixtures.json').read_bytes(), original)
         self.assertFalse(self.path.exists())
+
+    def test_cache_survives_minute_changes_with_identical_active_probabilities(self):
+        raw = history()+[fixture(100001, stamp='2026-10-22T09:00:30+00:00'),
+                         fixture(100002, stamp='2026-10-22T12:00:00+00:00')]
+        api.save_fixtures(raw, self.root/'fixtures.json')
+        with patch.object(engine, 'scan', wraps=engine.scan) as calculate:
+            workspace.load_scan(self.root, NOW)
+            later = workspace.load_scan(self.root, NOW+timedelta(minutes=2))
+            self.assertEqual(calculate.call_count, 1)
+        direct = engine.scan(raw, NOW+timedelta(minutes=2))
+        self.assertEqual([row['fixture']['match_id'] for row in later['rows']], ['100002'])
+        self.assertEqual(later['rows'][0]['probabilities'], direct['rows'][0]['probabilities'])
+        self.assertEqual(later['before'], direct['before'])
+        self.assertEqual(later['diagnostics']['upcoming_count'], direct['diagnostics']['upcoming_count'])
+
+    def test_cache_recalculates_at_both_local_and_utc_midnight_and_file_revision(self):
+        raw = history()+[fixture(100001, stamp='2026-10-22T23:30:00+00:00'),
+                         fixture(100002, stamp='2026-10-23T12:00:00+00:00')]
+        api.save_fixtures(raw, self.root/'fixtures.json')
+        instants = [datetime.fromisoformat(value) for value in
+                    ('2026-10-22T22:59:00+00:00', '2026-10-22T23:01:00+00:00',
+                     '2026-10-23T00:01:00+00:00')]
+        with patch.object(engine, 'scan', wraps=engine.scan) as calculate:
+            for current in instants:
+                cached = workspace.load_scan(self.root, current)
+                direct = engine.scan(raw, current)
+                self.assertEqual(cached['day'], direct['day'])
+                self.assertEqual(cached['before'], direct['before'])
+                self.assertEqual([(row['fixture']['match_id'],row['probabilities']) for row in cached['rows']],
+                                 [(row['fixture']['match_id'],row['probabilities']) for row in direct['rows']])
+            # Three cache computations plus the three direct reference scans.
+            self.assertEqual(calculate.call_count, 6)
+            api.save_fixtures([fixture(100003)], self.root/'fixtures.json')
+            workspace.load_scan(self.root, instants[-1])
+            self.assertEqual(calculate.call_count, 7)
 
     def test_group_reuses_exact_probabilities_and_common_cutoff_with_no_reestimation(self):
         report = scan()
