@@ -43,10 +43,18 @@ def _cached_reconciliation():
             _RECONCILIATIONS.move_to_end(key)
             return dict(previous['result'], changed=0)
         _RECONCILIATIONS.pop(key, None)
-        entries_before = journal.list_entries()
-        result = journal.reconcile()
+        final_read_signature = None
+
+        def before_final_read():
+            # Bind the proof below to the exact revision that was read. A
+            # writer arriving after this sample must force another pass, even
+            # when it commits before our final signature sample.
+            nonlocal final_read_signature
+            final_read_signature = _reconciliation_signature()
+
+        result, entries_before, entries_after = journal._reconcile_snapshot(
+            _before_final_read=before_final_read)
         after = _reconciliation_signature()
-        entries_after = journal.list_entries()
         old = {entry['id']: entry for entry in entries_before}
         new = {entry['id']: entry for entry in entries_after}
         own_revisions_only = (old.keys() == new.keys()
@@ -57,7 +65,8 @@ def _cached_reconciliation():
         # Do not cache a concurrent import or a prediction added during the
         # reconciliation. Append-only result revisions must account for exactly
         # our own writes, too: any other writer's result forces a new pass.
-        if (before[0][1] is not None and before[0] == after[0] and after == _reconciliation_signature()
+        if (before[0][1] is not None and before[0] == after[0]
+                and final_read_signature == after and after == _reconciliation_signature()
                 and own_revisions_only):
             future = [journal._stamp(fixture['timestamp']) for entry in entries_after
                       for fixture in entry['fixtures'] if journal._stamp(fixture['timestamp']) > current]

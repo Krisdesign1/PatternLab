@@ -1,7 +1,8 @@
 """Immutable API-Football forecasts and append-only result reconciliation."""
 
 import cloud_storage
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from functools import lru_cache
 from hashlib import sha256
 from itertools import groupby
 import json
@@ -126,7 +127,7 @@ def _has_predictions(con):
     return 'predictions' in tables
 
 
-def _entry_from_row(con, row):
+def _entry_from_row(con, row, *, events=None):
     if sha256(row['payload'].encode()).hexdigest() != row['digest']:
         raise JournalError('Une prévision enregistrée a été modifiée : journal invalide.')
     item = json.loads(row['payload'])
@@ -141,34 +142,142 @@ def _entry_from_row(con, row):
             validate(item['proposal_selection'], item['methods'], item['fixtures'], row['created_at'])
         except (ValueError, TypeError, KeyError) as error:
             raise JournalError('La sélection de scénarios enregistrée est incohérente : '+str(error)) from None
-    events = [dict(revision=r['revision'], checked_at=r['checked_at'], **json.loads(r['payload']))
-              for r in con.execute('SELECT * FROM results WHERE prediction_id=? ORDER BY revision', (row['id'],))]
+    if events is None:
+        events = [dict(revision=r['revision'], checked_at=r['checked_at'], **json.loads(r['payload']))
+                  for r in con.execute('SELECT * FROM results WHERE prediction_id=? ORDER BY revision', (row['id'],))]
     latest = events[-1] if events else dict(status='pending', evaluations={}, actual=None, issues=[])
     return dict(item, id=row['id'], created_at=row['created_at'], **latest, result_history=events)
 
 
-def list_entries(path=None):
+@lru_cache(maxsize=4096)
+def _local_kickoff_day(value):
+    """Small timestamp conversion cache, never a cache of forecast validity."""
     try:
+        return _stamp(value).astimezone(ZoneInfo('Africa/Kinshasa')).date().isoformat()
+    except (JournalError, TypeError, OverflowError):
+        return ''
+
+
+def _scope(con, day, include_mixed):
+    if day is not None and (not isinstance(day, date) or isinstance(day, datetime)):
+        raise JournalError('La journée doit être une date locale à Kinshasa.')
+    if not isinstance(include_mixed, bool):
+        raise JournalError('Le filtre des compétitions doit être booléen.')
+    mixed = '' if include_mixed else "WHERE COALESCE(json_extract(payload, '$.group_kind'), '') != 'mixed'"
+    if day is None:
+        return f'SELECT * FROM predictions {mixed}', ()
+    con.create_function('journal_local_day', 1, _local_kickoff_day, deterministic=True)
+    return (f'''WITH scoped AS (
+        SELECT id, json_extract(payload, '$.size') AS size,
+               json_extract(payload, '$.fixtures') AS fixtures
+        FROM predictions {mixed}
+    ), days AS (
+        SELECT s.id, s.size, COUNT(*) AS fixture_count,
+               MIN(journal_local_day(json_extract(f.value, '$.timestamp'))) AS first_day,
+               MAX(journal_local_day(json_extract(f.value, '$.timestamp'))) AS last_day
+        FROM scoped s JOIN json_each(s.fixtures) f
+        GROUP BY s.id
+    ) SELECT p.* FROM predictions p JOIN days d ON d.id=p.id
+      WHERE d.fixture_count=d.size AND d.first_day=? AND d.last_day=?''',
+        (day.isoformat(), day.isoformat()))
+
+
+def _entries_from_rows(con, rows):
+    """Read all revisions in bounded SQL batches, not one query per forecast."""
+    rows = list(rows)
+    events = {row['id']: [] for row in rows}
+    for offset in range(0, len(rows), 400):
+        identities = [row['id'] for row in rows[offset:offset + 400]]
+        placeholders = ','.join('?' for _ in identities)
+        for result in con.execute(
+                f'SELECT * FROM results WHERE prediction_id IN ({placeholders}) '
+                'ORDER BY prediction_id, revision', identities):
+            events[result['prediction_id']].append(dict(revision=result['revision'],
+                checked_at=result['checked_at'], **json.loads(result['payload'])))
+    return [_entry_from_row(con, row, events=events[row['id']]) for row in rows]
+
+
+def list_entries(path=None, *, day=None, include_mixed=True):
+    """Read verified forecasts, optionally restricted to one whole local day.
+
+    Filtering happens in SQLite before payloads and methods are decoded. Every
+    retained forecast still passes the same digest and proposal checks. No
+    persistent index, mutation or cache can hide a later result revision.
+    """
+    try:
+        # Validate caller input even when no database exists.
+        if day is not None and (not isinstance(day, date) or isinstance(day, datetime)):
+            raise JournalError('La journée doit être une date locale à Kinshasa.')
+        if not isinstance(include_mixed, bool):
+            raise JournalError('Le filtre des compétitions doit être booléen.')
         con = _connect(path)
         if con is None:
             return []
         try:
-            output = []
             # A concurrent first writer may have created the SQLite file but
             # not committed its first schema statement yet. No forecast can
             # exist at that point; do not turn this brief empty state into a
             # spurious error or create storage from a read path.
             if not _has_predictions(con):
                 return []
-            for row in con.execute('SELECT * FROM predictions ORDER BY created_at, id'):
-                output.append(_entry_from_row(con, row))
-            return output
+            con.execute('BEGIN')
+            query, parameters = _scope(con, day, include_mixed)
+            return _entries_from_rows(con, con.execute(query + ' ORDER BY created_at, id', parameters))
         finally:
             con.close()
     except (sqlite3.Error, OSError, ValueError, TypeError) as error:
         if isinstance(error, JournalError):
             raise
         raise JournalError('Impossible de lire le journal local des prévisions.') from None
+
+
+def overview(path=None, *, include_mixed=True):
+    """Read display counts and complete kickoff days without loading methods.
+
+    This lightweight projection is not a validated forecast or an evaluation.
+    Opening any projected day or forecast uses the verified readers below.
+    Counts include all retained groups; only complete single-day groups have a
+    day key. Reading missing storage does not create it.
+    """
+    try:
+        if not isinstance(include_mixed, bool):
+            raise JournalError('Le filtre des compétitions doit être booléen.')
+        con = _connect(path)
+        if con is None:
+            return dict(total=0, days={})
+        try:
+            if not _has_predictions(con):
+                return dict(total=0, days={})
+            con.execute('BEGIN')
+            con.create_function('journal_local_day', 1, _local_kickoff_day, deterministic=True)
+            mixed = '' if include_mixed else "WHERE COALESCE(json_extract(payload, '$.group_kind'), '') != 'mixed'"
+            total = con.execute(f'SELECT COUNT(*) FROM predictions {mixed}').fetchone()[0]
+            days = con.execute(f'''WITH scoped AS (
+                SELECT id, json_extract(payload, '$.size') AS size,
+                       json_extract(payload, '$.fixtures') AS fixtures
+                FROM predictions {mixed}
+            ), days AS (
+                SELECT s.id, s.size, COUNT(*) AS fixture_count,
+                       MIN(journal_local_day(json_extract(f.value, '$.timestamp'))) AS first_day,
+                       MAX(journal_local_day(json_extract(f.value, '$.timestamp'))) AS last_day
+                FROM scoped s JOIN json_each(s.fixtures) f GROUP BY s.id
+            ) SELECT first_day, COUNT(*) FROM days
+              WHERE fixture_count=size AND first_day!='' AND first_day=last_day
+              GROUP BY first_day ORDER BY first_day''')
+            return dict(total=total, days={row[0]: row[1] for row in days})
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError) as error:
+        if isinstance(error, JournalError):
+            raise
+        raise JournalError('Impossible de lire le résumé local des prévisions.') from None
+
+
+def get_entry(identifier, path=None):
+    """Read one immutable forecast and its current revisions by saved ID."""
+    if not isinstance(identifier, str) or not identifier:
+        raise JournalError('Un identifiant de prévision enregistré est nécessaire.')
+    return _find_key(identifier, path)
 
 
 def _find_key(key, path=None):
@@ -419,9 +528,24 @@ def _settle(entry, raw, now):
 
 @cloud_storage.persisted
 def reconcile(raw_fixtures=None, *, now=None, path=None, fixtures_path=None):
+    return _reconcile_snapshot(raw_fixtures, now=now, path=path,
+                               fixtures_path=fixtures_path)[0]
+
+
+def _reconcile_snapshot(raw_fixtures=None, *, now=None, path=None, fixtures_path=None,
+                        _before_final_read=None):
+    """Internal reconciliation report and its already-required read snapshots.
+
+    The optional callback lets the local revision guard observe the storage
+    signature immediately before the final read. It never changes settlement.
+    The caller owns the normal persisted operation guard.
+    """
     entries = list_entries(path)
     if not entries:
-        return dict(entries=0, changed=0, pending=0, settled=0, void=0, unresolved=0)
+        if _before_final_read is not None:
+            _before_final_read()
+        return dict(entries=0, changed=0, pending=0, settled=0, void=0, unresolved=0), [], []
+    before_entries = entries
     now_value = _now(now)
     raw_fixtures = (api.load_fixtures(api.STORE_PATH if fixtures_path is None else fixtures_path,
                     ids=sorted({row['match_id'] for entry in entries for row in entry['fixtures']}, key=int))
@@ -451,9 +575,12 @@ def reconcile(raw_fixtures=None, *, now=None, path=None, fixtures_path=None):
     finally:
         if con:
             con.close()
+    if _before_final_read is not None:
+        _before_final_read()
     entries = list_entries(path)
-    return dict(entries=len(entries), changed=changed,
-                **{s: sum(e['status'] == s for e in entries) for s in ('pending', 'settled', 'void', 'unresolved')})
+    report = dict(entries=len(entries), changed=changed,
+                  **{s: sum(e['status'] == s for e in entries) for s in ('pending', 'settled', 'void', 'unresolved')})
+    return report, before_entries, entries
 
 
 def summarize(entries=None, *, path=None, required_methods=None):

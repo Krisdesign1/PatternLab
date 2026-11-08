@@ -48,6 +48,9 @@ class JournalPanelTests(unittest.TestCase):
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.network=self.patch(api.ApiFootballClient,'get',side_effect=AssertionError('No automatic API calls'))
         self.raw=[]
+        # Simulated provider rows are not written by the harness. Model their
+        # revision so display caches see the same commits as real SQLite data.
+        self.patch(api,'data_signature',side_effect=lambda path=None: (str(api.STORE_PATH),json.dumps(self.raw,sort_keys=True)))
         self.patch(api,'load_fixtures',side_effect=lambda *args, **kwargs:self.raw)
         self.day=self.patch(panel,'_today',return_value=date(2025,3,20))
         self.patch(analysis_date,'local_today',side_effect=lambda now=None:self.day.return_value)
@@ -110,7 +113,7 @@ class JournalPanelTests(unittest.TestCase):
 
     def test_unknown_manual_link_does_not_hide_the_shared_journal(self):
         with patch.object(panel.manual_archive,'get',return_value=None) as manual, \
-             patch.object(panel.journal, 'list_entries', return_value=[]) as tracked_read, \
+             patch.object(panel.journal, 'overview', return_value={'total':0,'days':{}}) as tracked_read, \
              patch.object(panel.tracking, 'reconcile_local', return_value={'entries': 0, 'changed': 0}) as reconcile:
             at = AppTest.from_file('app.py', default_timeout=20).run()
             at.switch_page('ui_pages/journal.py')
@@ -119,7 +122,7 @@ class JournalPanelTests(unittest.TestCase):
             self.assertFalse(at.exception)
             self.assertFalse(any(item.key=='journal_type' for item in at.segmented_control))
             manual.assert_called_once_with('a'*64)
-            tracked_read.assert_called_once()
+            tracked_read.assert_called_once_with(include_mixed=False)
             reconcile.assert_called_once_with(if_changed=True)
             self.assertTrue(any('Aucune prévision avant match' in item.value for item in at.info))
             self.assertTrue(any('analyse manuelle n’est pas disponible' in item.value for item in at.info))
@@ -286,7 +289,11 @@ class JournalPanelTests(unittest.TestCase):
         self.assertEqual([button.key for button in self.buttons(at)],[f'journal_browser_open_{today["id"]}'])
         self.assertTrue(any('1 prévision(s) pour les matchs d’aujourd’hui' in row.value for row in at.caption))
         self.assertEqual({entry['id']:entry['methods'] for entry in journal.list_entries()},before)
-        self.assertEqual({entry['id'] for entry in exported.call_args.args[0]},set(before))
+        exported.assert_called_once_with()
+        # The full export is loaded on download, not on a filter rerun.
+        with patch.object(panel.st, 'download_button') as download:
+            panel._export()
+            self.assertEqual({entry['id'] for entry in json.loads(download.call_args.args[1]())}, set(before))
         self.assertTrue(at.get('download_button'))
         self.network.assert_not_called()
 

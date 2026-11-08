@@ -81,7 +81,7 @@ class TrackingTests(unittest.TestCase):
         tracking.register(sample(),fixtures(),{},'statistical')
         before=journal.list_entries()[0]
         self.client.fixtures.reset_mock()
-        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile, \
+        with patch.object(journal,'_reconcile_snapshot',wraps=journal._reconcile_snapshot) as reconcile, \
              patch.object(api,'load_fixtures',wraps=api.load_fixtures) as read:
             tracking.reconcile_local(if_changed=True)
             signature=tracking._reconciliation_signature()
@@ -103,7 +103,7 @@ class TrackingTests(unittest.TestCase):
 
     def test_page_reconciliation_detects_journal_wal_revision_without_minute_timer(self):
         tracking.register(sample(),fixtures(),{},'statistical')
-        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile:
+        with patch.object(journal,'_reconcile_snapshot',wraps=journal._reconcile_snapshot) as reconcile:
             tracking.reconcile_local(if_changed=True)
             # A WAL revision is input even when the main SQLite file is unchanged.
             wal=Path(str(journal.DB_PATH)+'-wal')
@@ -116,18 +116,27 @@ class TrackingTests(unittest.TestCase):
 
     def test_explicit_reconciliation_is_never_skipped_and_failure_is_retried(self):
         tracking.register(sample(),fixtures(),{},'statistical')
-        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile:
+        with patch.object(journal,'_reconcile_snapshot',wraps=journal._reconcile_snapshot) as reconcile, \
+             patch.object(journal,'reconcile',wraps=journal.reconcile) as explicit:
             tracking.reconcile_local(if_changed=True)
             tracking.reconcile_local()
             self.assertEqual(reconcile.call_count,2)
-        with patch.object(journal,'reconcile',side_effect=[journal.JournalError('retry'),{'entries':1,'changed':0}]) as reconcile:
+            explicit.assert_called_once_with()
+        original=journal._reconcile_snapshot
+        failed=[False]
+        def fail_once(**kwargs):
+            if not failed[0]:
+                failed[0]=True
+                raise journal.JournalError('retry')
+            return original(**kwargs)
+        with patch.object(journal,'_reconcile_snapshot',side_effect=fail_once) as reconcile:
             with self.assertRaises(journal.JournalError):tracking.reconcile_local(if_changed=True)
             tracking.reconcile_local(if_changed=True)
             self.assertEqual(reconcile.call_count,2)
 
     def test_clock_crossing_a_kickoff_rechecks_unchanged_saved_results(self):
         tracking.register(sample(),fixtures(),{},'statistical')
-        with patch.object(journal,'reconcile',wraps=journal.reconcile) as reconcile:
+        with patch.object(journal,'_reconcile_snapshot',wraps=journal._reconcile_snapshot) as reconcile:
             tracking.reconcile_local(if_changed=True)
             with patch.object(tracking,'datetime',wraps=datetime) as clock, \
                  patch.object(journal,'_now',return_value=AFTER):
@@ -139,18 +148,81 @@ class TrackingTests(unittest.TestCase):
 
     def test_concurrent_result_revision_is_not_marked_as_our_reconciled_input(self):
         tracking.register(sample(),fixtures(),{},'statistical')
-        original=journal.reconcile
-        def another_writer():
-            result=original()
+        original=journal._reconcile_snapshot
+        def another_writer(**kwargs):
+            result=original(**kwargs)
             # Another writer appends scores after our transaction commits,
             # before the page samples the resulting file signature.
             with patch.object(journal,'_now',return_value=AFTER):
                 original(raw_fixtures(status='FT'),now=AFTER)
             return result
-        with patch.object(journal,'reconcile',side_effect=another_writer) as reconcile:
+        with patch.object(journal,'_reconcile_snapshot',side_effect=another_writer) as reconcile:
             tracking.reconcile_local(if_changed=True)
             tracking.reconcile_local(if_changed=True)
             self.assertEqual(reconcile.call_count,2)
+
+    def test_changed_page_reconciliation_reuses_its_two_existing_snapshots(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        methods=copy.deepcopy(journal.list_entries()[0]['methods'])
+        with patch.object(journal,'list_entries',wraps=journal.list_entries) as read:
+            tracking.reconcile_local(if_changed=True)
+            self.assertEqual(read.call_count,2)
+            tracking.reconcile_local(if_changed=True)
+            self.assertEqual(read.call_count,2)
+            api.save_fixtures(raw_fixtures(status='FT'),api.STORE_PATH)
+            with patch.object(journal,'_now',return_value=AFTER):
+                result=tracking.reconcile_local(if_changed=True)
+                tracking.reconcile_local(if_changed=True)
+            self.assertEqual(result['settled'],1)
+            self.assertEqual(read.call_count,4)
+        self.assertEqual(journal.list_entries()[0]['methods'],methods)
+
+    def test_concurrent_revision_between_final_read_signature_and_read_forces_retry(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        original=journal._reconcile_snapshot
+        first=[True]
+        def another_writer(**kwargs):
+            before_read=kwargs['_before_final_read']
+            def append_after_signature():
+                before_read()
+                if first[0]:
+                    first[0]=False
+                    with patch.object(journal,'_now',return_value=AFTER):
+                        original(raw_fixtures(status='FT'),now=AFTER)
+            return original(**dict(kwargs,_before_final_read=append_after_signature))
+        with patch.object(journal,'_reconcile_snapshot',side_effect=another_writer) as reconcile:
+            tracking.reconcile_local(if_changed=True)
+            tracking.reconcile_local(if_changed=True)
+            tracking.reconcile_local(if_changed=True)
+            self.assertEqual(reconcile.call_count,2)
+        self.assertEqual(journal.list_entries()[0]['status'],'settled')
+
+    def test_api_import_during_final_snapshot_is_not_hidden_by_cached_input(self):
+        tracking.register(sample(),fixtures(),{},'statistical')
+        original=journal._reconcile_snapshot
+        first=[True]
+        def concurrent_import(**kwargs):
+            before_read=kwargs['_before_final_read']
+            def import_after_signature():
+                before_read()
+                if first[0]:
+                    first[0]=False
+                    api.save_fixtures(raw_fixtures(status='FT'),api.STORE_PATH)
+            return original(**dict(kwargs,_before_final_read=import_after_signature))
+        with patch.object(journal,'_reconcile_snapshot',side_effect=concurrent_import) as reconcile:
+            tracking.reconcile_local(if_changed=True)
+            with patch.object(journal,'_now',return_value=AFTER):
+                result=tracking.reconcile_local(if_changed=True)
+                tracking.reconcile_local(if_changed=True)
+            self.assertEqual(reconcile.call_count,2)
+            self.assertEqual(result['settled'],1)
+
+    def test_first_page_on_empty_journal_never_creates_storage(self):
+        with patch.object(journal,'list_entries',wraps=journal.list_entries) as read:
+            result=tracking.reconcile_local(if_changed=True)
+        self.assertEqual(result['entries'],0)
+        self.assertEqual(read.call_count,1)
+        self.assertFalse(journal.DB_PATH.exists())
 
     def test_selected_context_is_required_before_any_provider_request(self):
         with self.assertRaises(journal.JournalError):
@@ -161,6 +233,7 @@ class TrackingTests(unittest.TestCase):
         estimate = dict(eligible=True, generation='selected-context')
         self.frozen['methods']['context_neighbors'] = context_method()
         self.frozen['methods']['context_neighbors']['training_before'] = BEFORE.date().isoformat()
+        self.frozen['unavailable'].pop('context_neighbors', None)
         result = tracking.register(sample(),fixtures(),estimate,'context_neighbors')
         self.assertTrue(result['created'])
         self.assertIn('context_neighbors',result['methods'])

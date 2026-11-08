@@ -2350,3 +2350,12 @@ Dans les fiches d'analyses manuelles, automatiques et leur historique, **Tous le
 Les nouvelles captures utilisent `computed-scenario-proposals-v3` et lient leur catalogue complet à la distribution enregistrée. La première prévision n'est pas remplacée. Les archives anciennes restent inchangées ; si leur distribution complète existe, elle peut être consultée, avec une mention explicite distinguant cette consultation des propositions effectivement enregistrées à l'époque.
 
 Les indicateurs Top1/Top3 et les paris simulés sur les choix explicites restent séparés du catalogue. Retrouver le résultat parmi **toutes** les possibilités ne mesure pas une réussite prédictive et ne crée pas automatiquement des mises sur chaque combinaison. La comparaison des méthodes et des premières sélections reste accessible dans **Premiers choix de référence et comparaison des méthodes**.
+
+
+### Journal allégé — 8 novembre 2026
+
+**Mes analyses** charge désormais les prévisions de la seule journée consultée. Les dates et compteurs viennent d’une projection SQLite sans décoder les modèles ni tout l’historique des résultats. Une fiche relit et vérifie son propre enregistrement ; les autres fiches ne sont pas chargées à cette occasion. La comparaison détaillée charge la cohorte de la journée uniquement lorsqu’elle est demandée.
+
+Les filtres et la pagination réutilisent une projection d’affichage légère. Son cache est borné en mémoire et invalidé par les changements du journal, du WAL SQLite, des analyses manuelles ou des données API locales. Les états temporels sont renouvelés au plus tard au changement de minute. Ce cache ne remplace ni les archives ni les contrôles d’intégrité lors de l’ouverture d’une fiche. L’export complet charge toutes les prévisions uniquement au téléchargement.
+
+Le rapprochement administratif des résultats utilise ses deux lectures de contrôle existantes au lieu de quatre ; les contrôles des écritures concurrentes et les règles d’évaluation restent conservés. L’actualisation périodique n’est pas supprimée et tous les scénarios restent accessibles.
