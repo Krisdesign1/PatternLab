@@ -3,6 +3,8 @@ const instances = new WeakMap();
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const validWidth = (value) => typeof value === "number" && Number.isInteger(value) && value >= 40 && value <= 2000;
+const validHeight = (value) => typeof value === "number" && Number.isInteger(value) && value >= 200 && value <= 5000;
+const normalizedHeight = (value, fallback = null) => value === null || value === "content" || validHeight(value) ? value : fallback;
 const VIEW_RETRY_DELAYS = [300, 800, 1800, 3500];
 
 function schemaFor(columns) {
@@ -32,7 +34,8 @@ function defaultView(schema, raw) {
     seenSort.add(item.column);
     return [{ column: item.column, direction: item.direction }];
   });
-  return { version: 1, columns: order, hidden: order.filter((id) => hidden.has(id)), widths, sort };
+  return { version: 1, columns: order, hidden: order.filter((id) => hidden.has(id)), widths, sort,
+    height: normalizedHeight(source.height) };
 }
 
 /** Reconcile a canonical preference with the current schema; unknown fields are dropped. */
@@ -63,15 +66,16 @@ export function normalizeView(raw, columns, defaults) {
     hidden: order.filter((id) => hidden.has(id) || (!known.has(id) && defaultHidden.has(id))),
     widths,
     sort,
+    height: own(raw, "height") ? normalizedHeight(raw.height, base.height) : base.height,
   };
 }
 
 function cloneView(view) {
-  return { version: 1, columns: [...view.columns], hidden: [...view.hidden], widths: Object.fromEntries(Object.entries(view.widths)), sort: view.sort.map((item) => ({ ...item })) };
+  return { version: 1, columns: [...view.columns], hidden: [...view.hidden], widths: Object.fromEntries(Object.entries(view.widths)), sort: view.sort.map((item) => ({ ...item })), height: normalizedHeight(view.height) };
 }
 
 function signature(view) {
-  return JSON.stringify([view.columns, view.hidden, view.columns.map((id) => own(view.widths, id) ? view.widths[id] : null), view.sort]);
+  return JSON.stringify([view.columns, view.hidden, view.columns.map((id) => own(view.widths, id) ? view.widths[id] : null), view.sort, view.height ?? null]);
 }
 
 function pauseDelivery(state) {
@@ -183,6 +187,15 @@ function moveItem(items, from, offset) {
   [items[from], items[next]] = [items[next], items[from]];
 }
 
+function syncHeightControls(state) {
+  const height = state.draft.height;
+  const mode = height === null || height === undefined ? "default" : height === "content" ? "content" : "custom";
+  state.heightMode.value = mode;
+  state.heightCustom.hidden = mode !== "custom";
+  state.heightInput.disabled = mode !== "custom";
+  state.heightInput.value = mode === "custom" ? String(height) : "500";
+}
+
 function renderRows(state) {
   const fragment = state.document.createDocumentFragment();
   const labels = new Map(state.schema.map((column) => [column.id, column.label]));
@@ -282,6 +295,7 @@ function renderRows(state) {
     fragment.appendChild(row);
   });
   state.tbody.replaceChildren(fragment);
+  syncHeightControls(state);
 }
 
 function sortableValue(cell) {
@@ -326,6 +340,10 @@ function captureRichTables(state, html) {
 
 function applyRichView(state) {
   const view = state.applied;
+  if (state.rich) {
+    state.rich.style.maxHeight = validHeight(view.height) ? `${view.height}px` : "";
+    state.rich.style.overflowY = validHeight(view.height) ? "auto" : "";
+  }
   const indices = new Map(state.schema.map((column, index) => [column.id, index]));
   const hidden = new Set(view.hidden);
   const collator = new Intl.Collator("fr", { numeric: true, sensitivity: "base" });
@@ -387,7 +405,35 @@ function createState(parentElement, data, emit) {
   state.details = element(state, "details", "tve-editor");
   state.details.appendChild(element(state, "summary", "", "Affichage du tableau"));
   const content = element(state, "div", "tve-content");
-  content.appendChild(element(state, "p", "tve-help", "Les déplacements, largeurs et tris effectués directement dans le tableau sont temporaires. Réglez votre vue ci-dessous, puis enregistrez-la pour vos prochaines visites sur ce navigateur."));
+  content.appendChild(element(state, "p", "tve-help", "Les déplacements, largeurs et tris effectués directement dans le tableau sont temporaires. Réglez la hauteur et les colonnes ci-dessous, puis enregistrez votre vue pour vos prochaines visites sur ce navigateur."));
+  const heightControls = element(state, "div", "tve-height-controls");
+  const heightLabel = element(state, "label", "tve-height-label", "Hauteur du tableau");
+  state.heightMode = element(state, "select");
+  state.heightMode.setAttribute("aria-label", "Hauteur du tableau");
+  [["default", "Par défaut"], ["custom", "Personnalisée"], ["content", "Adapter aux lignes chargées"]].forEach(([value, text]) => {
+    const option = element(state, "option", "", text);
+    option.value = value;
+    state.heightMode.appendChild(option);
+  });
+  state.heightMode.onchange = () => {
+    state.draft.height = state.heightMode.value === "content" ? "content"
+      : state.heightMode.value === "custom" ? validHeight(state.draft.height) ? state.draft.height : 500 : null;
+    syncHeightControls(state);
+    updateStatus(state);
+  };
+  heightLabel.appendChild(state.heightMode);
+  state.heightCustom = element(state, "label", "tve-height-custom", "Hauteur en pixels");
+  state.heightInput = element(state, "input", "tve-height-input");
+  Object.assign(state.heightInput, { type: "number", min: "200", max: "5000", step: "1", inputMode: "numeric", required: true });
+  state.heightInput.setAttribute("aria-label", "Hauteur du tableau, en pixels");
+  state.heightInput.oninput = () => {
+    state.draft.height = Number.isFinite(state.heightInput.valueAsNumber) ? state.heightInput.valueAsNumber : state.heightInput.value;
+    updateStatus(state);
+  };
+  state.heightCustom.appendChild(state.heightInput);
+  heightControls.append(heightLabel, state.heightCustom);
+  content.appendChild(heightControls);
+  content.appendChild(element(state, "p", "tve-help", "Hauteur personnalisée : de 200 à 5000 pixels. Adapter aux lignes chargées n'ajoute pas les autres pages et ne change ni les filtres ni les données."));
   const scroll = element(state, "div", "tve-controls-scroll");
   const table = element(state, "table", "tve-controls");
   table.setAttribute("aria-label", "Préférences des colonnes du tableau");
@@ -411,6 +457,7 @@ function createState(parentElement, data, emit) {
     updateStatus(state);
   }));
   actions.appendChild(button(state, "Enregistrer ma vue", "tve-button tve-primary", () => {
+    if (state.heightMode.value === "custom" && !state.heightInput.reportValidity()) return;
     for (const input of state.widthInputs) {
       if (!input.reportValidity()) return;
     }

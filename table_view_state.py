@@ -8,6 +8,15 @@ import pandas as pd
 VERSION = 1
 
 
+def _height(value, fallback=None):
+    """Accept only presentation sizing; booleans and arbitrary CSS stay invalid."""
+    if value is None or isinstance(value, str) and value == 'content':
+        return value
+    if type(value) is int and 200 <= value <= 5000:
+        return value
+    return fallback
+
+
 def normalize_view(schema, defaults=None, supplied=None):
     """Reconcile a saved view with today's columns, discarding invalid settings."""
     schema = list(dict.fromkeys(str(name) for name in schema))
@@ -41,9 +50,9 @@ def normalize_view(schema, defaults=None, supplied=None):
                     sort.append(dict(column=item['column'], direction=item['direction']))
                     seen.add(item['column'])
         return dict(version=VERSION, columns=order, hidden=[name for name in order if name in hidden],
-                    widths=widths, sort=sort)
+                    widths=widths, sort=sort, height=_height(value.get('height', base['height']), base['height']))
 
-    empty = dict(version=VERSION, columns=schema, hidden=[], widths={}, sort=[])
+    empty = dict(version=VERSION, columns=schema, hidden=[], widths={}, sort=[], height=None)
     base = clean(defaults, empty)
     return clean(supplied, base) if supplied is not None else base
 

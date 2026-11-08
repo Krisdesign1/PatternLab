@@ -31,7 +31,10 @@ class Node {
   querySelectorAll() { return []; }
   querySelector() { return null; }
   get valueAsNumber() { return this.value === "" ? NaN : Number(this.value); }
-  reportValidity() { return this.value === "" || (Number.isInteger(this.valueAsNumber) && this.valueAsNumber >= 40 && this.valueAsNumber <= 2000); }
+  reportValidity() {
+    return this.disabled || (this.value === "" ? !this.required
+      : Number.isInteger(this.valueAsNumber) && this.valueAsNumber >= Number(this.min ?? 40) && this.valueAsNumber <= Number(this.max ?? 2000));
+  }
 }
 
 function environment(initial = {}) {
@@ -64,8 +67,8 @@ function find(root, predicate) {
 }
 const control = (environment, label) => find(environment.parent, (node) => node.attrs["aria-label"] === label);
 const click = (environment, label) => find(environment.parent, (node) => node.tagName === "BUTTON" && node.textContent === label).onclick();
-const defaults = { version: 1, columns: ["a", "b"], hidden: [], widths: {}, sort: [] };
-const saved = { version: 1, columns: ["b", "a"], hidden: ["a"], widths: { b: 160 }, sort: [{ column: "b", direction: "desc" }] };
+const defaults = { version: 1, columns: ["a", "b"], hidden: [], widths: {}, sort: [], height: null };
+const saved = { version: 1, columns: ["b", "a"], hidden: ["a"], widths: { b: 160 }, sort: [{ column: "b", direction: "desc" }], height: null };
 const data = { storage_key: "first", columns: [{ id: "a", label: "A" }, { id: "b", label: "B" }], defaults, current: defaults, reset_token: null };
 const mount = (environment, events, overrides = {}) => render({ data: { ...data, ...overrides }, parentElement: environment.parent, setStateValue: (...args) => events.push(args) });
 
@@ -135,7 +138,7 @@ test("draft edits wait for save and survive an ACK; reset removes storage", () =
   click(env, "Enregistrer ma vue");
   const applied = { ...saved, hidden: [] };
   assert.deepEqual(JSON.parse(env.storage.get("first")), applied);
-  assert.deepEqual(Object.keys(JSON.parse(env.storage.get("first"))).sort(), ["columns", "hidden", "sort", "version", "widths"]);
+  assert.deepEqual(Object.keys(JSON.parse(env.storage.get("first"))).sort(), ["columns", "height", "hidden", "sort", "version", "widths"]);
   // A delayed ACK of the preceding intent must not overwrite the newer view.
   mount(env, events, { current: saved });
   assert.equal(control(env, "Afficher A").checked, true);
@@ -186,4 +189,74 @@ test("rich table reorders cells, sorts stably, hides and restores original style
   assert.deepEqual(body.children.map((row) => row.children[0].textContent), ["first", "second", "third"]);
   assert.equal(rows[0].cells[0].node.style.display, "");
   assert.equal(rows[0].cells[1].node.style.width, "");
+});
+
+test("height migration preserves old columns and rejects malformed dimensions", () => {
+  const legacy = { ...saved }; delete legacy.height;
+  assert.deepEqual(normalizeView(legacy, data.columns, defaults), saved);
+  for (const height of [null, "content", 200, 1100, 5000]) {
+    assert.equal(normalizeView({ ...saved, height }, data.columns, defaults).height, height);
+  }
+  for (const height of [undefined, false, true, 199, 5001, -1, 800.5, NaN, Infinity, "900", "auto", {}, []]) {
+    assert.equal(normalizeView({ ...saved, height }, data.columns, { ...defaults, height: 900 }).height, 900);
+  }
+  assert.equal(normalizeView({ ...saved, height: null }, data.columns, { ...defaults, height: 900 }).height, null);
+});
+
+test("custom height saves independently and restores on a new mount without losing columns", () => {
+  const env = environment({ first: JSON.stringify(saved) }), events = [];
+  mount(env, events); env.flushFrames();
+  const mode = control(env, "Hauteur du tableau");
+  const input = control(env, "Hauteur du tableau, en pixels");
+  assert.equal(mode.value, "default"); assert.equal(input.disabled, true);
+  mode.value = "custom"; mode.onchange();
+  assert.equal(input.value, "500"); assert.equal(input.disabled, false);
+  input.value = "2450"; input.oninput();
+  assert.equal(events.length, 1);
+  click(env, "Enregistrer ma vue");
+  const taller = { ...saved, height: 2450 };
+  assert.deepEqual(events.at(-1), ["view", taller]);
+  assert.deepEqual(JSON.parse(env.storage.get("first")), taller);
+  const reopened = environment({ first: env.storage.get("first") }), restored = [];
+  mount(reopened, restored); reopened.flushFrames();
+  assert.equal(control(reopened, "Hauteur du tableau").value, "custom");
+  assert.equal(control(reopened, "Hauteur du tableau, en pixels").value, "2450");
+  assert.deepEqual(restored.at(-1), ["view", taller]);
+  mount(reopened, restored, { current: taller });
+  assert.equal(reopened.timers.size, 0);
+  click(reopened, "Réinitialiser la vue");
+  assert.equal(control(reopened, "Hauteur du tableau").value, "default");
+  assert.deepEqual(restored.at(-1), ["view", defaults]);
+  assert.equal(reopened.storage.has("first"), false);
+});
+
+test("invalid height cannot save; adapting to loaded rows preserves pagination-independent preferences", () => {
+  const env = environment(), events = [];
+  mount(env, events);
+  const mode = control(env, "Hauteur du tableau"), input = control(env, "Hauteur du tableau, en pixels");
+  mode.value = "custom"; mode.onchange();
+  for (const bad of ["", "199", "5001", "500.5", "not-a-number"]) {
+    input.value = bad; input.oninput();
+    click(env, "Enregistrer ma vue");
+    assert.equal(env.storage.size, 0); assert.equal(events.length, 0);
+  }
+  mode.value = "content"; mode.onchange();
+  assert.equal(input.disabled, true);
+  click(env, "Enregistrer ma vue");
+  assert.deepEqual(events.at(-1), ["view", { ...defaults, height: "content" }]);
+  assert.deepEqual(JSON.parse(env.storage.get("first")), { ...defaults, height: "content" });
+  env.dispatchStorage({ key: "first", newValue: JSON.stringify({ ...saved, height: 1200 }) });
+  assert.equal(mode.value, "custom"); assert.equal(input.value, "1200");
+  assert.deepEqual(events.at(-1), ["view", { ...saved, height: 1200 }]);
+});
+
+test("rich table height changes only its owned scrolling container and restores natural height", () => {
+  const env = environment();
+  const state = { schema: data.columns, applied: { ...defaults, height: 1000 }, richTables: [], rich: new Node("div", env.document) };
+  applyRichView(state);
+  assert.equal(state.rich.style.maxHeight, "1000px"); assert.equal(state.rich.style.overflowY, "auto");
+  state.applied = { ...defaults, height: "content" }; applyRichView(state);
+  assert.equal(state.rich.style.maxHeight, ""); assert.equal(state.rich.style.overflowY, "");
+  state.applied = defaults; applyRichView(state);
+  assert.equal(state.rich.style.maxHeight, "");
 });

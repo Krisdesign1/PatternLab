@@ -19,7 +19,7 @@ class TableViewStateTests(unittest.TestCase):
         self.assertEqual(view['sort'], [])
 
     def test_invalid_payloads_keep_defaults(self):
-        defaults = dict(version=1, columns=['B', 'A'], hidden=['B'], widths={'A': 125}, sort=[])
+        defaults = dict(version=1, columns=['B', 'A'], hidden=['B'], widths={'A': 125}, sort=[], height=None)
         for saved in (None, 'bad', [], {'version': 88}, {'version': 1, 'columns': 'bad', 'hidden': 3}):
             self.assertEqual(normalize_view(['A', 'B'], defaults, saved), defaults)
 

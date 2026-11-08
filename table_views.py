@@ -109,6 +109,9 @@ def _control(columns, *, table_id, key, defaults, reset_token=None, rich_table_h
 
 def _view_kwargs(frame, view, kwargs):
     result = dict(kwargs)
+    # A missing/legacy preference retains each screen's chosen default height.
+    if view.get('height') is not None:
+        result['height'] = view['height']
     mapping = {str(name): name for name in frame.columns}
     result['column_order'] = [mapping[name] for name in view['columns'] if name not in view['hidden']]
     config = deepcopy(result.get('column_config') or {})
@@ -164,16 +167,17 @@ def selectable_dataframe(data, *, table_id, key, **kwargs):
     """Return the displayed frame and its row selection, with saved preferences.
 
     Unlike read-only tables this stays in the calling page: selecting rows must
-    update the page's add-to-group action. A view/data revision creates a new
-    selection widget so old row offsets can never target different matches.
+    update the page's add-to-group action. A data or row-order revision creates
+    a new selection widget so old row offsets cannot target different matches.
     """
     frame = _frame(data)
     defaults = _defaults(frame, kwargs)
     view = _control(_columns(frame, kwargs.get('column_config') or {}), table_id=table_id,
                     key=key, defaults=defaults)
     rendered = apply_dataframe_view(frame, view)
-    identity = sha256((json.dumps(view, sort_keys=True, ensure_ascii=False) +
-                       rendered.to_json(orient='split', date_format='iso', default_handler=str)).encode()).hexdigest()[:20]
+    # Height, column widths and visibility do not change row identities. Keep
+    # in-progress row selection when only those presentation settings change.
+    identity = sha256(rendered.to_json(orient='split', date_format='iso', default_handler=str).encode()).hexdigest()[:20]
     options = _view_kwargs(frame, view, kwargs)
     event = st.dataframe(rendered, key=f'{key}_{identity}', on_select='rerun',
                          selection_mode='multi-row', **options)

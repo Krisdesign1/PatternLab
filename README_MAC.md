@@ -43,7 +43,9 @@ Streamlit 1.64 ou une version 1.x plus récente est nécessaire.
 ### Retrouver son affichage des tableaux
 
 Au-dessus de chaque tableau, ouvrir **Affichage du tableau** pour choisir les
-colonnes visibles, leur ordre, leur largeur et le tri. Cliquer sur **Enregistrer
+colonnes visibles, leur ordre, leur largeur, le tri et la hauteur. Pour allonger
+le tableau, choisir **Hauteur du tableau → Personnalisée**, puis saisir par exemple
+**1 000 pixels**, ou choisir **Adapter aux lignes chargées**. Cliquer sur **Enregistrer
 ma vue** pour les retrouver lors des prochaines visites. **Tout afficher**, puis
 **Enregistrer ma vue**, permet de retrouver une colonne masquée ; **Réinitialiser
 la vue** rétablit la présentation d'origine de ce tableau.
@@ -56,6 +58,8 @@ temporaires : Streamlit ne fournit pas leur état à l'application. Utiliser le
 panneau **Affichage du tableau** pour une configuration durable. Le tri porte sur
 les lignes chargées dans le tableau ; il ne modifie pas la pagination, les
 analyses, les probabilités ou les données sauvegardées.
+La hauteur ne change pas le nombre de lignes par page : elle permet d'en voir
+davantage à la fois. Les autres pages restent accessibles par la pagination.
 
 Voir [le guide d'affichage des tableaux](docs/AFFICHAGE_TABLEAUX.md).
 

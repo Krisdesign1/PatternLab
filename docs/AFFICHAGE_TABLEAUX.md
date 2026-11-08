@@ -5,7 +5,16 @@ Au-dessus d'un tableau, ouvrir **Affichage du tableau** pour régler :
 - les colonnes visibles ;
 - leur ordre avec les flèches ;
 - leur largeur en pixels, ou une valeur vide pour la largeur d'origine ;
-- le tri croissant ou décroissant, avec ses priorités si plusieurs colonnes trient.
+- le tri croissant ou décroissant, avec ses priorités si plusieurs colonnes trient ;
+- la hauteur du tableau : **Par défaut**, **Personnalisée** de 200 à 5 000 pixels,
+  ou **Adapter aux lignes chargées**.
+
+Pour allonger un tableau fixé à 500 pixels, choisir une hauteur personnalisée de
+1 000 pixels, puis **Enregistrer ma vue**. Le mode adapté suit les lignes chargées
+de la page actuelle ; il ne récupère pas les autres pages. Streamlit limite ce
+mode à 10 000 pixels et conserve le défilement interne pour les tableaux plus longs.
+Les tableaux HTML utilisent une hauteur maximale avec défilement pour le mode
+personnalisé. La hauteur d'origine reste inchangée tant qu'aucun choix n'est enregistré.
 
 Cliquer sur **Enregistrer ma vue** pour appliquer les réglages et les retrouver
 lors des prochaines visites. **Tout afficher**, puis **Enregistrer ma vue**,
@@ -36,7 +45,7 @@ accusé de réception du serveur et effectue au maximum quatre nouvelles
 tentatives si un événement est perdu lors du montage de plusieurs tableaux.
 
 ```bash
-python -m unittest -q test_table_view_state test_table_views test_table_views_install
+python -m unittest -q test_table_view_state test_table_height_state test_table_views test_table_views_install
 node --test test_table_view_editor.mjs
 ```
 
