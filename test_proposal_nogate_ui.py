@@ -55,7 +55,7 @@ class ProposalNoGateUiTests(unittest.TestCase):
         self.assertIn('ne bloque aucune taille de groupe', captions)
         self.assertEqual(at.dataframe[0].value['Propositions enregistrées'].tolist(), [5, 3])
         self.assertEqual(at.dataframe[1].value['Scénarios retenus'].tolist(), [5, 3])
-        self.assertFalse(at.number_input)
+        self.assertEqual([item.label for item in at.number_input], ['Page du classement complet'])
         self.assertFalse(at.slider)
         self.assertEqual(entry, before)
 
@@ -88,7 +88,7 @@ class ProposalNoGateUiTests(unittest.TestCase):
         self.assertFalse(at.warning)
         self.assertFalse(at.info)
         captions = '\n'.join(item.value for item in at.caption)
-        self.assertIn('Toutes les propositions produites par les méthodes sont sauvegardées', captions)
+        self.assertIn('Les distributions complètes et leurs classements sont sauvegardés', captions)
         self.assertIn('5 scénarios distincts conservés', captions)
         self.assertEqual(at.dataframe[0].value['Propositions enregistrées'].tolist(), [5, 5])
 

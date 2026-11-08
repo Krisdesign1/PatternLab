@@ -174,7 +174,8 @@ class ScenarioMatrixUiTests(unittest.TestCase):
         self.assertIn('pl-scenario-token-first', html)
         self.assertIn('Réalisé', html)
         self.assertIn('Hors des choix proposés', html)
-        self.assertEqual(len(html_nodes(at)), 3)
+        # Legend + sequence + full-catalogue grid + reference coverage/matrix.
+        self.assertEqual(len(html_nodes(at)), 5)
 
     def test_pagination_covers_union_and_resets_on_changed_payload(self):
         sequences = list(product(('1st', 'Égal', '2nd'), repeat=4))

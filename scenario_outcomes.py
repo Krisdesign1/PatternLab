@@ -93,6 +93,15 @@ def summarize(entry):
                 seen.add(sequence)
                 if sequence == actual:
                     matches.append(dict(method=name, rank=rank, sequence=list(sequence)))
-        return _result('hit' if matches else 'miss', matches=matches, actual=list(actual))
+        result = _result('hit' if matches else 'miss', matches=matches, actual=list(actual))
+        if any(isinstance(payload, Mapping) and payload.get('scenario_catalog') is not None
+               for payload in methods.values()):
+            # A complete mathematical catalogue necessarily contains the final
+            # outcome. Only the separately recorded reference choices measure
+            # predictive success; opening more catalogue pages cannot change it.
+            result.update(scope='reference_choices',
+                          label='Choix de référence réalisé' if matches else
+                                'Résultat hors des choix de référence')
+        return result
     except (KeyError, TypeError, ValueError):
         return _result('unavailable')

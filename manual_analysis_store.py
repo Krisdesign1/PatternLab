@@ -131,7 +131,8 @@ def _semantic(value, *, root=True):
         # A repeated click with the same methods, calibrated rule and exact
         # choices reuses the first archive. The envelope's clock and checksum
         # attest that first capture but do not create another calculation.
-        if value.get('schema') in ('adaptive-scenario-proposals-v1', 'computed-scenario-proposals-v2'):
+        if value.get('schema') in ('adaptive-scenario-proposals-v1', 'computed-scenario-proposals-v2',
+                                   'computed-scenario-proposals-v3'):
             value = {key: child for key, child in value.items() if key not in ('selection_at', 'sha256')}
         return {key: _semantic(child, root=False) for key, child in value.items()
                 if key not in _CAPTURE_TIMES and not (root and key in ('id', 'created'))}

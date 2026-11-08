@@ -4,7 +4,7 @@ from datetime import date, timedelta
 import streamlit as st
 from league_model import VALUES
 from coupon_sizes import SIZES
-from match_predictor import estimate, backtest, summarize, group_scenarios
+from match_predictor import estimate, backtest, summarize
 
 
 @st.cache_data(max_entries=64, show_spinner=False)
@@ -87,12 +87,16 @@ def render_match_prediction(result, league):
                     st.write(' · '.join(f'{v} : {p[v]:.0%}' for v in VALUES))
                     st.caption('Estimations expérimentales ; les pourcentages ne sont pas des taux de réussite vérifiés.')
             if size >= 2 and all(e['eligible'] for e in estimates):
-                st.write('**Les trois scénarios de ton groupe** — dans l’ordre des matchs saisis')
-                for i, s in enumerate(group_scenarios(estimates, limit=3), 1):
-                    st.write(f"{i}. **{' → '.join(s['sequence'])}** — {100*s['probability']:.3g} %")
+                import prospective_models as models
+                import scenario_catalog_panel
+                method = models._method('manual-team-simulation-v1',
+                    models._distribution('independent', size,
+                        distributions=[item['probabilities'] for item in estimates]),
+                    dict(league=league, training_before=cutoff.isoformat()))
+                scenario_catalog_panel.render({'clubs': method}, key=f'team_complete_{league}_{size}')
                 st.caption('Combinaison calculée en supposant les résultats des matchs indépendants, '
                            'une simplification notamment si une équipe revient dans plusieurs matchs. '
-                           'Seuls les trois premiers scénarios sont affichés, sans renormaliser les probabilités. '
+                           'Le catalogue complet conserve les probabilités absolues. '
                            'La réussite de ces groupes personnalisés n’a pas encore été évaluée. '
                            'Les ex æquo sont départagés par un ordre conventionnel.')
     st.markdown('#### Le modèle fait-il mieux que la tendance de la ligue ?')

@@ -64,6 +64,8 @@ def _outcome(entry, evaluation):
         state = 'unavailable'
     label = ('Aucun scénario proposé' if coverage.get('abstained') else
              'Comparaison incomplète' if status == 'settled' and state == 'unavailable' and not coverage['complete']
+             else ('Choix de référence réalisé' if state == 'hit' else 'Résultat hors des choix de référence')
+             if coverage.get('catalog_complete') and state in ('hit', 'miss')
              else scenario_outcomes.LABELS[state])
     return dict(state=state, label=label, matches=matches, actual=actual)
 

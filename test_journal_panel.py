@@ -91,6 +91,8 @@ class JournalPanelTests(unittest.TestCase):
             methods=models.build_methods(sample(league=league),chosen,decision_at=created_at)['methods']
         if catboost:
             methods['catboost']=dict(copy.deepcopy(methods['clubs']),version='catboost-test',generation=generation)
+            from frozen_scenario_catalog import descriptor
+            methods['catboost']['scenario_catalog'] = descriptor(methods['catboost'])
         if context:
             methods['context_neighbors']=context_method()
             methods['context_neighbors']['training_before']=created_at.astimezone(timezone.utc).date().isoformat()
@@ -155,7 +157,7 @@ class JournalPanelTests(unittest.TestCase):
         table=next(d.value for d in at.dataframe if 'Groupes communs' in d.value.columns)
         self.assertEqual(len(table),4)
         self.assertEqual(set(table['Groupes communs']),{1})
-        self.assertTrue(any('Aucun scénario proposé réalisé' in r.value for r in at.markdown))
+        self.assertTrue(any('Résultat hors des choix de référence' in r.value for r in at.markdown))
         self.assertTrue(any('Scénario observé' in r.value for r in at.markdown))
         self.network.assert_not_called()
 

@@ -31,7 +31,7 @@ def _fixture_table(fixtures):
             for i, row in enumerate(fixtures)]
 
 
-def _show_forecast(estimate, fixtures):
+def _show_forecast(estimate, fixtures, result=None, source='API-Football'):
     table_views.dataframe(_fixture_table(fixtures), hide_index=True, width='stretch', table_id='contextual_scenario_panel:_show_forecast:dataframe:1')
     if not estimate['eligible']:
         st.info(f"Historique insuffisant avant le {estimate['before']} : "
@@ -39,6 +39,14 @@ def _show_forecast(estimate, fixtures):
                 'Il faut au moins 20 groupes et 30 matchs de cette compétition sur 3 jours.')
         return
     st.markdown('#### Scénarios adaptés à ce groupe de clubs')
+    complete_methods = None
+    if result is not None:
+        import scenario_presentation
+        import scenario_catalog_panel
+        complete_methods = scenario_presentation.forecast_methods(dict(forecast=estimate,
+            fixtures=fixtures, result=result, source=source, engine='statistical'))
+        scenario_catalog_panel.render(complete_methods, fixtures=fixtures, key='contextual_complete')
+    st.caption('Premiers choix de référence du moteur combiné :')
     table_views.dataframe([
         {'Rang': i + 1, 'Scénario': ' → '.join(row['sequence']),
          'Estimation combinée (%)': 100 * row['probability'],
@@ -75,7 +83,8 @@ def _show_forecast(estimate, fixtures):
                        'Le nombre attendu dans cette explication est lissé pour permettre '
                        'l’estimation de tous les scénarios, y compris ceux jamais observés.')
     st.download_button('Sauvegarder cette estimation de scénarios',
-                       json.dumps({'fixtures': fixtures, 'forecast': estimate}, ensure_ascii=False, indent=2),
+                       json.dumps(dict(fixtures=fixtures, forecast=estimate,
+                                       comparison_methods=complete_methods), ensure_ascii=False, indent=2),
                        file_name='scenarios_contextuels.json', mime='application/json', key='contextual_export')
 
 
@@ -147,7 +156,7 @@ def render_contextual_scenarios(result, league, source):
     previous = st.session_state.get(f'contextual_last_{scope}')
     if previous and previous['mode'] == mode and previous['history'] == history_signature:
         st.caption('Dernier groupe validé avec le bouton de classement :')
-        _show_forecast(previous['estimate'], previous['fixtures'])
+        _show_forecast(previous['estimate'], previous['fixtures'], result, source)
 
     st.markdown('#### Comparer les trois méthodes sur les scénarios suivants')
     if st.button('Évaluer les scénarios sur les dates suivantes', key=f'contextual_evaluate_{scope}'):
@@ -190,7 +199,8 @@ def render_contextual_scenarios(result, league, source):
         st.write('La fréquence de chaque scénario historique est comparée à celle attendue '
                  'avec des positions indépendantes. Cette correction, lissée et atténuée par '
                  'une racine carrée, ajuste la distribution des clubs. Le résultat est normalisé '
-                 'sur tous les scénarios possibles, même si seuls les trois premiers sont affichés.')
+                 'sur tous les scénarios possibles. Le catalogue complet est consultable par pages ; '
+                 'les trois premiers sont conservés séparément comme référence.')
         st.caption('Tous les résultats utilisés précèdent strictement le jour du premier match du groupe. '
                    'Les clubs peu documentés utilisent la tendance de la compétition. '
                    'Les paramètres sont fixes ; les anciennes saisons ne sont pas pondérées par récence. '

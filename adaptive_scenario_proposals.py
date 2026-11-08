@@ -16,7 +16,8 @@ from adaptive_scenario_calibration import VERSION as CALIBRATION_VERSION, contex
 from adaptive_scenario_selection import VERSION as SELECTION_VERSION, iter_selected
 
 LEGACY_VERSION = 'adaptive-scenario-proposals-v1'
-VERSION = 'computed-scenario-proposals-v2'
+COMPUTED_V2 = 'computed-scenario-proposals-v2'
+VERSION = 'computed-scenario-proposals-v3'
 POLICY_VERSION = 'all-computed-proposals-v1'
 POLICY_DIR = Path(__file__).resolve().parent/'data/api_football/scenario_policy'
 ARTIFACT_PATH = POLICY_DIR/'calibration.json'
@@ -245,6 +246,7 @@ def capture(methods, fixtures, *, now, artifact=None, artifact_path=None, check_
     A technical failure raises before archival; it never saves a partial set.
     """
     from scenario_proposal_archive import validate_methods
+    from frozen_scenario_catalog import descriptor
     current = stamp(now)
     fixtures = list(fixtures)
     ids = _identity(fixtures)
@@ -268,6 +270,8 @@ def capture(methods, fixtures, *, now, artifact=None, artifact_path=None, check_
             check_time()
         selected[name] = dict(ranking=deepcopy(method['ranking']),
             evidence=_evidence(calibration, name, method, len(ids)))
+        if method.get('distribution') is not None:
+            selected[name]['scenario_catalog'] = descriptor(method)
     envelope = dict(schema=VERSION, selection_at=current.isoformat(),
         source_methods_digest=digest(methods), ordered_match_ids=ids,
         methods=selected, unavailable={}, policy=dict(version=POLICY_VERSION,
@@ -286,7 +290,7 @@ def validate(envelope, core_methods, fixtures, created_at=None):
     if isinstance(envelope, Mapping) and envelope.get('schema') == LEGACY_VERSION:
         return _validate_legacy(envelope, core_methods, fixtures, created_at)
     _check_digest(envelope)
-    if (envelope.get('schema') != VERSION
+    if (envelope.get('schema') not in (COMPUTED_V2, VERSION)
             or envelope.get('source_methods_digest') != digest(core_methods)
             or envelope.get('ordered_match_ids') != _identity(fixtures)
             or envelope.get('policy') != dict(version=POLICY_VERSION,
@@ -311,6 +315,14 @@ def validate(envelope, core_methods, fixtures, created_at=None):
         _ranking(method, len(fixtures))
         if digest(method['ranking']) != digest(core_methods[name]['ranking']):
             raise ValueError('La liste enregistrée ne conserve pas toutes les propositions calculées.')
+        catalogue = method.get('scenario_catalog')
+        if envelope['schema'] == VERSION and core_methods[name].get('distribution') is not None:
+            from frozen_scenario_catalog import validate_descriptor
+            validate_descriptor(core_methods[name], catalogue)
+        elif catalogue is not None:
+            # V2 did not attest a catalogue. Do not silently reinterpret its
+            # outcome space as an additional set of recorded predictions.
+            raise ValueError('Cette archive ancienne ne déclare pas de catalogue complet.')
         evidence = method.get('evidence')
         if (not isinstance(evidence, dict)
                 or evidence.get('status') not in ('qualified', 'not_qualified', 'unavailable')
@@ -339,10 +351,12 @@ def effective_methods(entry_or_envelope, core_methods=None):
         if envelope['schema'] == LEGACY_VERSION:
             policy = dict(version=SELECTION_VERSION, threshold=value['threshold'],
                 calibration_key=value['calibration_key'], artifact_sha256=envelope['artifact_sha256'])
-        elif envelope['schema'] == VERSION:
+        elif envelope['schema'] in (COMPUTED_V2, VERSION):
             policy = dict(version=POLICY_VERSION, evidence=deepcopy(value['evidence']))
         else:
             raise ValueError('Version des propositions inconnue.')
         output[name] = dict(deepcopy(core_methods[name]), ranking=deepcopy(value['ranking']),
             reference_ranking=deepcopy(list(core_methods[name]['ranking'][:3])), proposal_policy=policy)
+        if envelope['schema'] == VERSION and 'scenario_catalog' in value:
+            output[name]['scenario_catalog'] = deepcopy(value['scenario_catalog'])
     return output

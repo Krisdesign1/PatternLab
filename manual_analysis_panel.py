@@ -68,7 +68,11 @@ def _overview(entry, result):
             row[f'Scénario {rank}'] = _sequence(scenario['sequence'])
             row[f'Probabilité {rank} (%)'] = 100 * scenario['probability']
     else:
-        row['Règle des propositions'] = 'Seuil historique conservé'
+        row['Règle des propositions'] = ('Classements conservés sans seuil de qualification' if
+            entry['proposal_selection'].get('policy', {}).get('version') == 'all-computed-proposals-v1'
+            else 'Seuil historique conservé')
+    if following['coverage'].get('catalog_complete'):
+        row['Catalogue complet · possibilités par méthode'] = following['coverage']['catalog_total']
     return row
 
 
@@ -95,11 +99,17 @@ def _detail(entry, result):
         st.warning('Comparaison initiale incomplète : ' + coverage['reason'] +
                    ' Les trois choix du moteur conservé restent vérifiables. '
                    'Cette archive ne permet pas de mesurer le taux de réussite de toutes les propositions initialement affichées.')
+    elif coverage.get('catalog_complete'):
+        st.caption(f"Catalogue complet conservé : {coverage['catalog_total']:,} possibilités par méthode. "
+                   f"Les {coverage['proposal_count']} choix de référence distincts restent séparés pour le bilan.")
     else:
         st.caption(f"Archivage complet : {coverage['proposal_count']} scénario(s) distinct(s), "
                    f"{len(coverage['method_names'])} méthode(s), avec les probabilités et rangs enregistrés avant match.")
     if entry.get('proposal_selection') is not None:
-        st.caption('Le nombre de propositions découle du seuil historique conservé. Les indicateurs « exact en premier » '
+        computed = entry['proposal_selection'].get('policy', {}).get('version') == 'all-computed-proposals-v1'
+        st.caption(('La qualification historique est informative. ' if computed else
+                    'Le nombre de propositions découle du seuil historique conservé. ') +
+                   'Les indicateurs « exact en premier » '
                    'et « exact dans les 3 » décrivent uniquement le classement de référence original du moteur.')
         for name, reason in coverage.get('unavailable_methods', {}).items():
             st.caption(f"{tables.METHOD_LABELS.get(name, name)} : {reason}")

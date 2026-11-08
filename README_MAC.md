@@ -1496,7 +1496,7 @@ groupe incomplet restent conservés ; le scénario complet exige tous ses matchs
 Un score à la pause absent reste distinct d'un vrai `0-0`.
 
 Lors du premier classement d’un groupe futur, l’application fige les trois
-scénarios et la distribution complète pour les répétitions seules, les clubs
+premiers scénarios de référence et la distribution complète pour les répétitions seules, les clubs
 seuls et leur combinaison, ainsi que CatBoost et les répétitions par contexte
 si leurs modèles ou réglages enregistrés sont utilisables. La méthode par contexte
 conserve aussi les masses pondérées, son poids effectif et les précédents retenus ;
@@ -2311,7 +2311,7 @@ Le collecteur AWS dispose désormais d'une exécution versionnée avec lectures 
 
 Les tableaux de scénarios, leurs verdicts et le catalogue de simulation lisent tous les choix explicitement archivés, même si un classement en contient plus de trois. Le tableau indique leur nombre distinct et le nombre de choix par méthode. Les nouvelles prévisions confirmées possèdent un manifeste d'intégrité de cet ensemble, exporté avec le JSON.
 
-La génération automatique actuelle propose trois choix par méthode disponible. Un groupe utilisant uniquement Clubs possède donc trois choix ; plusieurs méthodes peuvent proposer davantage de suites distinctes au total. Les méthodes absentes et cette politique sont indiquées dans la fiche. Les métriques « trois premiers » et « ensemble proposé » restent distinctes. Aucune possibilité supplémentaire n'est inventée après le résultat.
+La génération automatique conservait alors trois choix par méthode disponible. Depuis la correction du 8 novembre décrite ci-dessous, le catalogue complet est consultable à partir des distributions figées. Les trois premiers restent des références de comparaison. Les archives anciennes ne deviennent pas rétroactivement des sélections de toutes les possibilités.
 
 Détails et preuves : [correction de tout le système](audit/CORRECTION_PROPOSITIONS_TOUT_SYSTEME_2026-11-07.md).
 
@@ -2327,7 +2327,7 @@ Les rencontres sans profil historique sont conservées, avec des fréquences man
 
 Les nouvelles captures conservent tous les classements effectivement fournis par les méthodes, pour les groupes de **2 à 20 matchs**. La présence ou l'absence d'un seuil qualifié ne filtre plus les propositions. Le niveau de preuve historique figure séparément ; les anciens résultats d'une politique à seuil ne valident pas la nouvelle politique de conservation.
 
-L'affichage initial, la sauvegarde, le verdict, l'export et la simulation utilisent le même ensemble conservé, sans troncature supplémentaire. Les premières lignes canoniques restent une référence pour les mesures Top1/Top3 existantes. Les producteurs actuels produisent encore trois premiers choix par méthode : leur union peut dépasser trois scénarios distincts. Si une méthode fournit davantage de choix, ils sont conservés intégralement. Cette correction ne prétend pas générer ni proposer les `3**N` possibilités d'un groupe.
+Cette première correction conservait tous les classements fournis, mais les producteurs fournissaient encore trois premiers choix par méthode. Elle est complétée par le catalogue du 8 novembre ci-dessous. Les premières lignes canoniques restent une référence pour les mesures Top1/Top3 existantes. Si une méthode fournit davantage de choix explicites, ils restent conservés intégralement.
 
 Les captures antérieures gardent leur politique et leur horodatage ; aucun choix n'est inventé après un résultat. Une ancienne capture restrictive sans proposition ne devient pas un échec ni une réussite. La calibration `data/api_football/scenario_policy/calibration.json` reste une preuve de recherche ; elle ne conditionne plus le fonctionnement des nouvelles captures. L'ouverture d'une page ne réentraîne rien et ne régénère pas les choix.
 
@@ -2336,3 +2336,17 @@ Les captures antérieures gardent leur politique et leur horodatage ; aucun choi
 Dans **Matchs → Tendances des clubs → Tous les clubs**, activez **« Uniquement les clubs avec un match le … »** au-dessus du tableau. La date commune de l'application correspond à aujourd'hui par défaut ; le bouton **Aujourd'hui** du sélecteur de date permet d'y revenir. Le filtre garde les deux équipes des rencontres enregistrées à cette date, tous statuts confondus, dans leur compétition exacte. La période, les saisons et le rôle de leur historique restent ceux du formulaire.
 
 Pays, compétition, recherche, tri, pagination et export s'appliquent ensuite à ces profils. L'export inclut la journée filtrée. Les rencontres sans profil historique restent consultables dans **Matchs de la journée**, avec les horaires et adversaires.
+
+### Classement complet des scénarios — 8 novembre 2026
+
+Dans les fiches d'analyses manuelles, automatiques et leur historique, **Tous les scénarios possibles** présente désormais la distribution complète, classée par probabilité décroissante. Choisir une méthode, passer à la page suivante ou rechercher une suite exacte ne relance ni entraînement ni appel API.
+
+- 10 matchs : **59 049 possibilités** par méthode, consultables par pages de 50 lignes.
+- 20 matchs : **3 486 784 401 possibilités**. Seule la page demandée est calculée ; la distribution et son empreinte suffisent à conserver tout l'espace sans un fichier contenant des milliards de lignes.
+- **Rechercher un scénario complet** affiche sa probabilité absolue à partir du calcul figé, même après le troisième rang. Le résultat final d'un groupe évalué est consultable de la même manière.
+- **Exporter le catalogue complet (JSON compact)** conserve la distribution, ses paramètres et son empreinte ; **Exporter cette page (CSV)** fournit les lignes visibles, avec leurs rangs absolus. Le JSON n'est pas une liste CSV de milliards de lignes.
+- Un calcul de page est interrompu explicitement après cinq secondes pour garder le serveur disponible. Une page interrompue n'est jamais présentée comme une page vide ou un catalogue terminé. La recherche directe et le téléchargement complet restent disponibles.
+
+Les nouvelles captures utilisent `computed-scenario-proposals-v3` et lient leur catalogue complet à la distribution enregistrée. La première prévision n'est pas remplacée. Les archives anciennes restent inchangées ; si leur distribution complète existe, elle peut être consultée, avec une mention explicite distinguant cette consultation des propositions effectivement enregistrées à l'époque.
+
+Les indicateurs Top1/Top3 et les paris simulés sur les choix explicites restent séparés du catalogue. Retrouver le résultat parmi **toutes** les possibilités ne mesure pas une réussite prédictive et ne crée pas automatiquement des mises sur chaque combinaison. La comparaison des méthodes et des premières sélections reste accessible dans **Premiers choix de référence et comparaison des méthodes**.

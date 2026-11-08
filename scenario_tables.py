@@ -326,7 +326,7 @@ def render_group_coverage(methods, *, key):
 
 
 def render_matrix(methods, *, actual=None, key='scenario_matrix', title=None):
-    """Render a frozen-method matrix and return its complete, unfiltered model."""
+    """Show the complete catalogue, keeping reference choices separate."""
     try:
         matrix = build_matrix(methods, actual=actual)
     except (ValueError, TypeError, KeyError) as error:
@@ -337,6 +337,18 @@ def render_matrix(methods, *, actual=None, key='scenario_matrix', title=None):
     if not matrix['rows']:
         st.caption('Aucun scénario enregistré à comparer.')
         return matrix
+    if any(payload.get('distribution') is not None for payload in methods.values()):
+        import scenario_catalog_panel
+        scenario_catalog_panel.render(methods, actual=actual, key=key)
+        with st.expander('Premiers choix de référence et comparaison des méthodes'):
+            _render_reference_matrix(methods, matrix, actual=actual, key=key, title=title)
+        return matrix
+    _render_reference_matrix(methods, matrix, actual=actual, key=key, title=title)
+    return matrix
+
+
+def _render_reference_matrix(methods, matrix, *, actual, key, title):
+    """Original explicit rankings: these define reference success, not coverage."""
     render_group_coverage(methods, key=key)
     rows = matrix['rows']
     counts = ' · '.join(f'{METHOD_LABELS.get(name, name)} : {len(payload["ranking"])}'
@@ -364,8 +376,8 @@ def render_matrix(methods, *, actual=None, key='scenario_matrix', title=None):
                '(1st : 3,10 · 2nd : 2,10 · Égal : 3,00) pour tous les matchs du scénario. '
                'Ces références ne sont pas des cotes relevées avant match par l’API.')
     if matrix['actual_in_choices'] is False:
-        st.caption('Le scénario réalisé ne figure dans aucun des choix enregistrés par ces méthodes.')
-    return matrix
+        st.caption('Le scénario réalisé ne figure dans aucun des choix de référence enregistrés par ces méthodes. '
+                   'Sa probabilité reste consultable dans le catalogue complet si la distribution a été conservée.')
 
 
 def render_proposal_evidence(methods, *, key=None):
@@ -401,10 +413,14 @@ def render_archive_scope(entry):
             selected = effective_methods(entry)
             computed = entry['proposal_selection'].get('policy', {}).get('version') == 'all-computed-proposals-v1'
             if selected and computed:
-                st.caption('Toutes les propositions produites par les méthodes sont conservées, affichées et évaluées. '
+                complete_catalogue = any(method.get('scenario_catalog') for method in selected.values())
+                st.caption(('Le catalogue complet est conservé avec les distributions ; les choix de référence sont évalués séparément. '
+                            if complete_catalogue else
+                            'Toutes les propositions produites par les méthodes sont conservées, affichées et évaluées. ') +
                            'Pour les groupes de 2 à 20 matchs, la qualification historique ne bloque plus les propositions.')
                 st.caption(' · '.join(
-                    f'{METHOD_LABELS.get(name, name)} : {len(method["ranking"])} choix'
+                    f'{METHOD_LABELS.get(name, name)} : {len(method["ranking"])} choix' +
+                    (' de référence' if complete_catalogue else '')
                     for name, method in selected.items()))
                 render_proposal_evidence(selected)
             elif selected:
@@ -439,9 +455,12 @@ def render_archive_scope(entry):
     except (TypeError, ValueError, KeyError) as error:
         st.warning(f'Ensemble des propositions à vérifier : {error}')
         return
-    if all(value == 3 for value in counts.values()):
-        st.caption('Politique de cette prévision : trois choix par méthode disponible. '
-                   'Le tableau réunit tous leurs scénarios distincts ; les mêmes suites sont regroupées.')
+    if any(method.get('scenario_catalog') for method in methods.values()):
+        st.caption('Catalogue complet conservé par méthode, avec les probabilités de tous les scénarios. '
+                   'Les premiers choix de référence restent séparés pour comparer les résultats.')
+    elif all(value == 3 for value in counts.values()):
+        st.caption('Cette archive conserve trois choix de référence par méthode disponible. '
+                   'Leurs probabilités et les distributions disponibles sont consultables sans modifier la prévision initiale.')
     else:
         st.caption('Le tableau réunit toutes les propositions explicitement conservées, avec leur rang d’origine.')
     unavailable = (entry.get('metadata') or {}).get('unavailable') or {}
@@ -449,5 +468,5 @@ def render_archive_scope(entry):
         st.caption('Méthodes absentes de cette prévision : '+', '.join(
             METHOD_LABELS.get(name, name) for name in unavailable)+'.')
         if set(methods) == {'clubs'}:
-            st.info('Cette prévision utilise uniquement Clubs : ses trois choix sont conservés. '
+            st.info('Cette prévision utilise uniquement Clubs : ses choix de référence sont conservés. '
                     'Les autres méthodes étaient indisponibles pour ce groupe au moment de l’enregistrement.')

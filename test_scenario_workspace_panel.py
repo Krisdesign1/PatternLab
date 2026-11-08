@@ -468,7 +468,11 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
             self.assertFalse(any(item.key=='journal_type' for item in self.at.segmented_control))
             self.at.button(key='journal_browser_open_manual:'+stored[0]['id']).click().run()
             self.assertFalse(self.at.exception)
-            scenarios = next(frame for frame in static_frames(self.at) if 'Scénario complet' in frame.columns)
+            catalogue = next(frame for frame in static_frames(self.at)
+                             if 'Probabilité du groupe (%)' in frame.columns)
+            self.assertEqual(len(catalogue), 9)
+            scenarios = next(frame for frame in static_frames(self.at)
+                             if 'Probabilité enregistrée (moteur choisi)' in frame.columns)
             from manual_scenario_progress import project
             following = project(stored[0], dict(status='pending', actual=None))
             self.assertEqual(list(scenarios['Scénario complet']),

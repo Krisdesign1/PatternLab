@@ -110,6 +110,12 @@ def project(entry, evaluation):
         summary = 'Les scénarios encore possibles attendent les résultats manquants.'
     else:
         summary = group_label+'.'
+    if coverage.get('catalog_complete'):
+        if status == 'settled':
+            summary = ('Un choix de référence s’est réalisé.' if any(row['state']=='hit' for row in rows)
+                       else 'Le résultat est hors des choix de référence enregistrés.')
+        elif contradicted:
+            summary = f'{contradicted}/{len(rows)} choix de référence déjà contredit(s).'
     return dict(status=status, known_count=known, total=size, actual=actual,
                 progress_label=f'{known}/{size} résultats confirmés', group_label=group_label,
                 rows=rows, summary=summary, contradicted_count=contradicted,

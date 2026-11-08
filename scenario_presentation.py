@@ -133,7 +133,7 @@ def render_analysis_matrix(payload):
             methods = adaptive_scenario_proposals.effective_methods(payload['proposal_selection'], core_methods=methods)
             computed = payload['proposal_selection'].get('policy', {}).get('version') == 'all-computed-proposals-v1'
             if computed:
-                st.caption('Toutes les propositions produites par les méthodes sont sauvegardées et présentées. '
+                st.caption('Les distributions complètes et leurs classements sont sauvegardés et consultables. '
                            'La qualification historique reste informative pour les groupes de 2 à 20 matchs.')
                 tables.render_proposal_evidence(methods, key='workspace_proposal_evidence')
             else:

@@ -244,4 +244,4 @@ def table(data=None, *, table_id, **kwargs):
     body = ''.join('<tr>' + ''.join('<td>' + _markdown_cell(value) + '</td>' for value in row) + '</tr>'
                    for row in frame.itertuples(index=False, name=None))
     markup = '<div class="pl-view-rich"><table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>'
-    return html_table(markup, table_id=table_id)
+    return html_table(markup, table_id=table_id, key=kwargs.get('key'))

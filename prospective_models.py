@@ -3,7 +3,8 @@
 Only API-Football histories are accepted. The JSON snapshots contain enough
 information to score any eventual ordered outcome without a model, a database,
 or later match data. Positive probabilities remain normalized over all 3**N
-scenarios; the displayed top three are never rescaled to sum to one.
+scenarios. The top three remain reference metrics; a compact catalogue makes
+every outcome consultable without materializing the Cartesian space.
 """
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -291,6 +292,9 @@ def _method(version, distribution, provenance, *, _component=False, **extra):
     model = _read_distribution(distribution, _component=_component)
     payload = dict(version=version, ranking=_rank(model), distribution=distribution, **provenance, **extra)
     _validate_method(payload, distribution['size'], _component=_component)
+    if distribution['size'] >= 2:
+        from frozen_scenario_catalog import descriptor
+        payload['scenario_catalog'] = descriptor(payload)
     # Copy into ordinary JSON types, also rejecting non-finite provenance fields.
     return json.loads(json.dumps(payload, ensure_ascii=False, allow_nan=False))
 

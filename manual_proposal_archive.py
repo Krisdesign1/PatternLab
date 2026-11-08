@@ -108,6 +108,13 @@ def coverage(entry):
     unique = {tuple(row['sequence']) for payload in saved.values() for row in payload['ranking']}
     adaptive = entry.get('proposal_selection') is not None
     abstained = adaptive and not unique
+    catalogues = {name: method['scenario_catalog'] for name, method in saved.items()
+                  if 'scenario_catalog' in method}
+    if catalogues:
+        from frozen_scenario_catalog import validate_descriptor
+        for name, descriptor in catalogues.items():
+            validate_descriptor(saved[name], descriptor)
+    catalog_names = [name for name in METHOD_ORDER if name in catalogues]
     return dict(version=VERSION, complete=complete, abstained=abstained,
         unavailable_methods=deepcopy((entry.get('proposal_selection') or {}).get('unavailable', {})),
         reason=('Aucun scénario proposé par la règle historique conservée.' if abstained else
@@ -115,6 +122,8 @@ def coverage(entry):
                 'Archive ancienne incomplète : seuls les trois choix du moteur sélectionné sont conservés ; '
                 'les autres propositions affichées ne peuvent pas être vérifiées.'),
         method_names=[name for name in METHOD_ORDER if name in saved],
+        catalog_methods=catalog_names, catalog_total=3**len(entry['fixtures']) if catalogues else 0,
+        catalog_complete=bool(catalogues) and set(catalogues) == set(saved),
         proposal_count=len(unique), selected_method=ENGINE_METHOD[entry['engine']])
 
 

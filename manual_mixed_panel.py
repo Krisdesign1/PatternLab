@@ -80,7 +80,11 @@ def _show(payload):
     else:
         saved = payload['saved']
         coverage = proposals.coverage(saved)
-        st.success(f"Analyse sauvegardée dans Mes analyses · {coverage['proposal_count']} scénario(s) distinct(s).")
+        if coverage.get('catalog_complete'):
+            st.success((f"Analyse sauvegardée dans Mes analyses · {coverage['catalog_total']:,} scénarios possibles "
+                       'conservés avec leurs probabilités, consultables par pages.').replace(',', ' '))
+        else:
+            st.success(f"Analyse sauvegardée dans Mes analyses · {coverage['proposal_count']} scénario(s) distinct(s).")
         st.page_link('ui_pages/journal.py', label='Voir cette analyse sauvegardée', icon=':material/history:',
                      query_params={'manual_analysis': saved['id']})
     st.caption('Moteur choisi : profils des clubs, avec l’historique propre à chaque compétition. '

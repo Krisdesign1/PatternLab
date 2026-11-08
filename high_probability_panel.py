@@ -178,7 +178,7 @@ def _show_table(rows, *, key, offset=0, outcome=None):
 
 def _prepare(report, chosen, outcome, minimum):
     try:
-        with st.spinner('Calcul des trois scénarios du groupe…'):
+        with st.spinner('Calcul de la distribution complète du groupe…'):
             prepared = workspace.prepare_group(report, chosen, outcome=outcome, minimum=minimum)
         prepared.setdefault('metadata', {}).setdefault('selection', {}).setdefault('search', {}).update(
             minimum=minimum, outcome=outcome, query=st.session_state.get('hp_search', '').strip())
@@ -276,7 +276,7 @@ def _mixed_builder(report, rows, now):
         if st.button('Calculer mon scénario mixte', key='hp_mix_prepare', icon=':material/schema:',
                      type='primary', disabled=not 2 <= len(chosen) <= 20):
             try:
-                with st.spinner('Calcul du scénario choisi et des trois premiers scénarios…'):
+                with st.spinner('Calcul du scénario choisi et de la distribution complète…'):
                     prepared = workspace.prepare_group(report, chosen,
                                                        choices={identity: choices[identity] for identity in chosen})
                 prepared.setdefault('metadata', {}).setdefault('selection', {})['history_filter'] = dict(

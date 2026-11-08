@@ -75,7 +75,8 @@ def readonly_archives():
     return result
 
 
-def deploy(bundle, expected):
+def deploy(bundle, expected, *, backup_prefix='table-views', receipt_state='table_views_deployed',
+           storage='browser_preferences_only'):
     require(os.geteuid() == 0, 'Root privileges required')
     manifest, payload = load_bundle(Path(bundle), expected)
     base.FILES = tuple(payload)
@@ -86,7 +87,7 @@ def deploy(bundle, expected):
             'Insufficient space for source rollback')
     proxy_active = subprocess.run(['/usr/bin/systemctl', 'is-active', '--quiet',
                                    'patternlab-proxy.service']).returncode == 0
-    backup = base.BACKUP_ROOT / ('table-views-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    backup = base.BACKUP_ROOT / (backup_prefix + '-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
                                 + '-' + uuid4().hex[:6])
     backup.mkdir(mode=0o700, parents=True)
     (backup / 'manifest.json').write_text(json.dumps(manifest, indent=2))
@@ -132,13 +133,13 @@ def deploy(bundle, expected):
                 (base.ROOT / name).unlink(missing_ok=True)
         start()
         raise
-    receipt = dict(state='table_views_deployed', deployed_at=datetime.now(timezone.utc).isoformat(),
+    receipt = dict(state=receipt_state, deployed_at=datetime.now(timezone.utc).isoformat(),
                    source_sha256=manifest['sha256'], backup_directory=str(backup),
                    records_preserved={name: len(rows) for name, rows in archived.items()},
                    web_healthy=True, public_proxy_resumed=proxy_active,
                    database_writes=0, models_unchanged=True, worker_restarted=False,
                    timers_unchanged=True, authentication_unchanged=True,
-                   network_rules_changed=False, storage='browser_preferences_only')
+                   network_rules_changed=False, storage=storage)
     (backup / 'receipt.json').write_text(json.dumps(receipt, indent=2))
     return receipt
 

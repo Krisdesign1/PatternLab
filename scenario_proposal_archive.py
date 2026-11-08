@@ -1,8 +1,9 @@
 """Validate the exact proposals retained in an archive, without a top-k cutoff.
 
-The saved ranking is the proposal boundary. A saved full distribution can
-verify its probabilities, but does not turn its other possible outcomes into
-proposals. This module never fits a model, generates a ranking or performs I/O.
+The saved ranking is the explicit proposal boundary. New calculations can also
+attest a complete, compact catalogue of their frozen distribution. Catalogue
+membership is not a selection success. Legacy archives are never supplemented
+on read. This module never fits a model, generates a ranking or performs I/O.
 """
 from collections.abc import Mapping
 from copy import deepcopy
@@ -73,6 +74,9 @@ Legacy ranking-only payloads may contain one or two choices.
 """
     validate_size(size)
     ranking = _ranking(payload, size)
+    if 'scenario_catalog' in payload:
+        from frozen_scenario_catalog import validate_descriptor
+        validate_descriptor(payload, payload['scenario_catalog'])
     adaptive = payload.get('proposal_policy')
     if isinstance(adaptive, Mapping) and adaptive.get('version') == COMPUTED_POLICY:
         evidence = adaptive.get('evidence')
@@ -153,6 +157,20 @@ def validate_methods(methods, size=None):
     return {name: validate_method(payload, size) for name, payload in methods.items()}
 
 
+def with_catalogs(methods, size=None):
+    """Attest full frozen outcome spaces for a new calculation only.
+
+    Reading an old archive must call ``validate_methods`` instead. A legacy
+    ranking without a distribution cannot provide a complete catalogue.
+    """
+    saved = validate_methods(methods, size)
+    from frozen_scenario_catalog import descriptor
+    for method in saved.values():
+        if method.get('distribution') is not None and 'scenario_catalog' not in method:
+            method['scenario_catalog'] = descriptor(method)
+    return saved
+
+
 def _manifest(methods, *, unavailable=None, policy='explicit_saved_rankings'):
     """Build integrity fields from a shape-checked set, without model work."""
     if not isinstance(policy, str) or not policy.strip():
@@ -173,6 +191,14 @@ def _manifest(methods, *, unavailable=None, policy='explicit_saved_rankings'):
                 saved_proposal_count=sum(counts.values()), distinct_proposal_count=len(unique),
                 method_digests={name: _digest(methods[name]) for name in sorted(methods)},
                 unavailable=_copy(dict(unavailable)))
+    catalogues = {name: methods[name]['scenario_catalog'] for name in sorted(methods)
+                  if 'scenario_catalog' in methods[name]}
+    if catalogues:
+        # Counts describe outcome spaces, not recommended selections. Keep the
+        # old manifest bytes unchanged when no catalogue was attested at write.
+        info['catalogue_scope'] = 'all_frozen_distribution_outcomes'
+        info['catalogue_counts'] = {name: value['total'] for name, value in catalogues.items()}
+        info['catalogue_digests'] = {name: _digest(value) for name, value in catalogues.items()}
     info['sha256'] = _digest(info)
     return info
 

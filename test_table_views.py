@@ -128,8 +128,8 @@ class SavedTableViewsTests(unittest.TestCase):
                     self.assertIsInstance(identity, ast.Constant, (path.name, node.lineno))
                     routed.append(identity.value)
         self.assertFalse(raw)
-        self.assertEqual(len(routed), 195)
-        self.assertEqual(len(set(routed)), 195)
+        self.assertEqual(len(routed), 196)
+        self.assertEqual(len(set(routed)), 196)
 
 
 if __name__ == '__main__': unittest.main()

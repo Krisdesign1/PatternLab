@@ -1,7 +1,7 @@
 """Plain-language presentation of experimental scenario forecasts."""
 import table_views
 import streamlit as st
-from scenario_predictor import predict_league, MIN_TRAIN, MIN_TEST
+from scenario_predictor import predict_league, fit_sequences, MIN_TRAIN, MIN_TEST
 
 
 @st.cache_data(max_entries=64, show_spinner=False)
@@ -22,6 +22,13 @@ def render_prediction(result):
         st.info(f"Historique insuffisant : {forecast['training']} groupes disponibles. "
                 f'Il en faut au moins {MIN_TRAIN} pour proposer une prédiction expérimentale.')
         return
+    import prospective_models as models
+    import scenario_catalog_panel
+    fit = fit_sequences([block['sequence'] for block in result['blocks']], size)
+    method = models._method('historical-sequence-simulation-v1',
+        models._distribution('frequency', size, fit=fit), {})
+    scenario_catalog_panel.render({'frequency': method}, key='historical_sequence_catalog',
+                                  title='Catalogue complet du modèle historique')
     with st.container(border=True):
         st.write('**Les trois premiers du classement de référence**')
         for i, row in enumerate(forecast['ranking'], 1):

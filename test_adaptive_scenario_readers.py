@@ -102,7 +102,7 @@ class AdaptiveScenarioReaderTests(unittest.TestCase):
         self.assertIn('seuil 11,0000 %', captions)
         self.assertIn('La référence des trois premiers reste séparée', captions)
         self.assertEqual(at.dataframe[0].value['Scénarios retenus'].tolist(), [4])
-        self.assertFalse(at.number_input)
+        self.assertEqual([item.label for item in at.number_input], ['Page du classement complet'])
         self.assertFalse(at.slider)
 
 
