@@ -78,6 +78,30 @@ class ModelTrainingPanelTests(unittest.TestCase):
         self.assertTrue(any('première campagne est déjà verrouillée' in value.value for value in self.at.info))
         self.trainer.assert_not_called()
 
+    def test_controlled_review_view_uses_selected_competition_without_legacy_training(self):
+        with patch.object(panel.model_reassessment_panel, 'render') as render:
+            self.at.segmented_control(key='model_validation_view').set_value('reassessment').run()
+        self.assertFalse(self.at.exception)
+        render.assert_called_once_with(self.rows, '39', 'API-Football')
+        self.trainer.assert_not_called()
+
+    def test_causal_view_does_not_read_all_current_history_or_train_a_model(self):
+        import causal_feature_panel
+        with patch.object(panel,'_rows',side_effect=AssertionError('No full history read')), \
+                patch.object(causal_feature_panel,'render') as render:
+            self.at.segmented_control(key='model_validation_view').set_value('causal').run()
+        self.assertFalse(self.at.exception)
+        render.assert_called_once_with();self.trainer.assert_not_called()
+
+    def test_partition_view_does_not_read_full_history_or_train_a_model(self):
+        import causal_partition_panel
+        with patch.object(panel, '_rows', side_effect=AssertionError('No full history read')), \
+                patch.object(causal_partition_panel, 'render') as render:
+            self.at.segmented_control(key='model_validation_view').set_value('partitions').run()
+        self.assertFalse(self.at.exception)
+        render.assert_called_once_with()
+        self.trainer.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

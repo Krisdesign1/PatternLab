@@ -3,11 +3,13 @@
 Opening or filtering this page never trains, forecasts, imports results, or
 chooses a new rule. All displayed performance comes from the saved report.
 """
+import table_views
 import json
 
 import streamlit as st
 
 import daily_selection_study as study
+from group_size_filter import matches, render as render_group_size_filter
 from scenario_tables import METHOD_LABELS
 from ux_theme import render_page_header
 
@@ -54,7 +56,7 @@ def _table(rows, *, key):
         if column in rows[0]:
             config[column] = st.column_config.NumberColumn(label, help=column,
                 width=width, format='%.2f' if '(%)' in column else None)
-    st.dataframe(rows, hide_index=True, width='stretch', column_config=config, key=key)
+    table_views.dataframe(rows, hide_index=True, width='stretch', column_config=config, key=key, table_id='daily_selection_study_panel:_table:dataframe:1')
 
 
 def _periods(report):
@@ -244,6 +246,7 @@ def _by_league(row):
 
 
 def _report(report):
+    selected_size = render_group_size_filter('selection_study_group_size')
     st.info('Comparatif rétrospectif exploratoire : les données historiques ont déjà été examinées. '
             'La période réservée dans cette expérience ne constitue pas une nouvelle confirmation indépendante.')
     st.caption(f"Copie des données figée le {report.get('created_at', '—')} · "
@@ -260,13 +263,16 @@ def _report(report):
             ('Résultats HT/FT disponibles', 'Compétitions dans les groupes', 'CatBoost ajustés sur apprentissage'),
             (inventory.get('valid_past_results'), len(leagues), trained)):
         column.metric(label, _display(value))
+    st.caption('Inventaire et modèles ajustés : comptes globaux du rapport, toutes tailles confondues.')
     st.markdown('**La règle est choisie sur la période de sélection, puis mesurée sur le test.** '
                 'Les tailles et les populations restent séparées. Aucun modèle n’est promu automatiquement.')
     statistics = report.get('statistics') or {}
     sizes = [row for row in statistics.get('by_size', [])
-             if row.get('rule') or any((phase or {}).get('groups') for phase in (row.get('availability') or {}).values())]
+             if matches(row.get('size'), selected_size)
+             and (row.get('rule') or any((phase or {}).get('groups') for phase in (row.get('availability') or {}).values()))]
     if not sizes:
-        st.info('Aucune cohorte évaluable dans ce rapport. Les exclusions et la couverture restent consultables ci-dessous.')
+        st.info('Aucun groupe correspondant à cette taille dans le comparatif figé.' if selected_size is not None
+                else 'Aucune cohorte évaluable dans ce rapport. Les exclusions et la couverture restent consultables ci-dessous.')
     else:
         cohorts = list(dict.fromkeys(row.get('cohort', 'mono') for row in sizes))
         cohort = st.segmented_control('Population à consulter', cohorts, format_func=_cohort_label,
@@ -326,6 +332,7 @@ def _report(report):
     st.download_button('Télécharger le comparatif figé', json.dumps(report, ensure_ascii=False, indent=2),
                        file_name='patternlab_comparatif_selection.json', mime='application/json',
                        icon=':material/download:', key='selection_study_download')
+    st.caption('Le téléchargement conserve le rapport figé complet, toutes tailles confondues.')
 
 
 def render_selection_study():

@@ -1,4 +1,5 @@
 """Streamlit boundaries for the shared durable workspace, including fragments."""
+import table_views
 from functools import wraps
 from time import monotonic
 from datetime import datetime, timezone
@@ -133,12 +134,12 @@ def _render_snapshot_preview():
             folded = query.casefold()
             rows = [r for r in rows if folded in ' '.join(str(r[k]) for k in
                     ('home','away','competition','country')).casefold()]
-        st.dataframe([{'Heure':datetime.fromisoformat(r['timestamp']).replace(tzinfo=timezone.utc)
+        table_views.dataframe([{'Heure':datetime.fromisoformat(r['timestamp']).replace(tzinfo=timezone.utc)
                          .astimezone(ZoneInfo('Africa/Kinshasa')).strftime('%H:%M'),
                 'Compétition':r['competition'], 'Domicile':r['home'], 'Score':r['score'],
                 'Extérieur':r['away'], 'Statut':r['status_label'],
                 'Pause':r['halftime_score'], '90 minutes':r['regulation_score']} for r in rows],
-                hide_index=True, width='stretch')
+                hide_index=True, width='stretch', table_id='cloud_ui:_render_snapshot_preview:dataframe:1')
     elif view == 'Fortes probabilités':
         outcome = st.selectbox('Résultat recherché dans l’instantané', ['1st','Égal','2nd'],
                                key='cloud_snapshot_outcome')
@@ -147,25 +148,27 @@ def _render_snapshot_preview():
         rows = _current_probability_rows(preview['probabilities'], minimum/100, outcome)
         st.caption('Estimations Clubs calculées sur cette sauvegarde ; aucune nouvelle prévision '
                    'n’est enregistrée et aucun appel API n’est effectué.')
-        st.dataframe([{'Compétition':r['fixture'].get('competition', r['fixture']['league']),
+        table_views.dataframe([{'Compétition':r['fixture'].get('competition', r['fixture']['league']),
                 'Domicile':r['fixture']['home'], 'Extérieur':r['fixture']['away'],
                 **{label:round(100*r['probabilities'][label],2) for label in ('1st','Égal','2nd')}}
-                for r in rows], hide_index=True, width='stretch')
+                for r in rows], hide_index=True, width='stretch', table_id='cloud_ui:_render_snapshot_preview:dataframe:2')
         st.caption(f'{len(rows)} rencontre(s) correspondent au seuil.')
     else:
         entries = sorted(preview['entries'], key=lambda row:row['created_at'], reverse=True)
         labels = {'pending':'En attente','settled':'Terminée','void':'Annulé','unresolved':'À vérifier'}
-        st.dataframe([{'Enregistrée le':r['created_at'], 'Matchs':r.get('size',len(r.get('fixtures',[]))),
+        table_views.dataframe([{'Enregistrée le':r['created_at'], 'Matchs':r.get('size',len(r.get('fixtures',[]))),
             'Affiches':' · '.join(f"{f['home']} — {f['away']}" for f in r.get('fixtures',[])),
             'Statut':labels.get(r.get('status'),r.get('status','À vérifier'))} for r in entries],
-            hide_index=True, width='stretch')
+            hide_index=True, width='stretch', table_id='cloud_ui:_render_snapshot_preview:dataframe:3')
         if entries:
             index = st.selectbox('Ouvrir une analyse sauvegardée', range(len(entries)),
                     format_func=lambda i:f"{entries[i]['created_at']} · {entries[i].get('size','?')} matchs",
                     key='cloud_snapshot_entry')
             entry = entries[index]
             import scenario_tables
-            scenario_tables.render_matrix(entry.get('methods',{}), actual=entry.get('actual'),
+            from adaptive_scenario_proposals import effective_methods
+            scenario_tables.render_archive_scope(entry)
+            scenario_tables.render_matrix(effective_methods(entry), actual=entry.get('actual'),
                                            key='cloud_snapshot_scenarios')
 
 

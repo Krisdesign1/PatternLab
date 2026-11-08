@@ -1,0 +1,39 @@
+[Unit]
+Description=Preserve received PatternLab context in a separate versioned archive
+After=local-fs.target
+ConditionPathExists=/opt/patternlab/data/api_football/fixtures.sqlite3
+
+[Service]
+Type=oneshot
+User=patternlab
+Group=patternlab
+WorkingDirectory=/opt/patternlab
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+ExecStart=/opt/patternlab/.venv/bin/python /opt/patternlab/deployment/linux/run_context_archive.py
+Nice=15
+CPUQuota=50%
+CPUWeight=10
+IOWeight=10
+MemoryHigh=384M
+MemoryMax=512M
+TimeoutStartSec=30min
+TimeoutStopSec=30
+Restart=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+ReadWritePaths=/opt/patternlab/data/api_football
+ReadOnlyPaths=/opt/patternlab/data/api_football/fixtures.sqlite3
+InaccessiblePaths=/opt/patternlab/.streamlit /etc/patternlab

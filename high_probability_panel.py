@@ -1,8 +1,9 @@
-"""Explore today's highest model probabilities across all competitions.
+"""Explore a selected day's highest model probabilities across competitions.
 
 Rendering and filtering only read the local scan. Calendar refresh, scenario
 preparation, and the immutable pre-match journal entry are explicit actions.
 """
+import table_views
 from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 import admin_access
 from cloud_ui import guarded
+from analysis_date import get_selected_day
 
 import api_football as api
 import high_probability_engine as engine
@@ -66,18 +68,29 @@ def _reset_match_page():
     st.session_state['hp_page'] = 0
 
 
-def _is_future(fixture, now):
+def _open_saved_history():
+    saved = st.session_state.get('hp_saved') or {}
+    intent = saved.get('scenario_intent') or {}
+    st.session_state['hp_history_selected'] = 'intent:' + intent['id'] if intent else saved.get('id')
+    st.session_state['hp_view'] = 'groups'
+    st.session_state.update(hp_history_day='all', hp_history_state='all', hp_history_search='',
+                            hp_history_outcome='all', hp_history_verdict='all')
+
+
+def _is_future(fixture, now, day=None):
     try:
         stamp = _stamp(fixture['timestamp'])
-        return stamp > now and stamp.astimezone(LOCAL_ZONE).date() == now.date()
+        target_day = now.astimezone(LOCAL_ZONE).date() if day is None else day
+        return stamp > now and stamp.astimezone(LOCAL_ZONE).date() == target_day
     except (KeyError, ValueError, TypeError):
         return False
 
 
-def _rows(report, now):
-    if report.get('day') != now.date().isoformat():
+def _rows(report, now, day=None):
+    day = now.astimezone(LOCAL_ZONE).date() if day is None else day
+    if report.get('day') != day.isoformat():
         return []
-    return sorted((row for row in report.get('rows', []) if _is_future(row['fixture'], now)),
+    return sorted((row for row in report.get('rows', []) if _is_future(row['fixture'], now, day)),
                   key=lambda row: (-row['max_probability'], _stamp(row['fixture']['timestamp']), int(_id(row))))
 
 
@@ -88,8 +101,8 @@ def _show_unavailable(report):
     missing_history = sum(reasons[name] for name in (
         'insufficient_league_history', 'insufficient_history_days', 'insufficient_club_history'))
     if diagnostic.get('day_count') == 0:
-        st.info('Le calendrier du jour n’est pas chargé sur cette installation. '
-                'Utilisez « Actualiser les matchs du jour » pour charger les affiches.')
+        st.info('Le calendrier de la date sélectionnée n’est pas chargé sur cette installation. '
+                'Utilisez « Actualiser les matchs » pour charger les affiches.')
     elif missing_history:
         st.warning(f'{missing_history} rencontre(s) à venir écartée(s) : '
                    'historique de compétition ou profils des clubs insuffisants. '
@@ -99,7 +112,7 @@ def _show_unavailable(report):
                        'Les résultats du jour ne servent pas à prédire ces mêmes rencontres.')
         st.caption('Il faut au moins 30 résultats de la compétition sur 3 journées UTC antérieures, '
                    'avec 3 précédents à domicile pour le club recevant et 3 à l’extérieur pour son adversaire.')
-        st.caption('Actualiser charge le calendrier du jour ; cela n’importe pas les saisons historiques. '
+        st.caption('Actualiser charge le calendrier de la date sélectionnée ; cela n’importe pas les saisons historiques. '
                    'L’historique doit être disponible sur le serveur en ligne pour tous les appareils.')
         st.page_link('ui_pages/settings.py', label='Importer l’historique API-Football', icon=':material/database:')
         st.page_link('ui_pages/automation.py', label='Voir les données manquantes', icon=':material/checklist:')
@@ -150,7 +163,7 @@ def _table_rows(rows, *, offset=0, outcome=None):
 
 
 def _show_table(rows, *, key, offset=0, outcome=None):
-    st.dataframe(_table_rows(rows, offset=offset, outcome=outcome), hide_index=True, width='stretch',
+    table_views.dataframe(_table_rows(rows, offset=offset, outcome=outcome), hide_index=True, width='stretch',
                  column_config={**{value: st.column_config.NumberColumn(f'{value} (%)', format='%.2f')
                                    for value in VALUES},
                                 'Maximum (%)': st.column_config.NumberColumn(format='%.2f'),
@@ -160,7 +173,7 @@ def _show_table(rows, *, key, offset=0, outcome=None):
                                 'Résultat recherché': st.column_config.MultiselectColumn(
                                     options=list(VALUES), color=['#1D4ED8', '#6D48B5', '#B45309']),
                                 'Résultat le plus probable': st.column_config.MultiselectColumn(
-                                    options=list(VALUES), color=['#1D4ED8', '#6D48B5', '#B45309'])}, key=key)
+                                    options=list(VALUES), color=['#1D4ED8', '#6D48B5', '#B45309'])}, key=key, table_id='high_probability_panel:_show_table:dataframe:1')
 
 
 def _prepare(report, chosen, outcome, minimum):
@@ -201,7 +214,7 @@ def _mixed_builder(report, rows, now):
                'le seuil de probabilité et la recherche du classement ne le limitent pas.')
     ordered = sorted(rows, key=lambda row: (_stamp(row['fixture']['timestamp']), int(_id(row))))
     indexed = {_id(row): row for row in ordered}
-    day = now.date().isoformat()
+    day = report.get('day')
     if st.session_state.get('hp_mix_day') != day:
         st.session_state['hp_mix_day'] = day
         st.session_state['hp_mix_ids'] = []
@@ -282,7 +295,9 @@ def _prepared_detail(report, indexed, now):
     saved = st.session_state.get('hp_saved')
     source = saved if saved else prepared
     fixtures = source.get('fixtures', [])
-    if any(not _is_future(fixture, now) or str(fixture['match_id']) not in indexed for fixture in fixtures):
+    day = datetime.strptime(report['day'], '%Y-%m-%d').date()
+    if (prepared.get('day', report['day']) != report['day'] or
+            any(not _is_future(fixture, now, day) or str(fixture['match_id']) not in indexed for fixture in fixtures)):
         _clear_prepared()
         st.info('Le groupe a expiré : un coup d’envoi est passé ou le calendrier a changé. Choisissez un nouveau groupe.')
         return
@@ -315,9 +330,12 @@ def _prepared_detail(report, indexed, now):
         st.subheader('Scénario recherché', icon=':material/manage_search:')
         scenario_tables.render_sequence(requested['sequence'])
         st.metric('Probabilité du scénario recherché', f"{100 * requested['probability']:.2f} %")
-        st.caption('Ce scénario suit le résultat recherché pour chaque match. Il peut être différent des trois scénarios les mieux classés ci-dessous.')
-    scenario_tables.render_matrix(saved['methods'] if saved else prepared['methods'], key='hp_scenario_matrix',
-                                  title='Scénarios enregistrés avant match' if saved else 'Les trois scénarios les mieux classés · Clubs')
+        st.caption('Ce scénario suit le résultat recherché pour chaque match. Il peut être différent des scénarios retenus par le moteur.')
+    from adaptive_scenario_proposals import effective_methods
+    if saved:
+        scenario_tables.render_archive_scope(saved)
+    scenario_tables.render_matrix(effective_methods(saved) if saved else prepared['methods'], key='hp_scenario_matrix',
+                                  title='Scénarios enregistrés avant match' if saved else 'Classement de référence · Clubs')
     if not saved and not admin_access.can_admin():
         st.caption('Calcul local non enregistré. Une connexion administrateur est nécessaire pour la confirmation API avant match.')
     if saved:
@@ -330,15 +348,8 @@ def _prepared_detail(report, indexed, now):
             st.info('Ce groupe avait déjà été enregistré. Sa première prévision est conservée et affichée ci-dessus.')
         else:
             st.success('Analyse enregistrée avant match. Ses scénarios restent figés et les résultats seront suivis dans l’historique.')
-        if st.button('Voir le suivi de cette analyse', icon=':material/arrow_forward:', key='hp_open_journal'):
-            if saved.get('group_kind') == 'mixed':
-                day = now.date().isoformat()
-                st.session_state['daily_context'] = (day, 'today', day)
-                st.session_state['daily_view'] = 'today'
-                st.session_state['daily_selected'] = 'intent:' + intent['id'] if intent else saved['id']
-                st.switch_page('ui_pages/daily.py')
-            else:
-                st.switch_page('ui_pages/journal.py', query_params={'analysis': saved['id']})
+        st.button('Voir le suivi de cette analyse', icon=':material/arrow_forward:', key='hp_open_journal',
+                  on_click=_open_saved_history)
     elif st.button('Enregistrer avant match', icon=':material/bookmark_add:', type='primary', key='hp_record', disabled=not admin_access.can_admin()):
         admin_access.require_admin()
         try:
@@ -353,37 +364,64 @@ def _prepared_detail(report, indexed, now):
 @guarded
 def render_high_probabilities():
     now = _now()
+    day = get_selected_day(now)
+    previous_day = st.session_state.get('hp_selected_day')
+    if previous_day is not None and previous_day != day.isoformat():
+        _clear_prepared()
+        for key in ('hp_mix_ids', 'hp_mix_choices', 'hp_mix_widget_ids', 'hp_mix_day', 'hp_manual', 'hp_page'):
+            st.session_state.pop(key, None)
+    st.session_state['hp_selected_day'] = day.isoformat()
     render_page_header('Fortes probabilités',
-                       'Les plus hauts pourcentages du jour, toutes compétitions confondues.',
-                       eyebrow='MATCHS DU JOUR · CLASSEMENT PAR PROBABILITÉ', icon=':material/trending_up:')
+                       f"Les plus hauts pourcentages du {day:%d/%m/%Y}, toutes compétitions confondues.",
+                       eyebrow='DATE SÉLECTIONNÉE · CLASSEMENT PAR PROBABILITÉ', icon=':material/trending_up:')
+    view = st.segmented_control('Consulter les fortes probabilités', ['ranking', 'history', 'groups'],
+        format_func={'ranking': 'Classement de la date choisie', 'history': 'Historique des probabilités',
+                     'groups': 'Mes groupes enregistrés'}.get,
+        default='ranking', required=True, key='hp_view', persist_state='page')
+    if view == 'history':
+        from high_probability_archive_panel import render_archive_history
+        render_archive_history(now)
+        return
+    if view == 'groups':
+        from high_probability_history_panel import render_history
+        render_history(now)
+        return
     st.caption('Modèle Clubs · API-Football · Heure de Kinshasa · Rencontres à venir uniquement.')
     st.caption('Ces pourcentages sont des estimations du modèle, pas des taux de réussite mesurés.')
+    st.caption('Les probabilités de tous les matchs calculables sont archivées automatiquement avant match, '
+               'indépendamment de vos groupes et des filtres de ce classement.')
     try:
-        report = workspace.load_scan()
+        report = workspace.load_scan(now=now, day=day)
     except ERRORS as error:
         st.error(str(error))
         return
-    if st.button('Actualiser les matchs du jour', icon=':material/refresh:', key='hp_refresh', disabled=not admin_access.can_admin()):
+    if st.button('Actualiser les matchs', icon=':material/refresh:', key='hp_refresh', disabled=not admin_access.can_admin()):
         admin_access.require_admin()
         try:
-            with st.spinner('Actualisation du calendrier du jour et des probabilités…'):
-                report = workspace.refresh_scan()
+            with st.spinner('Actualisation du calendrier sélectionné et des probabilités…'):
+                report = workspace.refresh_scan(day=day)
             _clear_prepared()
         except ERRORS as error:
             st.error(str(error))
     if not report:
-        st.info('Aucun calendrier local disponible. Actualisez les matchs du jour pour lancer la recherche.')
+        st.info('Aucun calendrier local disponible. Actualisez les matchs pour lancer la recherche.')
         return
-    rows = _rows(report, now)
+    rows = _rows(report, now, day)
     diagnostic = report.get('diagnostics') or {}
-    st.caption(f"Matchs du {now.strftime('%d/%m/%Y')} · Calcul local : {_generated(report.get('generated_at'))} · "
+    st.caption(f"Matchs du {day.strftime('%d/%m/%Y')} · Calcul local : {_generated(report.get('generated_at'))} · "
                f"Calendrier API : {_generated(report.get('calendar_updated_at'))}")
-    if report.get('day') != now.date().isoformat():
+    if report.get('day') != day.isoformat():
         _clear_prepared()
         for key in ('hp_mix_ids', 'hp_mix_choices', 'hp_mix_widget_ids', 'hp_mix_day'):
             st.session_state.pop(key, None)
-        st.info('La journée a changé. Actualisez le calendrier pour rechercher uniquement les matchs d’aujourd’hui.')
+        st.info('La journée a changé. Actualisez le calendrier pour rechercher les matchs de la date sélectionnée.')
         return
+    if admin_access.can_admin():
+        try:
+            workspace.archive_scan(report)
+        except ERRORS:
+            st.warning('L’archivage automatique est indisponible. Les pourcentages ci-dessous restent consultables, '
+                       'mais leur conservation dans l’historique n’est pas confirmée.')
     if not rows:
         _show_unavailable(report)
     all_rows = rows
@@ -456,7 +494,7 @@ def render_high_probabilities():
         st.session_state['hp_group_context'] = group_context
         _clear_prepared(kind='ranking')
     with st.container(horizontal=True):
-        st.metric('Matchs du jour dans le calendrier', diagnostic.get('day_count', len(rows) + len(report.get('excluded', []))))
+        st.metric('Matchs de cette date dans le calendrier', diagnostic.get('day_count', len(rows) + len(report.get('excluded', []))))
         st.metric('Matchs à venir évaluables', len(rows))
         st.metric(f'{outcome} · Au moins {minimum * 100:g} %', len(qualified))
         st.metric('Sous le seuil', len(rows) - len(qualified))
@@ -512,8 +550,8 @@ def render_high_probabilities():
         with st.expander('Rencontres écartées et couverture des données'):
             st.caption('Les rencontres terminées, commencées, reportées ou sans historique suffisant '
                        'ne sont pas proposées pour une nouvelle analyse avant match.')
-            st.dataframe([{'Match': ' — '.join(str((item.get('fixture') or {}).get(name, ''))
+            table_views.dataframe([{'Match': ' — '.join(str((item.get('fixture') or {}).get(name, ''))
                                              for name in ('home', 'away')).strip(' —') or str(item.get('match_id', '—')),
                            'Raison': item.get('detail') or item.get('reason', 'Indisponible')}
-                          for item in excluded], hide_index=True, width='stretch', key='hp_excluded')
+                          for item in excluded], hide_index=True, width='stretch', key='hp_excluded', table_id='high_probability_panel:render_high_probabilities:dataframe:1')
     render_probability_reliability()

@@ -9,6 +9,7 @@ import api_football_panel
 import database
 import scenario_workspace_panel
 import workspace_sources
+import halftime_collection_panel
 
 
 class WorkspaceSettingsTests(unittest.TestCase):
@@ -20,6 +21,7 @@ class WorkspaceSettingsTests(unittest.TestCase):
                  patch.object(database,'init_db',side_effect=AssertionError('SQLite must remain retired')), \
                  patch.object(database,'load_coupons',side_effect=AssertionError('No manual data')), \
                  patch.object(api_football_panel,'render_api_football') as render, \
+                 patch.object(halftime_collection_panel,'render_compact'), \
                  patch.object(scenario_workspace_panel,'_snapshot',return_value={'competitions':{},'fixtures':[],'day_count':0,'usable_count':0,'updated_at':None}), \
                  patch.object(api_football.ApiFootballClient,'get',side_effect=AssertionError('No automatic API call')) as network:
                 at=AppTest.from_file('app.py',default_timeout=20)

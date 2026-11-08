@@ -1,0 +1,40 @@
+[Unit]
+Description=PatternLab single automation cycle (deliberate cutover required)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/etc/patternlab/worker-cutover-approved
+
+[Service]
+Type=oneshot
+User=patternlab
+Group=patternlab
+WorkingDirectory=/opt/patternlab
+Environment=HOME=/var/lib/patternlab
+Environment=XDG_CACHE_HOME=/var/lib/patternlab/cache
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PATTERNLAB_STORAGE_MODE=local
+UMask=0077
+StateDirectory=patternlab
+StateDirectoryMode=0700
+ExecStartPre=/opt/patternlab/.venv/bin/python /opt/patternlab/deployment/linux/preflight.py --root /opt/patternlab --worker
+# The original CLI's --once also prepares models. The wrapper calls its
+# unchanged run_once API with BOTH training paths disabled for the freeze.
+ExecStart=/opt/patternlab/.venv/bin/python /opt/patternlab/deployment/linux/run_worker.py --once
+# Training can exceed the timer interval. Keep this unit active until it exits.
+TimeoutStartSec=infinity
+TimeoutStopSec=300
+Restart=no
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadWritePaths=/opt/patternlab/data

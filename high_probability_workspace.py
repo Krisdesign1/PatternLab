@@ -5,13 +5,14 @@ displayed probabilities; no model selection, training or history import occurs.
 """
 
 import cloud_storage
-from collections import Counter
+from collections import Counter, OrderedDict
 from copy import deepcopy
-from datetime import datetime, time, timezone
+from datetime import date, datetime, time, timezone
 from functools import lru_cache
 from hashlib import sha256
 import json
 from pathlib import Path
+from threading import RLock
 from zoneinfo import ZoneInfo
 
 import api_football as api
@@ -24,6 +25,8 @@ from match_predictor import VERSION as CLUB_VERSION
 
 VERSION = 'high-probability-v3'
 ZONE = ZoneInfo('Africa/Kinshasa')
+_ARCHIVED_SCANS = OrderedDict()
+_ARCHIVE_LOCK = RLock()
 
 
 def _now(value=None):
@@ -38,16 +41,32 @@ def _root(root):
 
 
 @lru_cache(maxsize=4)
-def _cached_scan(path, modified, size, period_start):
+def _cached_targets(path, modified, size, target_day):
+    return calendar.local_day_matches(date.fromisoformat(target_day), ZONE.key, path=path)
+
+
+def _day(value, current):
+    value = current.astimezone(ZONE).date() if value is None else value
+    if type(value) is not date:
+        raise ValueError('La date des matchs doit être une date de calendrier.')
+    return value
+
+
+@lru_cache(maxsize=4)
+def _cached_scan(path, modified, size, period_start, target_day, history_before):
     # History has an exclusive UTC-day cutoff. Within that UTC/Kinshasa
     # calendar period, unchanged data yield exactly the same probabilities.
     # Include all NS targets from the period's start, then expire their
     # kickoffs on every read instead of rescanning the history every minute.
     path = Path(path)
+    read_started=datetime.now(timezone.utc)
+    source_signature=api.data_signature(path)
     current = datetime.fromisoformat(period_start)
+    day = date.fromisoformat(target_day)
     if api.active_store(path) is not None:
-        day = current.astimezone(ZONE).date()
-        raw = calendar.local_day_matches(day, ZONE.key, path=path)
+        # Load targets inside this measured read window. The outer cache can
+        # contain R1 even when the source already moved to R2 before this call.
+        raw = calendar.local_day_matches(day,ZONE.key,path=path)
         leagues = set()
         for item in raw:
             try:
@@ -55,23 +74,41 @@ def _cached_scan(path, modified, size, period_start):
             except ValueError:
                 continue
         history, audit = api.load_matches(path, leagues=leagues,
-            end=current.date().isoformat(), statuses=api.FINISHED_STATUSES)
-        report = engine.scan(raw, now=current, history=history, history_issues=audit['issues'])
+            end=history_before, statuses=api.FINISHED_STATUSES)
+        report = engine.scan(raw, now=current, day=day, history=history, history_issues=audit['issues'])
     else:
-        report = engine.scan(api.load_fixtures(path), now=current)
-    report['generated_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+        report = engine.scan(api.load_fixtures(path), now=current, day=day)
+    signature_end=api.data_signature(path)
+    read_finished=datetime.now(timezone.utc)
+    from probability_time_evidence import read_receipt
+    report['source_read_receipt']=read_receipt(read_started,read_finished,source_signature,
+        signature_end,report['before'],report['rows'])
+    report['generated_at'] = read_finished.isoformat()
     return report
 
 
-def load_scan(root=None, now=None):
+def load_scan(root=None, now=None, *, day=None):
     """Read locally; reuse probabilities until the file or either day changes."""
     current = _now(now)
+    target_day = _day(day, current)
     path = _root(root) / 'fixtures.json'
     local_day = current.astimezone(ZONE).date()
     period_start = max(datetime.combine(local_day, time.min, ZONE).astimezone(timezone.utc),
                        datetime.combine(current.date(), time.min, timezone.utc)).isoformat()
     _, revision, identity = api.data_signature(path)
-    report = deepcopy(_cached_scan(str(path), revision, identity, period_start))
+    targets = _cached_targets(str(path), revision, identity, target_day.isoformat())
+    future_stamps = []
+    for raw in targets:
+        try:
+            stamp = calendar._stamp(raw)
+            calendar.fixture_from_raw(raw)
+            if api._status_short(raw) == 'NS' and stamp > current:
+                future_stamps.append(stamp)
+        except ValueError:
+            continue
+    cutoff = min(current.date(), min(future_stamps, default=current).date()).isoformat()
+    report = deepcopy(_cached_scan(str(path), revision, identity, period_start,
+                                  target_day.isoformat(), cutoff))
     # A cached period must never keep a match whose kickoff has just passed.
     kept, expired = [], []
     for row in report['rows']:
@@ -93,17 +130,88 @@ def load_scan(root=None, now=None):
     return report
 
 
+def archive_scan(report=None, root=None, clock=None, *, day=None):
+    """Automatically retain the full locally calculated ranking before kickoff.
+
+    Kept separate from load_scan's read-only contract. No probability threshold,
+    search, selected category or group membership limits this archive.
+    """
+    import high_probability_archive as archive
+    from probability_implementation import code_hashes
+    clock = (lambda: datetime.now(timezone.utc)) if clock is None else clock
+    current = _now(clock())
+    if report is None:
+        report = load_scan(root=root, now=current, day=day)
+    if not report:
+        return dict(created=0, existing=0, skipped=0)
+    root = _root(root)
+    fingerprint = _digest(dict(source=report.get('source'), version=report.get('version'),
+        day=report.get('day'), before=report.get('before'),
+        history=report.get('history_fingerprint'), rows=report.get('rows'),
+        source_read_receipt=report.get('source_read_receipt'),model_code_sha256=code_hashes()))
+    path = archive.database_path(root)
+    def signature():
+        values = []
+        for name in (path, Path(str(path)+'-wal')):
+            try:
+                stat = name.stat()
+                values.append((stat.st_ino, stat.st_size, stat.st_mtime_ns))
+            except FileNotFoundError:
+                values.append(None)
+        return tuple(values)
+    key = str(root.resolve())
+    with _ARCHIVE_LOCK:
+        previous = _ARCHIVED_SCANS.get(key)
+        if previous and previous['fingerprint'] == fingerprint and previous['signature'] == signature():
+            return dict(created=0, existing=previous['count'], skipped=0)
+        result = archive.capture(report, root=root, clock=clock)
+        if not result['skipped']:
+            _ARCHIVED_SCANS[key] = dict(fingerprint=fingerprint, signature=signature(),
+                                      count=result['created']+result['existing'])
+            _ARCHIVED_SCANS.move_to_end(key)
+            while len(_ARCHIVED_SCANS) > 8:
+                _ARCHIVED_SCANS.popitem(last=False)
+        return result
+
+
 @cloud_storage.persisted
-def refresh_scan(root=None, now=None):
+def refresh_archive_results(match_ids, root=None, fetch=None):
+    """Explicit provider refresh for archived individual fixtures, in batches."""
+    import high_probability_archive as archive
+    root = _root(root)
+    saved = {entry['fixture']['match_id'] for entry in archive.list_entries(root=root)}
+    identities = sorted({str(mid) for mid in match_ids}, key=int)
+    if not identities or not set(identities) <= saved:
+        raise ValueError('Choisissez des matchs présents dans l’archive des probabilités.')
+    key = ''
+    if fetch is None:
+        client, key = calendar._client()
+        fetch = lambda **params: calendar._response_fixtures(client.fixtures(**params))
+    try:
+        for index in range(0, len(identities), 20):
+            batch = identities[index:index+20]
+            fresh = fetch(ids='-'.join(batch), timezone='UTC')
+            if (not isinstance(fresh, list) or len(fresh) != len(batch) or
+                    {str(row.get('fixture', {}).get('id')) for row in fresh} != set(batch)):
+                raise ValueError('Réponse API incomplète : les résultats de ce lot ne sont pas modifiés.')
+            api.save_fixtures(fresh, root / 'fixtures.json')
+        return archive.reconcile(root=root)
+    except api.ApiFootballError as error:
+        raise api.ApiFootballError(calendar._safe(error, key)) from None
+
+
+@cloud_storage.persisted
+def refresh_scan(root=None, now=None, *, day=None):
     """One explicit calendar request, no training or multi-season imports."""
     current = _now(now)
-    day = current.astimezone(ZONE).date()
-    calendar.refresh_day(day, timezone_name=ZONE.key, path=_root(root)/'fixtures.json')
+    target_day = _day(day, current)
+    calendar.refresh_day(target_day, timezone_name=ZONE.key, path=_root(root)/'fixtures.json')
     after = _now(now)
-    if after.astimezone(ZONE).date() != day:
+    if day is None and after.astimezone(ZONE).date() != target_day:
         raise ValueError('La journée a changé pendant l’actualisation ; relancez la recherche.')
     _cached_scan.cache_clear()
-    return load_scan(root=root, now=after)
+    _cached_targets.cache_clear()
+    return load_scan(root=root, now=after, **({'day': target_day} if day is not None else {}))
 
 
 def _digest(value):
@@ -114,9 +222,9 @@ def _digest(value):
 def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choices=None):
     """Freeze the selected, displayed Clubs distributions without recalculating."""
     current = _now(now)
-    day = current.astimezone(ZONE).date().isoformat()
-    if report.get('source') != 'API-Football' or report.get('day') != day:
-        raise ValueError('Relancez la recherche sur les matchs du jour à Kinshasa.')
+    day = date.fromisoformat(report.get('day', '')).isoformat()
+    if report.get('source') != 'API-Football' or day < current.astimezone(ZONE).date().isoformat():
+        raise ValueError('Relancez la recherche sur une date à venir à Kinshasa.')
     ids = [str(value) for value in match_ids]
     if len(ids) != len(set(ids)) or not 2 <= len(ids) <= 20:
         raise ValueError('Choisissez entre 2 et 20 matchs distincts.')
@@ -141,17 +249,22 @@ def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choic
             if row['search_probability'] < minimum:
                 raise ValueError('Un résultat choisi est inférieur au seuil demandé.')
     fixtures = journal._fixtures([row['fixture'] for row in chosen], allow_mixed=True)
+    if any(journal._stamp(row['timestamp']).astimezone(ZONE).date().isoformat() != day for row in fixtures):
+        raise ValueError('Les rencontres doivent appartenir à la date de la recherche.')
     journal._check_time(fixtures, current, True)
-    before = fixtures[0]['timestamp'][:10]
     history_before = report['before']
-    datetime.strptime(history_before, '%Y-%m-%d')
-    if history_before > before or history_before > current.date().isoformat():
+    if (not isinstance(history_before, str) or date.fromisoformat(history_before).isoformat() != history_before):
+        raise ValueError('La coupure historique doit être une journée UTC canonique.')
+    if history_before > fixtures[0]['timestamp'][:10] or history_before > current.date().isoformat():
         raise ValueError('La coupure historique doit précéder les rencontres à prévoir.')
+    context = dict(models.group_context(fixtures, decision_at=current), training_before=history_before)
     grouped = {}
     for index, row in enumerate(chosen):
         if row.get('personalized') is not True:
             raise ValueError('Les profils des deux clubs doivent être exploitables.')
-        grouped.setdefault(row['fixture']['league'], []).append((index, row))
+        if row.get('before') != history_before:
+            raise ValueError('Les probabilités sélectionnées doivent utiliser la coupure historique de la recherche.')
+        grouped.setdefault(fixtures[index]['league'], []).append((index, row))
     leagues = sorted(grouped, key=int)
     components, competitions = [], {}
     for league in leagues:
@@ -162,7 +275,8 @@ def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choic
         fingerprints = {row['history_fingerprint'] for _, row in members if row.get('history_fingerprint')}
         if len(fingerprints) > 1:
             raise ValueError('Les profils de cette compétition utilisent des historiques différents.')
-        provenance = dict(source='API-Football', league=league, training_before=before,
+        child_context = models._context([fixtures[index] for index, _ in members], history_before, current)
+        provenance = dict(source='API-Football', league=league, **child_context,
                           history_cutoff_exclusive=history_before,
                           history_fingerprint=next(iter(fingerprints), _digest(details)),
                           training_matches=members[0][1]['training'], training_groups=0)
@@ -174,7 +288,7 @@ def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choic
         competitions[league] = dict(competition=fixture.get('competition') or league,
                                     country=fixture.get('country') or 'International')
     provenance = dict(source='API-Football', provider='api-football', league='mixed', leagues=leagues,
-                      group_kind='mixed', training_before=before, history_cutoff_exclusive=history_before,
+                      group_kind='mixed', **context, history_cutoff_exclusive=history_before,
                       fixtures=fixtures, assumes_block_independence=True,
                       correction_scope='within_each_league_only', selection_policy=VERSION)
     distribution = dict(schema=models.DISTRIBUTION_VERSION, type='block_product', size=len(fixtures),
@@ -186,7 +300,7 @@ def prepare_group(report, match_ids, now=None, *, outcome=None, minimum=0, choic
     requested = (dict(sequence=sequence, probability=models.probability_for_sequence(method, sequence))
                  if choices is not None or outcome is not None else None)
     search_kind = 'mixed' if choices is not None else outcome
-    selection = dict(policy=VERSION,
+    selection = dict(policy=VERSION, match_day=day,
                      ranking_metric=('custom_outcome_clubs_probability' if choices is not None else
                                      'outcome_clubs_probability' if outcome is not None else 'maximum_clubs_probability'),
                      searched_outcome=outcome, requested_scenario=requested,
@@ -231,8 +345,10 @@ def record_group(prepared, root=None, clock=None, fetch=None):
                    for field in ('league', 'home_id', 'away_id', 'home', 'away', 'timestamp')) for row in fixtures):
             raise ValueError('Les affiches ont changé depuis la première prévision figée de ce groupe.')
     current = _now(clock())
-    if prepared.get('source') != 'API-Football' or prepared.get('day') != current.astimezone(ZONE).date().isoformat():
-        raise ValueError('Cette analyse ne concerne plus la journée actuelle.')
+    day = date.fromisoformat(prepared.get('day', '')).isoformat()
+    if (prepared.get('source') != 'API-Football' or day < current.astimezone(ZONE).date().isoformat()
+            or any(journal._stamp(row['timestamp']).astimezone(ZONE).date().isoformat() != day for row in fixtures)):
+        raise ValueError('Cette analyse ne concerne plus une date à venir valide.')
     journal._check_time(fixtures, current, True)
     for payload in prepared['methods'].values():
         models.validate_method(payload, len(fixtures))
@@ -253,7 +369,8 @@ def record_group(prepared, root=None, clock=None, fetch=None):
         for fixture in fixtures:
             raw = by_id[fixture['match_id']]
             confirmed = calendar.fixture_from_raw(raw)
-            if api._status_short(raw) != 'NS' or any(str(confirmed[field]) != str(fixture[field])
+            if api._status_short(raw) != 'NS' or any(
+                    (str(confirmed[field]).strip() if field in ('home', 'away') else str(confirmed[field])) != str(fixture[field])
                     for field in ('league', 'home_id', 'away_id', 'home', 'away', 'timestamp')):
                 raise ValueError('Une affiche, son statut ou son horaire a changé : actualisez la recherche.')
         journal._check_time(fixtures, _now(clock()), True)

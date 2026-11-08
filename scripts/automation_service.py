@@ -242,7 +242,16 @@ def _prepare_models(root=None, *, config=None):
     arguments = {'root': _paths(root)['data']}
     if config is not None:
         arguments['config'] = config
-    return module.run_cycle(**arguments)
+    report=module.run_cycle(**arguments)
+    # The first campaign stays frozen. A separate daily recipe can refresh its
+    # weights without publishing over that campaign or its saved forecasts.
+    try:
+        daily=importlib.import_module('daily_learning_worker')
+        report['daily_learning']=daily.run_training(**arguments)
+    except (ValueError,OSError,RuntimeError):
+        report['daily_learning']={'status':'error','prepared':0,
+            'reason':'Préparation quotidienne interrompue ; modèle courant conservé.'}
+    return report
 
 
 def run_once(root=None, *, dry_run=False, config=None, skip_models=False, max_duration_seconds=None):
@@ -282,6 +291,11 @@ def _run_once(worker, root, *, dry_run, config, skip_models, max_duration_second
         if model_report.get('status') not in ('idle', 'disabled'):
             summary['models_status'] = model_report['status']
             summary['models_prepared'] = model_report.get('prepared', 0)
+        daily=model_report.get('daily_learning',{})
+        if daily.get('status') not in (None,'disabled','not_started'):
+            summary['daily_learning']={key:daily[key] for key in
+                ('status','prepared','checked','candidates_unchanged','competitions','remaining_today','league','candidate_id')
+                if key in daily}
     return summary
 
 

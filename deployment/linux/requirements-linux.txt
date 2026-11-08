@@ -1,0 +1,5 @@
+-c constraints-frozen.txt
+-r ../../requirements.txt
+# Explicitly request the scientific dependencies covered by the frozen runtime.
+numpy==2.5.3
+scipy==1.18.1

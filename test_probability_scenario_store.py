@@ -65,6 +65,33 @@ class ProbabilityScenarioStoreTests(unittest.TestCase):
                             selection() if chosen is None else chosen, path=self.path,
                             clock=kwargs.get('clock', lambda: NOW+timedelta(minutes=1)))
 
+    def test_tomorrow_choice_is_allowed_but_another_local_day_or_metadata_mismatch_is_rejected(self):
+        entry = forecast()
+        for row in entry['fixtures']:
+            row['timestamp'] = row['timestamp'].replace('2026-10-22', '2026-10-23')
+        entry['id'] = journal._group_key(entry['fixtures'])
+        entry['metadata']['match_day'] = '2026-10-23'
+        intent = self.record(entry)
+        self.assertEqual(intent['selection']['match_day'], '2026-10-23')
+        self.assertEqual(datetime.fromisoformat(intent['created_at']), NOW+timedelta(minutes=1))
+        self.assertEqual(intent['selection']['match_probabilities'][0]['probabilities'], P[0])
+        midnight = NOW.replace(hour=23, minute=1)
+        self.assertFalse(self.record(entry, clock=lambda: midnight)['created'])
+        invalid = deepcopy(entry)
+        invalid['metadata']['match_day'] = '2026-10-22'
+        with self.assertRaises(store.ScenarioStoreError):
+            self.record(invalid)
+        invalid = deepcopy(entry)
+        invalid['fixtures'][1]['timestamp'] = '2026-10-24T15:00:00'
+        invalid['id'] = journal._group_key(invalid['fixtures'])
+        with self.assertRaises(store.ScenarioStoreError):
+            self.record(invalid)
+        chosen = dict(selection(), match_day='2026-10-24')
+        with self.assertRaises(store.ScenarioStoreError):
+            self.record(entry, chosen)
+        with self.assertRaises(store.ScenarioStoreError):
+            self.record(entry, clock=lambda: NOW+timedelta(days=1, hours=5))
+
     def test_read_of_absent_storage_creates_neither_file_nor_parent(self):
         self.assertEqual(store.list_intents(self.path), [])
         self.assertFalse(self.path.exists())

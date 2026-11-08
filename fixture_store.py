@@ -17,6 +17,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 from uuid import uuid4
+import fixture_import_policy as import_policy
 
 
 SCHEMA_VERSION = 1
@@ -118,6 +119,50 @@ def _schema(connection):
     )
     for statement in statements:
         connection.execute(statement)
+    _import_schema(connection)
+
+
+def _import_schema(connection):
+    """Additive, lazy-on-write schema; never backfill or alter reads."""
+    connection.execute('''CREATE TABLE IF NOT EXISTS fixture_import_revisions (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT, match_id TEXT NOT NULL,
+        observed_at_utc TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL UNIQUE)''')
+    connection.execute('CREATE INDEX IF NOT EXISTS fixture_import_match ON fixture_import_revisions(match_id,sequence)')
+    for action in ('UPDATE', 'DELETE'):
+        connection.execute(f'''CREATE TRIGGER IF NOT EXISTS fixture_import_no_{action.lower()}
+            BEFORE {action} ON fixture_import_revisions
+            BEGIN SELECT RAISE(ABORT, 'Import observations are append-only'); END''')
+
+
+def _insert_observation(connection, record):
+    import_policy.validate_record(record)
+    connection.execute('''INSERT INTO fixture_import_revisions(match_id,observed_at_utc,payload,digest)
+                          VALUES (?,?,?,?)''',
+                       (record['match_id'], record['observed_at_utc'], _json(record), record['id']))
+
+
+def _observations(connection, ids=None):
+    tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'fixture_import_revisions' not in tables:
+        return []
+    rows = []
+    if ids is None:
+        rows = connection.execute('SELECT sequence,payload,digest FROM fixture_import_revisions ORDER BY sequence').fetchall()
+    else:
+        identities = list(dict.fromkeys(map(str, ids)))
+        for offset in range(0, len(identities), 500):
+            chunk = identities[offset:offset+500]
+            rows.extend(connection.execute('SELECT sequence,payload,digest FROM fixture_import_revisions '
+                'WHERE match_id IN (' + ','.join('?' for _ in chunk) + ') ORDER BY sequence', chunk).fetchall())
+        rows.sort(key=lambda row: row['sequence'])
+    result, latest = [], {}
+    for row in rows:
+        record = import_policy.validate_record(json.loads(row['payload']))
+        if record['id'] != row['digest'] or record['previous_observation'] != latest.get(record['match_id']):
+            raise FixtureStoreError('La chronologie des imports locaux est incohérente.')
+        latest[record['match_id']] = record['id']
+        result.append(record)
+    return result
 
 
 def _projection(raw):
@@ -142,7 +187,10 @@ def _projection(raw):
         pass
     normalized, issue = None, None
     expected = int(status is None or status in FINISHED)
-    if status is None:
+    conflict = import_policy.quality_error(raw)
+    if conflict:
+        expected, issue = 1, conflict
+    elif status is None:
         issue = 'Statut du match absent ou invalide'
     elif status in FINISHED:
         try:
@@ -157,9 +205,7 @@ _UPSERT = '''INSERT INTO fixtures
     VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(match_id) DO UPDATE SET
     kickoff_utc=excluded.kickoff_utc, league=excluded.league, season=excluded.season,
     status=excluded.status, raw_json=excluded.raw_json,
-    normalized_json=excluded.normalized_json, issue=excluded.issue, expected=excluded.expected
-    WHERE fixtures.status NOT IN ('FT','AET','PEN') OR fixtures.status IS NULL
-       OR excluded.status IN ('FT','AET','PEN')'''
+    normalized_json=excluded.normalized_json, issue=excluded.issue, expected=excluded.expected'''
 
 
 def _set_meta(connection, values):
@@ -206,6 +252,13 @@ def migrate_json(path):
             with _connection(temporary, write=True, create=True) as connection:
                 _schema(connection)
                 connection.executemany(_UPSERT, projections)
+                latest = {}
+                for record in payload.get('import_revisions', []):
+                    import_policy.validate_record(record)
+                    if record['previous_observation'] != latest.get(record['match_id']):
+                        raise FixtureStoreError('La chronologie des imports locaux est incohérente.')
+                    _insert_observation(connection, record)
+                    latest[record['match_id']] = record['id']
                 connection.executemany('INSERT INTO season_imports VALUES (?,?,?)',
                     [(marker['competition_code'], marker['season'], _json(marker)) for marker in markers])
                 connection.executemany('INSERT INTO calendar_updates VALUES (?,?,?)',
@@ -390,14 +443,15 @@ def mark_calendar_refresh(path, day, timezone_name, updated_at):
 def upsert(path, fixtures, *, season_imports=None):
     import api_football as api
     # Validate the whole incoming batch before beginning any write.
-    incoming, projections = {}, []
+    incoming, received = {}, []
     try:
         for raw in fixtures:
             incoming[api._numeric_id(raw['fixture']['id'], 'du match')] = raw
-            projections.append(_projection(raw))
+            _projection(raw)  # Validate IDs and JSON before any transaction.
+            received.append(raw)
     except (KeyError, TypeError, ValueError):
         raise api.ApiFootballError('Un match API-Football à enregistrer a un identifiant invalide.') from None
-    now = datetime.now(timezone.utc).isoformat(timespec='seconds')
+    now = datetime.now(timezone.utc).isoformat(timespec='microseconds')
     markers = []
     if season_imports is not None:
         try:
@@ -413,7 +467,29 @@ def upsert(path, fixtures, *, season_imports=None):
         except (KeyError, TypeError, ValueError, AttributeError):
             raise api.ApiFootballError('Le manifeste de saison API-Football est invalide ou ne correspond pas au lot reçu.') from None
     with _connection(path, write=True) as connection:
+        # Take the import-recorded timestamp only after the writer lock. It
+        # still does not attest provider publication or transaction commit.
+        now = datetime.now(timezone.utc).isoformat(timespec='microseconds')
+        markers = [dict(marker,imported_at=now) for marker in markers]
         meta = _meta(connection)
+        _import_schema(connection)
+        previous = {row['match_id']: json.loads(row['raw_json']) for row in
+                    _selected_rows(connection, 'match_id,raw_json', dict(ids=incoming))}
+        latest = {record['match_id']: record for record in _observations(connection, ids=incoming)}
+        projections = []
+        for raw in received:
+            mid = api._numeric_id(raw['fixture']['id'], 'du match')
+            old = previous.get(mid)
+            try:
+                selected, decision, reason = import_policy.decide(old, raw, api.normalize_fixture, latest=latest.get(mid))
+                record = import_policy.observation(old, raw, selected, decision, reason, now, latest.get(mid))
+            except (ValueError, TypeError, KeyError):
+                raise api.ApiFootballError('Le relevé reçu ou son historique de qualité est invalide.') from None
+            if record is not None:
+                _insert_observation(connection, record)
+                latest[mid] = record
+            projections.append(_projection(selected))
+            previous[mid] = selected
         connection.executemany(_UPSERT, projections)
         # Retain only manifests whose members still belong to that season.
         for saved in connection.execute('SELECT league, season, manifest_json FROM season_imports').fetchall():
@@ -424,6 +500,7 @@ def upsert(path, fixtures, *, season_imports=None):
             for offset in range(0, len(ids), 500):
                 chunk = ids[offset:offset+500]
                 valid_count += connection.execute('SELECT count(*) FROM fixtures WHERE league=? AND season=?'
+                    + " AND (issue IS NULL OR issue NOT LIKE 'Quarantaine import : %')"
                     + ' AND match_id IN (' + ','.join('?' for _ in chunk) + ')',
                     [saved['league'], saved['season']] + chunk).fetchone()[0]
             if valid_count != len(ids):
@@ -455,4 +532,35 @@ def export_snapshot(path):
         meta = _meta(connection)
         fixtures = [json.loads(row[0]) for row in connection.execute('SELECT raw_json FROM fixtures ORDER BY ordinal')]
         markers = [json.loads(row[0]) for row in connection.execute('SELECT manifest_json FROM season_imports ORDER BY rowid')]
-        return dict(version=1, fixtures=fixtures, season_imports=markers, updated_at=meta.get('updated_at') or None)
+        return dict(version=1, fixtures=fixtures, season_imports=markers, updated_at=meta.get('updated_at') or None,
+                    import_revisions=_observations(connection))
+
+
+def import_observations(path, *, ids=None):
+    """Read recorded receipt/recovery events; never create or backfill history."""
+    with _connection(path) as connection:
+        _meta(connection)
+        return _observations(connection, ids=ids)
+
+
+def import_quarantines(path):
+    with _connection(path) as connection:
+        _meta(connection)
+        return [json.loads(row[0]) for row in connection.execute(
+            "SELECT raw_json FROM fixtures WHERE issue LIKE 'Quarantaine import : %' ORDER BY ordinal")]
+
+
+def review_import(path, match_id, *, choice, expected_observation, reason):
+    import api_football as api
+    with _connection(path, write=True) as connection:
+        meta = _meta(connection)
+        row = connection.execute('SELECT raw_json FROM fixtures WHERE match_id=?', (match_id,)).fetchone()
+        events = _observations(connection, ids=[match_id])
+        selected, event = import_policy.review_selection(json.loads(row[0]) if row else {},
+            events[-1] if events else None, choice=choice, expected_observation=expected_observation,
+            reason=reason, normalize=api.normalize_fixture,
+            observed_at=datetime.now(timezone.utc).isoformat(timespec='microseconds'))
+        connection.execute(_UPSERT, _projection(selected))
+        _insert_observation(connection, event)
+        _touch(connection, meta)
+        return event

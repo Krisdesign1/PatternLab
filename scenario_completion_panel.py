@@ -1,4 +1,5 @@
 """Inspect observed completions; never infer an unseen suffix."""
+import table_views
 import streamlit as st
 
 from league_model import VALUES
@@ -41,9 +42,9 @@ def render_completions(result, league_key):
         st.caption('Un seul précédent : cette suite n’a pas encore été observée plusieurs fois avec ce début.')
     st.caption('Ce sont des apparitions passées, pas des chances de réussite pour le prochain groupe. '
                'Les groupes incomplets ne servent pas de précédents.')
-    st.dataframe([{'Suite observée': ' → '.join(r['suffix']), 'Apparitions': r['count'],
+    table_views.dataframe([{'Suite observée': ' → '.join(r['suffix']), 'Apparitions': r['count'],
                    'Sur les groupes avec ce début': found['support'],
                    'Scénario complet': text + ' → ' + ' → '.join(r['suffix']),
                    'Groupes à vérifier': ', '.join(map(str, r['blocks']))}
-                  for r in found['ranking']], hide_index=True, width='stretch')
+                  for r in found['ranking']], hide_index=True, width='stretch', table_id='scenario_completion_panel:render_completions:dataframe:1')
     st.caption(f'Pour retrouver les matchs, ouvre « Vérifier les {size} matchs d’un groupe » plus bas.')

@@ -1,4 +1,5 @@
 """Interface de l'expérience ML ; aucun accès en écriture à SQLite."""
+import table_views
 import pandas as pd
 import streamlit as st
 
@@ -66,7 +67,7 @@ def render_training(rows):
             'Exactitude (%)': round(score['accuracy'] * 100, 1),
             'Erreur probabiliste (log loss)': round(score['log_loss'], 3),
         })
-    st.dataframe(pd.DataFrame(comparison), hide_index=True, width='stretch')
+    table_views.dataframe(pd.DataFrame(comparison), hide_index=True, width='stretch', table_id='ml_panel:render_training:dataframe:1')
     st.caption(
         'La référence utilise les fréquences des valeurs suivantes du lot d’apprentissage, '
         'sans tenir compte de la dernière valeur. Pour la log loss, plus bas est meilleur. '
@@ -94,10 +95,10 @@ def render_training(rows):
     )
     last = st.selectbox('Dernière valeur connue dans le coupon', VALID, key='ml_last')
     prediction = predict_next(experiment['model'], (last,))
-    st.dataframe(pd.DataFrame([
+    table_views.dataframe(pd.DataFrame([
         {'Valeur suivante': value, 'Probabilité estimée (%)': round(probability * 100, 1)}
         for value, probability in prediction['probabilities'].items()
-    ]), hide_index=True, width='stretch')
+    ]), hide_index=True, width='stretch', table_id='ml_panel:render_training:dataframe:2')
     if prediction['used_global_fallback']:
         st.info('Aucune transition observée après cette valeur : utilisation des fréquences globales.')
     else:
@@ -107,10 +108,10 @@ def render_training(rows):
         )
     with st.expander('Comprendre ce qui a été appris', icon=':material/account_tree:'):
         st.write('Effectifs des transitions du modèle final, avant lissage :')
-        st.dataframe(pd.DataFrame([
+        table_views.dataframe(pd.DataFrame([
             {'Après': previous, **experiment['model']['counts'][previous]}
             for previous in VALID
-        ]), hide_index=True, width='stretch')
+        ]), hide_index=True, width='stretch', table_id='ml_panel:render_training:dataframe:3')
         st.caption(
             'Le lissage ajoute un pseudo-effectif de 1 à chaque possibilité pour éviter '
             'les probabilités nulles. Il ne crée aucun coupon dans la base.'

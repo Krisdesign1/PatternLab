@@ -1,4 +1,5 @@
 """Simple guide to actual repeated scenarios per competition."""
+import table_views
 import pandas as pd
 import streamlit as st
 from coupon_sizes import SIZES
@@ -70,7 +71,7 @@ def render_leagues(coupons, *, expert=True, default_source='API-Football'):
     if not patterns:
         st.info('Aucun résultat HT/FT API-Football utilisable. Importez une saison depuis Données et réglages.')
         if audit['issues']:
-            st.dataframe(audit['issues'], hide_index=True)
+            table_views.dataframe(audit['issues'], hide_index=True, table_id='league_pattern_panel:render_leagues:dataframe:1')
         return
     st.caption(f'Source {source} uniquement · horaires en UTC · scores à 90 minutes, hors prolongations et tirs au but.')
     if audit['issues']:
@@ -107,8 +108,8 @@ def render_leagues(coupons, *, expert=True, default_source='API-Football'):
         table = ranking_table(result)
         display=[dict(row,**{'Scénario observé':list(item['sequence'])})
                  for row,item in zip(table,result['ranking'])]
-        st.dataframe(display,hide_index=True,width='stretch',column_config={
-            'Scénario observé':result_column('Scénario observé',width='large')})
+        table_views.dataframe(display,hide_index=True,width='stretch',column_config={
+            'Scénario observé':result_column('Scénario observé',width='large')}, table_id='league_pattern_panel:render_leagues:dataframe:2')
         st.caption('Un rang identique indique une égalité. La première valeur correspond au premier match '
                    'du groupe, la deuxième au deuxième match, etc. Ce classement décrit cet historique ; '
                    'il ne donne pas la probabilité du prochain groupe de matchs.')
@@ -154,8 +155,8 @@ def render_leagues(coupons, *, expert=True, default_source='API-Football'):
                              'Maximum d’apparitions': top,
                              'Scénarios en tête': ' / '.join(seq_text(x['sequence']) for x in r['ranking']
                                                              if x['rank'] == 1) if top > 1 else 'Aucune répétition'})
-        st.dataframe(overview, hide_index=True, width='stretch')
+        table_views.dataframe(overview, hide_index=True, width='stretch', table_id='league_pattern_panel:render_leagues:dataframe:3')
     with st.expander('Vérification des données'):
         st.write(f"**{audit['matched']} matchs sur {audit['expected']}** associés à leurs scores {source}.")
         if audit['issues']:
-            st.dataframe(audit['issues'], hide_index=True)
+            table_views.dataframe(audit['issues'], hide_index=True, table_id='league_pattern_panel:render_leagues:dataframe:4')

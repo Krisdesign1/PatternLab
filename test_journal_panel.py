@@ -1,4 +1,5 @@
 import copy
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
@@ -8,6 +9,7 @@ from unittest.mock import patch
 from streamlit.testing.v1 import AppTest
 
 import api_football as api
+import analysis_date
 import catboost_scenarios as ml
 import journal_panel as panel
 import prediction_journal as journal
@@ -19,18 +21,36 @@ from test_prospective_models import context_method
 
 
 class JournalPanelTests(unittest.TestCase):
+    def test_complete_journal_export_serializes_only_when_downloaded(self):
+        entries = [dict(id='today', methods={'clubs': {'ranking': [{'sequence': ['1st', '2nd'], 'probability': .21}]}},
+                        result_history=[{'revision': 1}], result_explanation={'label': 'Évalué'}),
+                   dict(id='past', methods={}, result_history=[{'revision': 1}, {'revision': 2}])]
+        original = copy.deepcopy(entries)
+        with patch.object(panel.st, 'download_button') as download, \
+                patch.object(panel.json, 'dumps', wraps=json.dumps) as serialize:
+            panel._export(entries)
+            serialize.assert_not_called()
+            callback = download.call_args.args[1]
+            self.assertTrue(callable(callback))
+            self.assertEqual(download.call_args.kwargs['on_click'], 'ignore')
+            self.assertEqual(json.loads(callback()), original)
+            serialize.assert_called_once()
+        self.assertEqual(entries, original)
+
     def setUp(self):
         admin = patch('admin_access.can_admin', return_value=True)
         admin.start(); self.addCleanup(admin.stop)
         folder=tempfile.TemporaryDirectory();self.addCleanup(folder.cleanup)
         self.root=Path(folder.name)
         self.patch(journal,'DB_PATH',self.root/'journal.sqlite3')
+        self.patch(panel.manual_archive,'database_path',return_value=self.root/'manual_analyses.sqlite3')
         self.patch(api,'STORE_PATH',self.root/'fixtures.json')
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.network=self.patch(api.ApiFootballClient,'get',side_effect=AssertionError('No automatic API calls'))
         self.raw=[]
         self.patch(api,'load_fixtures',side_effect=lambda *args, **kwargs:self.raw)
         self.day=self.patch(panel,'_today',return_value=date(2025,3,20))
+        self.patch(analysis_date,'local_today',side_effect=lambda now=None:self.day.return_value)
         self.patch(panel,'_now',side_effect=lambda: datetime.combine(self.day.return_value,datetime.min.time(),
                                                                   tzinfo=timezone.utc)+timedelta(hours=8))
 
@@ -68,10 +88,12 @@ class JournalPanelTests(unittest.TestCase):
             for row in chosen:row['timestamp']=day.isoformat()+row['timestamp'][10:]
         with patch.object(ml,'load_report',return_value=None), patch.object(models,'_context_neighbors',
                 side_effect=models.SnapshotError('Configuration par contexte absente.')):
-            methods=models.build_methods(sample(league=league),chosen)['methods']
+            methods=models.build_methods(sample(league=league),chosen,decision_at=created_at)['methods']
         if catboost:
             methods['catboost']=dict(copy.deepcopy(methods['clubs']),version='catboost-test',generation=generation)
-        if context:methods['context_neighbors']=context_method()
+        if context:
+            methods['context_neighbors']=context_method()
+            methods['context_neighbors']['training_before']=created_at.astimezone(timezone.utc).date().isoformat()
         entry=journal.record(chosen,methods,now=created_at,raw_fixtures=raw_fixtures(chosen),
                        metadata={'competition':competition,'selected_engine':'automation' if automatic else 'statistical'})
         self.raw+=raw_fixtures(chosen,status='FT' if finished else 'NS')
@@ -83,6 +105,23 @@ class JournalPanelTests(unittest.TestCase):
         self.assertTrue(any('Aucune prévision avant match' in r.value for r in at.info))
         self.assertFalse(journal.DB_PATH.exists())
         self.network.assert_not_called()
+
+    def test_unknown_manual_link_does_not_hide_the_shared_journal(self):
+        with patch.object(panel.manual_archive,'get',return_value=None) as manual, \
+             patch.object(panel.journal, 'list_entries', return_value=[]) as tracked_read, \
+             patch.object(panel.tracking, 'reconcile_local', return_value={'entries': 0, 'changed': 0}) as reconcile:
+            at = AppTest.from_file('app.py', default_timeout=20).run()
+            at.switch_page('ui_pages/journal.py')
+            at.query_params['manual_analysis'] = 'a' * 64
+            at.run()
+            self.assertFalse(at.exception)
+            self.assertFalse(any(item.key=='journal_type' for item in at.segmented_control))
+            manual.assert_called_once_with('a'*64)
+            tracked_read.assert_called_once()
+            reconcile.assert_called_once_with(if_changed=True)
+            self.assertTrue(any('Aucune prévision avant match' in item.value for item in at.info))
+            self.assertTrue(any('analyse manuelle n’est pas disponible' in item.value for item in at.info))
+            self.network.assert_not_called()
 
     def test_all_sizes_and_competitions_visible_then_exact_three_match_detail(self):
         manual=self.seed(size=3)
@@ -116,7 +155,8 @@ class JournalPanelTests(unittest.TestCase):
         table=next(d.value for d in at.dataframe if 'Groupes communs' in d.value.columns)
         self.assertEqual(len(table),4)
         self.assertEqual(set(table['Groupes communs']),{1})
-        self.assertTrue(any('Scénario réalisé' in r.value for r in at.markdown))
+        self.assertTrue(any('Aucun scénario proposé réalisé' in r.value for r in at.markdown))
+        self.assertTrue(any('Scénario observé' in r.value for r in at.markdown))
         self.network.assert_not_called()
 
     def test_result_refresh_is_explicit_and_errors_keep_saved_forecast(self):
@@ -130,6 +170,23 @@ class JournalPanelTests(unittest.TestCase):
         self.assertTrue(any('Quota atteint' in r.value for r in at.error))
         self.assertEqual(journal.list_entries()[0]['methods'],before)
         self.assertTrue(at.get('download_button'))
+
+    def test_postponed_match_is_named_in_history_and_detail_without_inventing_a_result(self):
+        entry = self.seed(finished=False)
+        self.raw[0]['fixture']['status']['short'] = 'PST'
+        self.raw[0]['fixture']['status']['long'] = 'Match Postponed'
+        before = copy.deepcopy(entry['methods'])
+        at = self.open()
+        self.assertTrue(any('Reporté' in node.value for node in at.caption))
+        at = self.view(at, entry['id'])
+        table = next(frame.value for frame in at.dataframe if 'Motif du suivi' in frame.value.columns)
+        self.assertEqual(table['État du résultat'].iloc[0], 'Reporté')
+        self.assertIn('report', table['Motif du suivi'].iloc[0])
+        self.assertEqual(list(table['Résultat'].iloc[0]), [])
+        saved = journal.list_entries()[0]
+        self.assertEqual(saved['status'], 'unresolved')
+        self.assertEqual(saved['methods'], before)
+        self.network.assert_not_called()
 
     def test_context_method_label_and_comparison_preserve_legacy_cohort(self):
         self.seed(context=True)
@@ -241,6 +298,21 @@ class JournalPanelTests(unittest.TestCase):
         self.assertFalse(at.dataframe)
         self.assertTrue(at.get('download_button'))
         self.assertEqual(journal.list_entries()[0]['methods'],before)
+        self.network.assert_not_called()
+
+    def test_chosen_tomorrow_shows_saved_pending_groups_and_detail_without_changing_real_clock(self):
+        self.seed()
+        future=self.seed(offset=100,day=date(2025,3,21),finished=False)
+        at=self.open()
+        at.date_input(key='analysis_day_widget').set_value(date(2025,3,21)).run()
+        self.assertFalse(at.exception)
+        self.assertEqual([button.key for button in self.buttons(at)],[f'journal_browser_open_{future["id"]}'])
+        self.assertEqual(at.segmented_control(key='journal_view').value,'today')
+        self.assertTrue(any('21/03/2025' in item.value for item in at.caption))
+        self.assertTrue(any('Journée à venir' in item.value for item in at.caption))
+        self.assertEqual(self.day.return_value,date(2025,3,20))
+        self.view(at,future['id'])
+        self.assertTrue(any('Ce groupe attend encore' in item.value for item in at.info))
         self.network.assert_not_called()
 
     def test_midnight_closes_old_detail_and_lists_new_day_without_auto_selection(self):

@@ -11,6 +11,7 @@ import api_football as api
 import catboost_scenarios as ml
 from coupon_sizes import top_independent
 import high_probability_panel as panel
+import high_probability_history_panel as history_panel
 import high_probability_workspace as workspace
 import prediction_journal as journal
 import prospective_models as models
@@ -65,8 +66,9 @@ class HighProbabilityPanelTests(unittest.TestCase):
         admin.start(); self.addCleanup(admin.stop)
         self.value = report()
         self.clock = self.patch(panel, '_now', return_value=NOW)
-        self.load = self.patch(workspace, 'load_scan', side_effect=lambda: deepcopy(self.value))
-        self.refresh = self.patch(workspace, 'refresh_scan', side_effect=lambda: deepcopy(self.value))
+        self.load = self.patch(workspace, 'load_scan', side_effect=lambda **_: deepcopy(self.value))
+        self.refresh = self.patch(workspace, 'refresh_scan', side_effect=lambda **_: deepcopy(self.value))
+        self.archive = self.patch(workspace, 'archive_scan', return_value=dict(created=4, existing=0, skipped=0))
         self.prepare = self.patch(workspace, 'prepare_group', side_effect=prepared)
         self.record = self.patch(workspace, 'record_group', side_effect=lambda result: dict(
             id='saved-analysis', created=True, group_kind='mixed', methods=result['methods'],
@@ -94,6 +96,31 @@ class HighProbabilityPanelTests(unittest.TestCase):
     def readonly(self):
         for mock in (self.api, self.train, self.write, self.write_mixed):
             mock.assert_not_called()
+
+    def test_tomorrow_ranking_keeps_real_clock_and_resets_prepared_groups_on_date_change(self):
+        at = self.open()
+        at.button(key='hp_analyze_top').click().run()
+        self.assertIn('hp_prepared', at.session_state)
+        tomorrow = datetime(2026, 10, 23).date()
+        for value in self.value['rows']:
+            value['fixture']['timestamp'] = value['fixture']['timestamp'].replace('2026-10-22', '2026-10-23')
+        self.value['day'] = tomorrow.isoformat()
+        at.session_state['analysis_selected_day'] = tomorrow
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertNotIn('hp_prepared', at.session_state)
+        self.load.assert_called_with(now=NOW, day=tomorrow)
+        self.assertEqual(len(self.table(at)), 4)
+        at.button(key='hp_analyze_top').click().run()
+        self.assertIn('hp_prepared', at.session_state)
+        self.clock.return_value = datetime(2026, 10, 23, 0, 1, tzinfo=panel.LOCAL_ZONE)
+        at.run()
+        self.assertFalse(at.exception)
+        self.assertIn('hp_prepared', at.session_state)
+        self.assertEqual(len(self.table(at)), 4)
+        self.record.assert_not_called()
+        self.refresh.assert_not_called()
+        self.readonly()
 
     def test_missing_history_is_explained_instead_of_blaming_probability_filter(self):
         self.value['rows'] = []
@@ -123,7 +150,7 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.value['excluded'] = []
         self.value['diagnostics'].update(day_count=0, upcoming_count=0, eligible_count=0)
         at = self.open()
-        self.assertTrue(any('calendrier du jour n’est pas chargé' in node.value for node in at.info))
+        self.assertTrue(any('calendrier de la date sélectionnée n’est pas chargé' in node.value for node in at.info))
         self.assertFalse(any('ces filtres' in node.value for node in at.info))
         self.readonly()
 
@@ -259,7 +286,7 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.assertEqual(self.prepare.call_args.args[1], ['2', '3'])
         self.assertEqual(self.prepare.call_args.kwargs, dict(outcome='1st', minimum=0))
         self.assertEqual({fixture['league'] for fixture in at.session_state['hp_prepared']['fixtures']}, {'39', '61'})
-        self.assertTrue(any(node.value == 'Les trois scénarios les mieux classés · Clubs' for node in at.subheader))
+        self.assertTrue(any(node.value == 'Classement de référence · Clubs' for node in at.subheader))
         self.assertTrue(any('probabilité d’un scénario complet est plus faible' in node.value for node in at.caption))
         self.record.assert_not_called()
         self.refresh.assert_not_called()
@@ -355,17 +382,17 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.assertFalse(any(node.label == 'Probabilité du scénario recherché' for node in at.metric))
         self.readonly()
 
-    def test_saved_mixed_group_opens_its_existing_daily_history(self):
-        switch = self.patch(panel.st, 'switch_page', return_value=None)
+    def test_saved_mixed_group_opens_its_history_in_the_same_page(self):
+        history = self.patch(history_panel, 'render_history', return_value=None)
         at = self.open()
         at.button(key='hp_analyze_top').click().run()
         at.button(key='hp_record').click().run()
         at.button(key='hp_open_journal').click().run()
         self.assertFalse(at.exception)
-        switch.assert_called_once_with('ui_pages/daily.py')
-        self.assertEqual(at.session_state['daily_selected'], 'saved-analysis')
-        self.assertEqual(at.session_state['daily_view'], 'today')
-        self.assertEqual(at.session_state['daily_context'], ('2026-10-22', 'today', '2026-10-22'))
+        history.assert_called_once()
+        self.assertEqual(at.session_state['hp_history_selected'], 'saved-analysis')
+        self.assertEqual(at.session_state['hp_view'], 'groups')
+        self.assertEqual(at.session_state['hp_history_day'], 'all')
         self.readonly()
 
     def test_filters_group_changes_kickoff_and_midnight_expire_the_preparation(self):
@@ -405,7 +432,7 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.readonly()
 
     def test_absent_calendar_is_empty_without_triggering_an_api_request(self):
-        self.load.side_effect = lambda: None
+        self.load.side_effect = lambda **_: None
         at = self.open()
         self.assertTrue(any('Aucun calendrier local' in node.value for node in at.info))
         self.assertFalse(at.dataframe)
@@ -567,7 +594,7 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.record.side_effect = lambda value: dict(old, id='older-analysis', created=True,
             forecast_created=False, group_kind='mixed', scenario_intent=dict(
                 id='new-intent', entry_id='older-analysis', selection=intent_selection))
-        switch = self.patch(panel.st, 'switch_page', return_value=None)
+        history = self.patch(history_panel, 'render_history', return_value=None)
         render = self.patch(panel.scenario_tables, 'render_matrix', wraps=panel.scenario_tables.render_matrix)
         at = self.open()
         at.multiselect(key='hp_mix_widget_ids').set_value(['1', '2']).run()
@@ -585,8 +612,9 @@ class HighProbabilityPanelTests(unittest.TestCase):
         self.assertTrue(any('prévision figée' in node.value for node in at.success))
         at.button(key='hp_open_journal').click().run()
         self.assertFalse(at.exception)
-        self.assertEqual(at.session_state['daily_selected'], 'intent:new-intent')
-        switch.assert_called_once_with('ui_pages/daily.py')
+        self.assertEqual(at.session_state['hp_history_selected'], 'intent:new-intent')
+        self.assertEqual(at.session_state['hp_view'], 'groups')
+        history.assert_called_once()
         self.readonly()
 
 

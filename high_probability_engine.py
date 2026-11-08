@@ -5,7 +5,7 @@ builds its sufficient statistics once per league instead of rescanning the full
 history for every fixture. It does not fetch, persist, fit, or settle forecasts.
 """
 from collections import Counter, defaultdict
-from datetime import timezone
+from datetime import date, timezone
 from hashlib import sha256
 import json
 from math import isfinite
@@ -73,18 +73,20 @@ def _estimate(state, home, away, before, *, home_id=None, away_id=None, provider
                 last_training_day=state['last_training_day'])
 
 
-def scan(raw, now=None, *, history=None, history_issues=()):
-    """Rank all eligible future NS fixtures today in Kinshasa by max probability.
+def scan(raw, now=None, *, day=None, history=None, history_issues=()):
+    """Rank eligible future NS fixtures on the selected Kinshasa calendar day.
 
-    All histories stop before the first UTC date of today's confirmed targets,
-    additionally bounded by today's current UTC date. No result from that UTC
+    All histories stop before the first UTC date of the confirmed targets,
+    additionally bounded by the real current UTC date. No result from that UTC
     day enters any prediction. Conflicting fixture IDs are excluded entirely;
     exact duplicates are counted once. Targets' score fields are never read.
     """
     current = workspace._now(now)
     if not isinstance(raw, (list, tuple)):
         raise ValueError('Les données API-Football doivent être une liste de matchs.')
-    day = current.astimezone(ZONE).date()
+    day = current.astimezone(ZONE).date() if day is None else day
+    if type(day) is not date:
+        raise ValueError('La date des matchs doit être une date de calendrier.')
     unique, conflicts, excluded = {}, set(), []
     diagnostics = dict(raw_count=len(raw), unique_count=0, day_count=0, upcoming_count=0,
                        eligible_count=0, history_count=0, history_leagues=0,

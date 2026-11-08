@@ -1,6 +1,8 @@
 """Explicit controls and local coverage for the API-Football worker."""
+import table_views
 from datetime import datetime, timezone
 import json
+import sys
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -10,6 +12,8 @@ import admin_access
 import api_football as api
 import automation_worker as worker
 import automation_health_panel
+import scheduler_reception_panel
+import operations_panel
 from scripts import automation_service as service
 from ux_theme import render_page_header
 
@@ -37,6 +41,10 @@ def _scheduler_status():
                    'Une connexion au stockage ne confirme pas que cette planification est activée. '
                    'Le dernier cycle réellement exécuté figure dans le bilan ci-dessous.')
         return
+    if _managed_linux():
+        state = operations_panel.linux_scheduler()
+        operations_panel.render_scheduler(state)
+        return state
     try:
         state = service.service_status()
     except (OSError, ValueError) as error:
@@ -64,7 +72,25 @@ def _scheduler_status():
     return state
 
 
+def _managed_linux():
+    return sys.platform == 'linux'
+
+
 def _configuration(config):
+    if _managed_linux():
+        # The Linux wrapper freezes BOTH training paths without rewriting the
+        # persisted configuration. Never display its stored True as effective.
+        st.info('Les cycles de ce serveur sont gérés par le service Linux. L’entraînement reste désactivé.')
+        table_views.dataframe([
+            {'Réglage effectif': 'Cycles de données autorisés', 'Valeur': 'Oui' if config['enabled'] else 'Non'},
+            {'Réglage effectif': 'Entraînement des modèles', 'Valeur': 'Désactivé sur ce serveur'},
+            {'Réglage effectif': 'Tailles des groupes', 'Valeur': ', '.join(map(str, config['sizes']))},
+            {'Réglage effectif': 'Saisons historiques', 'Valeur': ', '.join(map(str, config['history_seasons']))},
+            {'Réglage effectif': 'Collecte de l’historique', 'Valeur': 'Oui' if config['history_enabled'] else 'Non'},
+        ], hide_index=True, width='stretch', key='automation_server_configuration', table_id='automation_panel:_configuration:dataframe:1')
+        st.caption('La fréquence réelle est indiquée dans « Automatisation du serveur ». '
+                   'Ces réglages sont consultables ici ; leur modification passe par la configuration du service.')
+        return dict(config, models_enabled=False, model_jobs_per_cycle=0)
     allowed = admin_access.can_admin()
     with st.form('automation_config', border=True):
         enabled = st.toggle('Autoriser les cycles automatiques', value=bool(config['enabled']), key='automation_enabled')
@@ -106,7 +132,8 @@ def _show_report(report):
     if report.get('monitoring_warning'):
         st.warning(report['monitoring_warning'])
     st.caption(f"État : {STATES.get(report.get('status'), report.get('status', 'Inconnu'))} · "
-               f"Début : {report.get('started_at', '—')} · Fin : {report.get('finished_at') or '—'}")
+               f"Début : {operations_panel.local_time(report.get('started_at'))} · "
+               f"Fin : {operations_panel.local_time(report.get('finished_at'))} · Kinshasa")
     if report.get('last_daily_refresh_at'):
         st.caption(f"{report.get('day_refreshes',0)} relève(s) entre les imports historiques · "
                    f"Dernière relève terminée : {report['last_daily_refresh_at']} · UTC")
@@ -130,14 +157,14 @@ def _show_report(report):
         if waiting:
             st.info(f'{waiting} groupe(s) à venir attendent un historique ou un modèle utilisable. '
                     'Leur absence du journal est indiquée dans le bilan ; les imports continuent aux prochains cycles.')
-        st.dataframe([{'Compétition': job.get('competition', job.get('league', '')),
+        table_views.dataframe([{'Compétition': job.get('competition', job.get('league', '')),
                        'ID compétition': job.get('league', ''), 'Matchs par groupe': job.get('size'),
                        'Jour': job.get('day', ''), 'État': STATES.get(job.get('state'), job.get('state', '')),
                        'Motif': job.get('reason', ''),
                        'Méthodes figées': ', '.join(METHODS.get(name, name) for name in (job.get('methods') or [])),
                        'Méthodes indisponibles': ' ; '.join(f'{METHODS.get(name, name)} : {reason}'
                                                            for name, reason in (job.get('unavailable') or {}).items())}
-                      for job in jobs], hide_index=True, width='stretch', key='automation_jobs')
+                      for job in jobs], hide_index=True, width='stretch', key='automation_jobs', table_id='automation_panel:_show_report:dataframe:1')
     with st.expander('Rapport détaillé du cycle'):
         st.json(report, expanded=False)
 
@@ -174,14 +201,14 @@ def _show_coverage(rows):
     visible.sort(key=lambda row: (order.get(row.get('readiness'),4), -int(row.get('ready_groups') or 0),
                                   -int(row.get('eligible_groups') or 0), str(row.get('country','')),
                                   str(row.get('competition','')), str(row.get('league',''))))
-    st.dataframe([{'ID compétition': str(r.get('league', '')), 'Pays': r.get('country', ''),
+    table_views.dataframe([{'ID compétition': str(r.get('league', '')), 'Pays': r.get('country', ''),
                    'Compétition': r.get('competition', ''),
                    'Préparation': r.get('readiness_label') or READINESS.get(r.get('readiness'), 'À recalculer'),
                    'Résultats utilisables': r.get('history_matches', 0),
                    'Groupes prêts': r.get('ready_groups', 0), 'Groupes en attente': r.get('pending_groups', 0),
                    'Tailles prêtes': ', '.join(str(size) for size in r.get('ready_sizes', [])),
                    'Matchs manquants au minimum': r.get('missing_matches'), 'Motif': r.get('reason', '')}
-                  for r in visible], hide_index=True, width='stretch', key='automation_coverage')
+                  for r in visible], hide_index=True, width='stretch', key='automation_coverage', table_id='automation_panel:_show_coverage:dataframe:1')
     st.caption(f'{len(visible)} compétition(s) affichée(s) sur {len(rows)}. Ces filtres modifient uniquement cette vue.')
     st.caption('Ces seuils concernent le moteur Clubs + répétitions. CatBoost et contexte sont vérifiés séparément '
                'au calcul. La préparation des données ne mesure pas la précision des prévisions.')
@@ -202,7 +229,7 @@ def _show_coverage(rows):
         if not details:
             st.info('Le détail par taille n’est pas disponible dans cet état local.')
         else:
-            st.dataframe([{'Matchs par groupe': item['size'], 'Résultats avant le (UTC)': item.get('before', ''),
+            table_views.dataframe([{'Matchs par groupe': item['size'], 'Résultats avant le (UTC)': item.get('before', ''),
                            'Résultats antérieurs': item.get('history_matches', 0),
                            'Groupes historiques': item.get('history_groups', 0), 'Groupes requis': item.get('min_groups', 20),
                            'Groupes manquants': item.get('missing_groups', 0),
@@ -210,7 +237,7 @@ def _show_coverage(rows):
                            'Clubs + répétitions calculable': bool(item.get('eligible')),
                            'Groupes à venir': item.get('eligible_groups', 0), 'Groupes prêts': item.get('ready_groups', 0),
                            'Groupes en attente': item.get('pending_groups', 0), 'Motif': item.get('reason', '')}
-                          for item in details], hide_index=True, width='stretch', key='automation_readiness_detail')
+                          for item in details], hide_index=True, width='stretch', key='automation_readiness_detail', table_id='automation_panel:_show_coverage:dataframe:2')
             st.caption('Seuils : au moins 20 groupes historiques de la taille choisie et 30 matchs de la compétition '
                        'sur trois jours antérieurs. Les résultats du jour des affiches ne sont pas utilisés pour ces calculs.')
 
@@ -232,16 +259,22 @@ def render_automation():
         st.error(str(error))
         return
     automation_health_panel.render(config, scheduler=scheduler)
+    scheduler_reception_panel.render(api.STORE_PATH.parent, interval_minutes=config['interval_minutes'])
     with st.container(horizontal=True):
         run = st.button('Lancer un cycle maintenant', type='primary', icon=':material/play_arrow:',
-                         key='automation_run', disabled=not config['enabled'] or not admin_access.can_admin())
+                         key='automation_run', disabled=_managed_linux() or not config['enabled'] or not admin_access.can_admin())
         refresh = st.button('Relire l’état local', icon=':material/refresh:', key='automation_refresh')
+    if _managed_linux():
+        st.caption('Le lancement manuel depuis le navigateur est désactivé sur le serveur. '
+                   'Les passages automatiques utilisent le service protégé, sans entraînement.')
     st.caption('Lancer un cycle utilise les requêtes nécessaires, selon les disponibilités d’API-Football. '
                'L’ouverture de cette page et « Relire l’état local » utilisent seulement les fichiers locaux.')
     report = None
     if refresh:
         _coverage.clear()
-    if run:
+        operations_panel.linux_scheduler.clear()
+        st.rerun()
+    if run and not _managed_linux():
         admin_access.require_admin()
         try:
             with st.spinner('Préparation des données et enregistrement des groupes avant match…'):

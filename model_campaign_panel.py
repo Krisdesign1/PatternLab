@@ -1,4 +1,5 @@
 """Local-only view of the first, immutable validation campaign per league."""
+import table_views
 import json
 
 import streamlit as st
@@ -73,11 +74,11 @@ def _manifest(report):
                f"Résultats strictement antérieurs au {report.get('cutoff', '—')} (UTC).")
     components = report.get('components') or {}
     if components:
-        st.dataframe([{'Méthode': COMPONENTS.get(name, name),
+        table_views.dataframe([{'Méthode': COMPONENTS.get(name, name),
                        'Disponibilité': 'Disponible' if component.get('status') == 'available' else 'Indisponible',
                        'Origine': ORIGINS.get(component.get('origin'), component.get('origin', '')),
                        'Génération': component.get('generation', ''), 'Motif': component.get('reason', '')}
-                      for name, component in components.items()], hide_index=True, width='stretch', key='campaign_components')
+                      for name, component in components.items()], hide_index=True, width='stretch', key='campaign_components', table_id='model_campaign_panel:_manifest:dataframe:1')
     if report.get('error'):
         st.warning(report['error'])
     comparison = report.get('comparisons') or {}
@@ -130,14 +131,14 @@ def render(rows, source='API-Football'):
     needle = query.strip().casefold()
     visible = [job for job in jobs if (state == 'all' or state == 'changed' and _different(job) or job['status'] == state)
                and (not needle or needle in f"{job['league']} {job['competition']}".casefold())]
-    st.dataframe([{'ID compétition': job['league'], 'Compétition': job['competition'],
+    table_views.dataframe([{'ID compétition': job['league'], 'Compétition': job['competition'],
                    'Campagne': STATES.get(job['status'], job['status']), 'Résultats utilisables': job['history_matches'],
                    'Prochain match UTC': job.get('upcoming_at') or '—',
                    'Validation CatBoost possible': bool(job.get('chronological_ready')),
                    'Comparaison par contexte possible': bool(job.get('contextual_ready')),
                    'Historique depuis le gel': _history_label(job),
                    'Contexte figé indisponible': bool(job.get('context_frozen_unavailable')), 'Motif': job.get('reason', '')}
-                  for job in visible], hide_index=True, width='stretch', key='campaign_plan')
+                  for job in visible], hide_index=True, width='stretch', key='campaign_plan', table_id='model_campaign_panel:render:dataframe:1')
     st.caption('Les prochaines rencontres déterminent la priorité de la liste. Un historique actuel différent '
                'peut contenir de nouveaux matchs ou des corrections ; il ne déclenche aucune réoptimisation des paramètres figés.')
     with st.expander('Comment les paramètres sont choisis'):

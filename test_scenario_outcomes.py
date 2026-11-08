@@ -77,7 +77,7 @@ class ScenarioOutcomeTests(unittest.TestCase):
         value['methods']['clubs']['ranking'][1]['sequence'] = ['2nd', '2nd']
         self.assertEqual(outcomes.summarize(value)['state'], 'unavailable')
 
-    def test_legacy_abbreviated_choices_are_supported_but_fourth_choice_is_not_proposed(self):
+    def test_abbreviated_and_longer_rankings_keep_all_explicitly_saved_proposals(self):
         for count in (1, 2, 3):
             value = entry()
             value['methods']['clubs']['ranking'] = value['methods']['clubs']['ranking'][:count]
@@ -85,7 +85,29 @@ class ScenarioOutcomeTests(unittest.TestCase):
         value = entry()
         value['actual'] = ['Égal', 'Égal']
         value['methods']['clubs']['ranking'].append({'sequence': ['Égal', 'Égal'], 'probability': .01})
-        self.assertEqual(outcomes.summarize(value)['state'], 'miss')
+        result = outcomes.summarize(value)
+        self.assertEqual(result['state'], 'hit')
+        self.assertEqual(result['matches'], [dict(method='clubs', rank=4, sequence=['Égal', 'Égal'])])
+
+    def test_six_distinct_proposals_from_multiple_methods_are_all_checked(self):
+        value = entry()
+        value['methods']['frequency'] = method([['Égal', '1st'], ['1st', 'Égal'], ['Égal', 'Égal']])
+        value['actual'] = ['Égal', 'Égal']
+        result = outcomes.summarize(value)
+        self.assertEqual(result['state'], 'hit')
+        self.assertEqual(result['matches'], [dict(method='frequency', rank=3, sequence=['Égal', 'Égal'])])
+
+    def test_invalid_tail_invalidates_verdict_even_when_an_earlier_choice_matches(self):
+        for tail in (None, {'sequence': ['invalid', 'Égal'], 'probability': .01},
+                     {'sequence': ['Égal', 'Égal'], 'probability': float('nan')},
+                     {'sequence': ['2nd', '2nd'], 'probability': .01}):
+            with self.subTest(tail=tail):
+                value = entry()
+                value['methods']['clubs']['ranking'].append(tail)
+                result = outcomes.summarize(value)
+                self.assertEqual(result['state'], 'unavailable')
+                self.assertEqual(result['matches'], [])
+                self.assertIsNone(result['actual'])
 
     def test_saved_evaluations_and_distributions_cannot_override_exact_choices(self):
         value = entry()

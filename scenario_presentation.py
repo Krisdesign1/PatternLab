@@ -1,5 +1,7 @@
 """Local presentation adapters; no forecast, training or journal mutation."""
+import table_views
 from math import isclose
+from copy import deepcopy
 
 import streamlit as st
 
@@ -32,7 +34,28 @@ def forecast_methods(payload):
                for row in estimate['ranking']]
     if len(ranking) != 3:
         raise ValueError('Le classement doit conserver exactement les trois premiers scénarios de cette analyse.')
+    if 'comparison_methods' in payload:
+        # The renderer must use the exact snapshot captured before archiving,
+        # rather than rebuilding its comparisons on a later rerun.
+        import scenario_tables as tables
+        methods = deepcopy(payload['comparison_methods'])
+        tables.build_matrix(methods)
+        selected_ranking = methods.get(name, {}).get('ranking', [])
+        if len(selected_ranking) < len(ranking) or any(
+                saved['sequence'] != supplied['sequence'] or not isclose(
+                    saved['probability'], supplied['probability'], rel_tol=1e-9, abs_tol=1e-12)
+                for saved, supplied in zip(selected_ranking, ranking)):
+            raise ValueError('Les méthodes conservées ne correspondent pas au moteur choisi.')
+        return methods
     selected = dict(version=estimate.get('version', engine), ranking=ranking)
+    if engine != 'statistical' and payload.get('frozen_selected_method') is not None:
+        selected = deepcopy(payload['frozen_selected_method'])
+        snapshots.validate_method(selected, len(payload['fixtures']))
+        if len(selected['ranking']) != len(ranking) or any(
+                frozen['sequence'] != original['sequence'] or not isclose(
+                    frozen['probability'], original['probability'], rel_tol=1e-9, abs_tol=1e-12)
+                for frozen, original in zip(selected['ranking'], ranking)):
+            raise ValueError('La distribution conservée ne correspond pas au calcul du moteur choisi.')
     if engine != 'statistical':
         return {name:selected}
     size = len(payload['fixtures'])
@@ -86,15 +109,16 @@ def render_diagnostic(estimate, fixtures, *, engine='statistical', saved_methods
                     'Précédents extérieur':item.get('away_matches') if item.get('away_matches') is not None else '—'})
             st.caption('Probabilités par affiche de la composante de base, avant la correction des scénarios. '
                        'Elles ne sont pas les probabilités marginales du modèle corrigé.')
-            st.dataframe(rows,hide_index=True,width='stretch')
+            table_views.dataframe(rows,hide_index=True,width='stretch', table_id='scenario_presentation:render_diagnostic:dataframe:1')
 
 
-def render_leader(estimate):
+def render_leader(estimate, *, reference=False):
     import scenario_tables as tables
     from scenario_odds import scenario_odds_text
     leader=estimate['ranking'][0]
     with st.container(border=True):
-        st.badge('Premier scénario du moteur choisi',color='blue',icon=':material/schema:')
+        st.badge('Premier scénario de référence du moteur choisi' if reference else
+                 'Premier scénario du moteur choisi',color='blue',icon=':material/schema:')
         tables.render_sequence(leader['sequence'])
         st.metric('Estimation du scénario complet',f"{100*leader['probability']:.2f} %")
         st.caption(f"Cote cumulée indicative : {scenario_odds_text(leader['sequence'])} · Référence fixe manuelle")
@@ -104,6 +128,23 @@ def render_analysis_matrix(payload):
     import scenario_tables as tables
     try:
         methods=forecast_methods(payload)
+        if payload.get('proposal_selection') is not None:
+            import adaptive_scenario_proposals
+            methods = adaptive_scenario_proposals.effective_methods(payload['proposal_selection'], core_methods=methods)
+            computed = payload['proposal_selection'].get('policy', {}).get('version') == 'all-computed-proposals-v1'
+            if computed:
+                st.caption('Toutes les propositions produites par les méthodes sont sauvegardées et présentées. '
+                           'La qualification historique reste informative pour les groupes de 2 à 20 matchs.')
+                tables.render_proposal_evidence(methods, key='workspace_proposal_evidence')
+            else:
+                st.caption('Les propositions respectent le seuil historique conservé avec ce calcul. '
+                           'Aucun nombre de scénarios n’est imposé ; toutes les propositions retenues sont sauvegardées.')
+            for name, reason in payload['proposal_selection'].get('unavailable', {}).items():
+                st.caption(f"{tables.METHOD_LABELS.get(name, name)} : {reason}")
+            if not methods:
+                st.info('Aucune proposition enregistrée dans ce calcul.' if computed else
+                        'Aucun scénario proposé : la règle de sélection ne dispose pas d’une qualification historique suffisante pour ce groupe.')
+                return
         tables.render_matrix(methods,key='workspace_scenario_matrix',title='Les méthodes, scénario par scénario')
         st.caption('Chaque ligne représente un scénario distinct. Les rangs restent propres à chaque méthode ; '
                    'leur accord ne constitue pas plusieurs confirmations indépendantes.')
@@ -114,4 +155,4 @@ def render_analysis_matrix(payload):
 def render_match_results(rows, *, key=None):
     """Readable native badges in score tables; exported data stays unmodified."""
     display=[dict(row,**{'Résultat':[row['Résultat']] if row.get('Résultat') in ('1st','Égal','2nd') else []}) for row in rows]
-    st.dataframe(display,hide_index=True,width='stretch',key=key,column_config={'Résultat':result_column()})
+    table_views.dataframe(display,hide_index=True,width='stretch',key=key,column_config={'Résultat':result_column()}, table_id='scenario_presentation:render_match_results:dataframe:1')

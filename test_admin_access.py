@@ -84,8 +84,68 @@ class AdminPolicyTests(unittest.TestCase):
             config['access']['admin_emails'] = []
             self.assertFalse(access.can_admin())
 
+    def test_server_lock_preserves_owner_identity_and_local_default(self):
+        config = self.config()
+        with patch.object(access, '_secrets', return_value=config), patch.object(access, '_claims', return_value=CLAIMS), \
+                patch.object(access.st, 'get_option', return_value='0.0.0.0'), patch.object(access, 'time', return_value=1000):
+            self.assertTrue(access.can_owner())
+            self.assertTrue(access.can_admin())
+            for value in (False, 'true', 1, None):
+                config['access']['shared_writes'] = value
+                self.assertTrue(access.can_owner())
+                self.assertFalse(access.can_admin())
+            config['access']['shared_writes'] = True
+            self.assertTrue(access.can_admin())
+
+    def test_server_lock_is_rechecked_before_mutation(self):
+        config = dict(access=dict(local_owner=True))
+        with patch.object(access, '_secrets', return_value=config), \
+                patch.object(access.st, 'get_option', return_value='127.0.0.1'):
+            self.assertTrue(access.can_admin())
+            config['access']['shared_writes'] = False
+            self.assertTrue(access.can_owner())
+            self.assertFalse(access.can_admin())
+
 
 class AdminBoundaryTests(unittest.TestCase):
+    def test_locked_owner_identity_is_clear_and_logout_is_available(self):
+        config = dict(auth=AUTH, access=dict(local_owner=True, shared_writes=False))
+        with patch.object(access, '_secrets', return_value=config), \
+                patch.object(access, '_claims', return_value=CLAIMS), \
+                patch.object(access.st, 'get_option', return_value='127.0.0.1'):
+            at = AppTest.from_string('from admin_access import render_identity\nrender_identity()').run()
+            self.assertFalse(at.exception)
+            text = ' '.join(x.value for x in at.caption)
+            self.assertIn('qualification', text)
+            self.assertNotIn('ne dispose pas', text)
+            self.assertFalse(at.button(key='admin_logout').disabled)
+
+    def test_forged_api_event_is_refused_for_authenticated_locked_owner(self):
+        config = dict(access=dict(local_owner=True, shared_writes=False))
+        client = MagicMock()
+        with patch.object(access, '_secrets', return_value=config), \
+                patch.object(access.st, 'get_option', return_value='127.0.0.1'), \
+                patch.object(api_panel, 'load_key', return_value='test-only-key'), \
+                patch.object(api_panel, 'ApiFootballClient', return_value=client), \
+                patch.object(api_panel, '_check_report', return_value={}), \
+                patch.object(api_panel, '_save_check') as save, patch.object(api_panel.st, 'button', return_value=True):
+            at = AppTest.from_string('from api_football_panel import render_api_football\nrender_api_football()').run()
+            self.assertFalse(at.exception)
+            self.assertTrue(any('qualification' in x.value for x in at.warning))
+            client.status.assert_not_called()
+            save.assert_not_called()
+
+    def test_forged_configuration_is_refused_for_authenticated_locked_owner(self):
+        config = dict(access=dict(local_owner=True, shared_writes=False))
+        with patch.object(access, '_secrets', return_value=config), \
+                patch.object(access.st, 'get_option', return_value='127.0.0.1'), \
+                patch.object(automation.worker, 'save_config') as save, \
+                patch.object(automation.st, 'form_submit_button', return_value=True):
+            at = AppTest.from_string('import automation_panel as p\np._configuration(dict(p.worker.DEFAULT_CONFIG))').run()
+            self.assertFalse(at.exception)
+            self.assertTrue(any('qualification' in x.value for x in at.warning))
+            save.assert_not_called()
+
     def test_read_only_api_panel_disables_controls_without_network(self):
         client = MagicMock()
         with patch.object(access, 'can_admin', return_value=False), \

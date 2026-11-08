@@ -1,4 +1,5 @@
 """Explicit local training and an auditable chronological model report."""
+import table_views
 import json
 
 import streamlit as st
@@ -10,6 +11,7 @@ import workspace_sources as sources
 import seasonal_validation_panel
 import contextual_validation_panel
 import model_campaign_panel
+import model_reassessment_panel
 from ux_theme import render_page_header
 
 METHODS = {'frequency': 'Répétitions seules', 'clubs': 'Clubs seuls',
@@ -35,7 +37,7 @@ def show_report(report):
                'Les résultats enregistrés ne sont pas recalculés avec les versions suivantes.')
     st.caption(f"Source : {report['source']} · Compétition : {report['league']} · "
                'Scénarios de 4 matchs, dans leur ordre chronologique.')
-    st.dataframe(comparison_table(report['test']), hide_index=True, width='stretch')
+    table_views.dataframe(comparison_table(report['test']), hide_index=True, width='stretch', table_id='model_training_panel:show_report:dataframe:1')
     delta = report['test']['catboost']['loss'] - report['test']['clubs']['loss']
     st.caption('Sur ce test, CatBoost réduit l’erreur probabiliste par rapport aux clubs seuls.'
                if delta < 0 else 'Sur ce test, CatBoost ne réduit pas l’erreur probabiliste par rapport aux clubs seuls.')
@@ -44,16 +46,16 @@ def show_report(report):
                'il ne mesure pas tous les groupes que vous pourriez sélectionner à la main.')
     with st.expander('Périodes, apprentissage et méthode de comparaison'):
         period_names = {'train': 'Entraînement', 'validation': 'Validation', 'test': 'Test réservé'}
-        st.dataframe([{'Période': period_names.get(name, name), 'Premier jour UTC': details['start'],
+        table_views.dataframe([{'Période': period_names.get(name, name), 'Premier jour UTC': details['start'],
                        'Dernier jour UTC': details['end'], 'Matchs': details['matches'],
                        'Groupes complets': details['groups']} for name in period_names for details in [report['split'][name]]],
-                     hide_index=True, width='stretch')
+                     hide_index=True, width='stretch', table_id='model_training_panel:show_report:dataframe:2')
         st.markdown('**Entraînement** : apprendre les paramètres. **Validation** : choisir les réglages '
                     'et la force des répétitions. **Test réservé** : mesurer les résultats une fois ces choix figés.')
         st.caption('Les séparations respectent des jours entiers en UTC. Pour chaque groupe évalué, '
                    'toutes les affiches utilisent seulement les résultats des jours précédant son premier match.')
         st.markdown('**Comparaison pendant la validation**')
-        st.dataframe(comparison_table(report['validation']), hide_index=True, width='stretch')
+        table_views.dataframe(comparison_table(report['validation']), hide_index=True, width='stretch', table_id='model_training_panel:show_report:dataframe:3')
         st.json(report['selection'], expanded=False)
         if report['selection'].get('alpha') == 0:
             st.caption('La validation a retenu une force de répétition nulle : les fréquences des scénarios '
@@ -75,6 +77,23 @@ def render_training():
                        'Mesurer les répétitions d’une saison à l’autre et entraîner les modèles par compétition.',
                        eyebrow='APPRENTISSAGE · VALIDATION · TEST', icon=':material/model_training:')
     admin_access.read_only_notice()
+    view = st.segmented_control('Évaluation du modèle', ['campaign', 'context', 'seasons', 'reassessment', 'deployment', 'causal', 'partitions'],
+                                format_func=lambda value: {'campaign': 'Campagne toutes compétitions',
+                                                           'context': 'Répétitions par contexte',
+                                                           'seasons': 'Historique par saison',
+                                                           'reassessment': 'Réévaluation contrôlée',
+                                                           'deployment': 'Modèle pour les prochains matchs',
+                                                           'causal': 'Variables avant match',
+                                                           'partitions': 'Cohortes et candidats'}[value],
+                                default='campaign', required=True, key='model_validation_view',wrap=True)
+    if view == 'causal':
+        from causal_feature_panel import render
+        render()
+        return
+    if view == 'partitions':
+        from causal_partition_panel import render
+        render()
+        return
     try:
         source = sources.selected_source()
         st.caption(f'Source active : {source}. L’entraînement utilise uniquement les données locales de ce fournisseur.')
@@ -82,12 +101,6 @@ def render_training():
     except sources.ERRORS as error:
         st.error(str(error))
         return
-    view = st.segmented_control('Évaluation du modèle', ['campaign', 'context', 'seasons', 'deployment'],
-                                format_func=lambda value: {'campaign': 'Campagne toutes compétitions',
-                                                           'context': 'Répétitions par contexte',
-                                                           'seasons': 'Historique par saison',
-                                                           'deployment': 'Modèle pour les prochains matchs'}[value],
-                                default='campaign', required=True, key='model_validation_view')
     if view == 'campaign':
         model_campaign_panel.render(rows, source)
         return
@@ -114,6 +127,9 @@ def render_training():
         return
     if view == 'seasons':
         seasonal_validation_panel.render(rows, league, source)
+        return
+    if view == 'reassessment':
+        model_reassessment_panel.render(rows, league, source)
         return
     try:
         frozen_campaign = campaign.load_manifest(league)

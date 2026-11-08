@@ -1,4 +1,5 @@
 """Inspect and explicitly run exploratory context-neighbour evaluations."""
+import table_views
 from datetime import datetime
 import json
 
@@ -40,7 +41,7 @@ def show_report(report, league):
                                  key=f'contextual_scope_{league}')
     key = {'complete': 'aggregate_complete', 'partial': 'aggregate_partial', 'all': 'aggregate'}[scope]
     metrics = report[key][str(size)]
-    st.dataframe(metrics_table(metrics), hide_index=True, width='stretch')
+    table_views.dataframe(metrics_table(metrics), hide_index=True, width='stretch', table_id='contextual_validation_panel:show_report:dataframe:1')
     st.caption('Une réussite exige tous les résultats dans le bon ordre. Les méthodes utilisent exactement '
                'les mêmes groupes pour cette taille. Une erreur probabiliste plus faible est meilleure.')
     folds = [fold for fold in report['folds'] if scope == 'all' or bool(fold['partial']) == (scope == 'partial')]
@@ -55,7 +56,7 @@ def show_report(report, league):
                      'Poids effectif moyen (%)': round(100 * support['mean_eta'], 2),
                      'Groupes avec correction': support['active_groups']})
     st.markdown('**Réglages choisis sur validation et résultats sur la saison suivante**')
-    st.dataframe(rows, hide_index=True, width='stretch')
+    table_views.dataframe(rows, hide_index=True, width='stretch', table_id='contextual_validation_panel:show_report:dataframe:2')
     wins = sum(fold['sizes'][str(size)]['test']['context_neighbors']['loss'] <
                fold['sizes'][str(size)]['test']['clubs']['loss'] - 1e-12 for fold in folds)
     st.caption(f'La méthode par contexte réduit l’erreur face aux clubs seuls sur {wins} des '
@@ -83,11 +84,11 @@ def show_report(report, league):
                    'Le catalogue du test est figé à entraînement + validation. Aucun groupe du test n’y entre.')
         for fold in report['folds']:
             st.markdown(f'**Test sur la saison {fold["test_season"]}**')
-            st.dataframe([{'Période': label, 'Saisons': ', '.join(map(str, fold['split'][name]['seasons'])),
+            table_views.dataframe([{'Période': label, 'Saisons': ', '.join(map(str, fold['split'][name]['seasons'])),
                            'Matchs': fold['split'][name]['matches'], 'Début UTC': fold['split'][name]['start'],
                            'Fin UTC': fold['split'][name]['end']}
                           for name, label in [('train', 'Entraînement'), ('validation', 'Validation'), ('test', 'Test')]],
-                         hide_index=True, width='stretch')
+                         hide_index=True, width='stretch', table_id='contextual_validation_panel:show_report:dataframe:3')
             st.json({'selection': fold['sizes'][str(size)]['selection'],
                      'support': fold['sizes'][str(size)]['support_summary']}, expanded=False)
         st.caption('Le support doit atteindre au moins 12 voisins et un effectif pondéré de 8. '
@@ -115,7 +116,7 @@ def render(rows, league, source):
         st.info(' '.join(plan.get('diagnostics', [])) or 'Importez davantage de saisons pour cette compétition.')
         return
     with st.expander('Historique et périodes disponibles'):
-        st.dataframe(plan['seasons'], hide_index=True, width='stretch')
+        table_views.dataframe(plan['seasons'], hide_index=True, width='stretch', table_id='contextual_validation_panel:render:dataframe:1')
         st.caption('Apprendre sur 2022, valider sur 2023 et tester sur 2024 ; '
                    'puis avancer d’une saison, jusqu’au test partiel de 2026.')
     st.caption('Calcul local sur des groupes de 2, 4, 6 et 8 matchs, sans requête API. '

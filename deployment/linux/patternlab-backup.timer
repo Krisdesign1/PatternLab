@@ -1,0 +1,15 @@
+[Unit]
+Description=Check the daily PatternLab backup, retrying deferred work
+
+[Timer]
+# 02:00 UTC is 03:00 in Kinshasa. Hourly retries defer to a running worker;
+# backup.py creates at most one verified point in each 24-hour interval.
+OnCalendar=*-*-* 02:00:00 UTC
+OnUnitInactiveSec=1h
+Persistent=yes
+RandomizedDelaySec=5min
+AccuracySec=1min
+Unit=patternlab-backup.service
+
+[Install]
+WantedBy=timers.target

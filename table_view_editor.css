@@ -1,0 +1,80 @@
+.tve-root {
+  color: var(--st-text-color, #31333f);
+  font-family: var(--st-font, sans-serif);
+  font-size: var(--st-base-font-size, 1rem);
+  min-width: 0;
+  width: 100%;
+}
+
+.tve-root *, .tve-root *::before, .tve-root *::after { box-sizing: border-box; }
+.tve-editor {
+  border: 1px solid var(--st-border-color, rgba(128, 128, 128, .3));
+  border-radius: var(--st-base-radius, .5rem);
+  margin: .25rem 0 .75rem;
+  min-width: 0;
+}
+.tve-editor > summary {
+  cursor: pointer;
+  font-size: .875rem;
+  font-weight: 500;
+  padding: .65rem .85rem;
+}
+.tve-editor > summary:hover { background: var(--st-secondary-background-color, rgba(128, 128, 128, .08)); }
+.tve-editor > summary:focus-visible,
+.tve-root button:focus-visible,
+.tve-root input:focus-visible,
+.tve-root select:focus-visible {
+  outline: 2px solid var(--st-primary-color, #ff4b4b);
+  outline-offset: 2px;
+}
+.tve-content { padding: 0 .85rem .8rem; min-width: 0; }
+.tve-help { font-size: .8rem; line-height: 1.45; margin: .25rem 0 .75rem; opacity: .8; }
+.tve-controls-scroll { width: 100%; max-height: 28rem; overflow: auto; }
+.tve-controls { border-collapse: collapse; font-size: .8rem; min-width: 650px; width: 100%; }
+.tve-controls thead { background: var(--st-secondary-background-color, #f0f2f6); }
+.tve-controls th, .tve-controls td {
+  border-bottom: 1px solid var(--st-border-color, rgba(128, 128, 128, .25));
+  padding: .4rem .5rem;
+  text-align: left;
+  vertical-align: middle;
+}
+.tve-controls thead th { font-weight: 500; white-space: nowrap; }
+.tve-controls .tve-name { font-weight: 400; min-width: 9rem; overflow-wrap: anywhere; }
+.tve-controls .tve-visible { text-align: center; width: 3.5rem; }
+.tve-controls input[type="checkbox"] { accent-color: var(--st-primary-color, #ff4b4b); cursor: pointer; height: 1rem; width: 1rem; }
+.tve-root button, .tve-root input[type="number"], .tve-root select {
+  background: var(--st-background-color, #fff);
+  border: 1px solid var(--st-border-color, rgba(128, 128, 128, .35));
+  border-radius: var(--st-base-radius, .5rem);
+  color: inherit;
+  font-family: inherit;
+  font-size: .8rem;
+  min-height: 2rem;
+}
+.tve-root input[type="number"], .tve-root select { padding: .25rem .4rem; }
+.tve-root .tve-width { max-width: 6rem; width: 6rem; }
+.tve-root select { min-width: 7.25rem; }
+.tve-root button { cursor: pointer; padding: .4rem .65rem; }
+.tve-root button:hover:enabled { border-color: var(--st-primary-color, #ff4b4b); color: var(--st-primary-color, #ff4b4b); }
+.tve-root button:disabled { cursor: default; opacity: .35; }
+.tve-stepper { align-items: center; display: flex; gap: .2rem; white-space: nowrap; }
+.tve-root .tve-icon-button { font-size: 1rem; line-height: 1; min-width: 1.8rem; padding: .2rem .35rem; }
+.tve-priority { display: inline-block; min-width: 1rem; text-align: center; }
+.tve-width-help { margin-top: .6rem; margin-bottom: .6rem; }
+.tve-actions { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; }
+.tve-root .tve-primary { background: var(--st-primary-color, #ff4b4b); border-color: var(--st-primary-color, #ff4b4b); color: var(--st-primary-color-text, #fff); }
+.tve-root .tve-primary:hover:enabled { color: var(--st-primary-color-text, #fff); filter: brightness(.95); }
+.tve-status, .tve-draft-status { font-size: .8rem; line-height: 1.4; margin: .5rem 0 0; }
+.tve-draft-status { opacity: .75; }
+.tve-status:empty, .tve-draft-status:empty { display: none; }
+.tve-rich { max-width: 100%; min-width: 0; overflow-x: auto; }
+.tve-rich[hidden] { display: none; }
+.pl-view-rich table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+.pl-view-rich th, .pl-view-rich td { border-bottom: 1px solid var(--st-border-color, rgba(128,128,128,.3)); padding: .7rem .6rem; text-align: left; vertical-align: middle; }
+.pl-view-rich thead { background: var(--st-secondary-background-color, rgba(128,128,128,.1)); }
+.pl-view-rich .pl-view-badge { border-radius: .35rem; font-size: .8rem; padding: .15rem .4rem; white-space: nowrap; }
+@media (max-width: 600px) {
+  .tve-content { padding-left: .5rem; padding-right: .5rem; }
+  .tve-actions { align-items: stretch; }
+  .tve-actions .tve-button { flex: 1 1 10rem; }
+}

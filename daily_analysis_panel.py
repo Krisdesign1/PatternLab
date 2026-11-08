@@ -1,10 +1,13 @@
 """Daily cross-competition dossiers, with frozen selection and result history."""
+import table_views
 import json
 from datetime import datetime
 from math import isfinite
 
 import streamlit as st
+from group_size_filter import render as render_group_size_filter
 import admin_access
+from analysis_date import get_selected_day
 from cloud_ui import guarded
 
 import api_football as api
@@ -18,6 +21,9 @@ import scenario_presentation as presentation
 import scenario_tables as tables
 from journal_browser import _markdown
 from ux_theme import render_page_header
+import result_explanations
+from adaptive_scenario_proposals import effective_methods
+from result_explanations_panel import render_explanation
 
 
 COLORS = {'pending': 'blue', 'settled': 'gray', 'unresolved': 'orange', 'void': 'gray'}
@@ -28,6 +34,20 @@ PREPARATION = {'running': 'Calculs en cours', 'completed': 'Passage terminé', '
 
 def _now():
     return datetime.now(performance.LOCAL_ZONE)
+
+
+def _latest_preparation(day, status, manual):
+    """A saved manual report must not mask a newer scheduler passage."""
+    reports = [value for value in (status, manual) if isinstance(value, dict)
+               and value.get('day') == day.isoformat()]
+    def stamp(value):
+        for field in ('finished_at', 'started_at'):
+            try:
+                return journal._stamp(value[field]).timestamp()
+            except (KeyError, ValueError, TypeError):
+                continue
+        return float('-inf')
+    return max(reports, key=stamp, default={})
 
 
 def _names(row):
@@ -41,9 +61,11 @@ def _detail(row, clock_day):
         st.session_state.pop('daily_selected', None)
         st.rerun()
     st.subheader(f"Analyse de {entry['size']} matchs", icon=':material/schema:')
+    tables.render_archive_scope(entry)
     st.badge(row['status_label'], color=COLORS[row['status']])
+    render_explanation(entry, key=f'daily_results_{entry["id"]}')
     if row.get('searched_scenario'):
-        st.caption('Réalisation des trois premiers choix du moteur')
+        st.caption('Réalisation de l’ensemble des choix des méthodes conservées')
     tables.render_outcome(row['scenario_outcome'], show_sequence=True)
     st.caption(_markdown(_names(row)))
     st.caption(f"Matchs du {row['day'].strftime('%d/%m/%Y')} · Enregistrée avant match le {entry['created_at']} · "
@@ -73,14 +95,14 @@ def _detail(row, clock_day):
                 'Écart (points)': 100*(chance-tendency) if isinstance(chance, (int, float)) and isinstance(tendency, (int, float)) else None,
                 **{value: 100 * values[value] if isinstance(values.get(value), (int, float)) else None
                    for value in ('1st', 'Égal', '2nd')}})
-        st.dataframe(probabilities, hide_index=True, width='stretch',
+        table_views.dataframe(probabilities, hide_index=True, width='stretch',
                      column_config={**{value: st.column_config.NumberColumn(f'{value} (%)', format='%.2f')
                                        for value in ('1st', 'Égal', '2nd')},
                                     'Probabilité choisie (%)': st.column_config.NumberColumn(format='%.2f'),
                                     'Tendance du championnat (%)': st.column_config.NumberColumn(format='%.2f'),
                                     'Écart (points)': st.column_config.NumberColumn(format='%+.2f'),
                                     'Résultat choisi': st.column_config.MultiselectColumn(
-                                        options=['1st', 'Égal', '2nd'], color=['#1D4ED8', '#6D48B5', '#B45309'])})
+                                        options=['1st', 'Égal', '2nd'], color=['#1D4ED8', '#6D48B5', '#B45309'])}, table_id='daily_analysis_panel:_detail:dataframe:1')
         st.caption('L’écart décrit la différence avec la tendance figée du championnat ; il ne mesure pas un gain de réussite.')
         searched = row.get('searched_scenario')
         if searched:
@@ -91,7 +113,7 @@ def _detail(row, clock_day):
                           f"{100 * searched['probability']:.2f} %".replace('.', ','))
             st.badge(searched['label'], color={'hit': 'green', 'miss': 'red', 'pending': 'blue',
                                                'void': 'gray'}.get(searched['state'], 'orange'))
-            st.caption('Le scénario recherché reste distinct des trois premiers choix du moteur.')
+            st.caption('Ce scénario choisi possède son propre verdict ; le verdict des méthodes porte sur leurs propositions enregistrées.')
     else:
         if row['support'] is not None:
             st.metric('Appui des données à la sélection', f"{row['support']:.1f} / 100".replace('.', ','))
@@ -110,14 +132,16 @@ def _detail(row, clock_day):
                        'Classement selon la plus haute probabilité Clubs de chaque match, sans tri par volume historique.')
         support = selection.get('support') or {}
         if not probability_search:
-            st.dataframe([{'Indicateur': label, 'Minimum dans le groupe': support.get(key, '—')}
+            table_views.dataframe([{'Indicateur': label, 'Minimum dans le groupe': support.get(key, '—')}
                           for key, label in [('history_matches_min', 'Résultats par compétition'),
                                              ('history_days_min', 'Jours historiques UTC'),
                                              ('club_role_matches_min', 'Précédents dans le rôle de chaque club')]],
-                         hide_index=True, width='stretch')
+                         hide_index=True, width='stretch', table_id='daily_analysis_panel:_detail:dataframe:2')
         st.caption(f"Coupure historique conservée : {selection.get('before', 'non conservée')}")
     st.caption('Les scénarios combinent les modèles propres aux compétitions, sous une hypothèse d’indépendance entre elles.')
     observed = {item['match_id']: item for item in entry.get('observed', [])}
+    explanation = {str(item['match_id']): item for item in
+                   (entry.get('result_explanation') or {}).get('matches', [])}
     matches = []
     for position, fixture in enumerate(entry['fixtures'], 1):
         result = observed.get(fixture['match_id'], {})
@@ -126,29 +150,38 @@ def _detail(row, clock_day):
                             performance.LOCAL_ZONE).strftime('%d/%m/%Y %H:%M'),
                         'Domicile': fixture['home'], 'Extérieur': fixture['away'],
                         'Score à la pause': result.get('ht', '—'), 'Score à 90 minutes': result.get('ft', '—'),
-                        'Résultat': result.get('value', '—')})
+                        'Résultat': result.get('value', '—'),
+                        'État du résultat': explanation.get(str(fixture['match_id']), {}).get('label', '—'),
+                        'Motif du suivi': explanation.get(str(fixture['match_id']), {}).get('reason', '—')})
     presentation.render_match_results(matches, key='daily_match_results')
     if entry['status'] == 'pending':
         st.info(f"En attente : {performance.observed_count(entry)}/{entry['size']} résultats connus. "
                 'L’analyse sera évaluée lorsque tous les scores seront disponibles.')
     for issue in entry.get('issues', []):
         st.warning(issue)
-    tables.render_matrix(entry['methods'], actual=row['scenario_outcome'].get('actual'),
+    proposed_methods = effective_methods(entry)
+    tables.render_matrix(proposed_methods, actual=row['scenario_outcome'].get('actual'),
                          key=f'daily_matrix_{entry["id"]}', title='Les scénarios de cette analyse')
     if row['scenario_outcome']['state'] in ('hit', 'miss') and entry.get('evaluations'):
         st.subheader('Évaluation de l’analyse')
         ranks = {match['method']: match['rank'] for match in row['scenario_outcome']['matches']}
         evaluations = []
-        for name in entry['methods']:
+        for name in proposed_methods:
             saved = entry['evaluations'].get(name) or {}
+            reference = [list(item['sequence']) for item in entry['methods'][name]['ranking'][:3]]
+            actual = row['scenario_outcome'].get('actual')
             probability = saved.get('probability') if isinstance(saved, dict) else None
             valid = (not isinstance(probability, bool) and isinstance(probability, (int, float))
                      and isfinite(probability) and 0 <= probability <= 1)
             evaluations.append({'Méthode': tables.METHOD_LABELS.get(name, name),
-                                'Premier choix exact': ranks.get(name) == 1,
-                                'Scénario exact dans les 3 choix': name in ranks,
+                                'Premier choix exact': bool(reference and actual == reference[0]),
+                                'Scénario exact dans les 3 choix': actual in reference,
+                                'Scénario exact parmi tous les choix proposés': name in ranks,
                                 'Probabilité attribuée au scénario réalisé (%)': 100 * probability if valid else None})
-        st.dataframe(evaluations, hide_index=True, width='stretch')
+        table_views.dataframe(evaluations, hide_index=True, width='stretch', table_id='daily_analysis_panel:_detail:dataframe:3')
+        if entry.get('proposal_selection') is not None:
+            st.caption('Les colonnes « Premier choix » et « Dans les 3 » concernent la référence historique. '
+                       'La réalisation de la sélection porte sur tous les choix effectivement proposés.')
     unavailable = entry['metadata'].get('unavailable', {})
     if unavailable:
         with st.expander('Comprendre les méthodes indisponibles'):
@@ -159,7 +192,7 @@ def _detail(row, clock_day):
         if _now().date() != clock_day:
             st.rerun()
         try:
-            tracking.refresh_entry(entry)
+            tracking.refresh_entry({key: value for key, value in entry.items() if key != 'result_explanation'})
             st.rerun()
         except (journal.JournalError, api.ApiFootballError, ValueError) as error:
             st.error(str(error))
@@ -171,11 +204,12 @@ def _detail(row, clock_day):
 @guarded
 def render_daily():
     today = _now().date()
-    render_page_header('Analyses du jour',
+    selected_day = get_selected_day(_now())
+    render_page_header('Analyses de la journée',
                        'Des groupes de matchs sélectionnés au-delà des frontières des compétitions.',
                        eyebrow='GROUPES MULTIPLES · SCÉNARIOS FIGÉS · SUIVI DES RÉSULTATS', icon=':material/stars:')
     st.caption('API-Football · Heure de Kinshasa · Groupes de 2 à 20 matchs, plusieurs scénarios par analyse.')
-    modes = {'today': 'Aujourd’hui', 'history': 'Historique'}
+    modes = {'today': 'Aujourd’hui' if selected_day == today else 'Date choisie', 'history': 'Historique'}
     mode = st.segmented_control('Consulter les analyses sélectionnées', list(modes), format_func=modes.get,
                                 default='today', required=True, key='daily_view', persist_state='page')
     try:
@@ -191,7 +225,7 @@ def render_daily():
         return
     if _now().date() != today:
         st.rerun()
-    day = today
+    day = selected_day
     if mode == 'history':
         dates = sorted({row['day'] for row in rows if row['day'] < today}, reverse=True)
         if not dates:
@@ -203,34 +237,51 @@ def render_daily():
         day = st.selectbox('Journée des analyses', dates, format_func=lambda value: value.strftime('%d/%m/%Y'),
                             key='daily_history_date', persist_state='page')
     else:
-        if st.button('Préparer les analyses du jour', icon=':material/auto_awesome:', key='daily_prepare', disabled=not admin_access.can_admin()):
+        if st.button('Préparer les analyses du jour' if day == today else 'Préparer les analyses de cette date',
+                     icon=':material/auto_awesome:', key='daily_prepare',
+                     disabled=not admin_access.can_admin() or day < today):
             admin_access.require_admin()
             try:
                 with st.spinner('Actualisation du calendrier et préparation des analyses…'):
-                    report = worker.run_now()
+                    report = worker.run_now(day=day)
                 st.session_state['daily_last_run'] = report
                 st.rerun()
             except (ValueError, OSError, api.ApiFootballError) as error:
                 st.error(str(error))
-        report = st.session_state.get('daily_last_run') or status
-        if report and report.get('day') == today.isoformat():
+        report = _latest_preparation(day, status, st.session_state.get('daily_last_run'))
+        if day < today:
+            st.caption('Journée passée : seules les prévisions déjà enregistrées avant match sont consultables.')
+        elif day > today:
+            st.caption('La préparation charge le calendrier de cette date et confirme les affiches avant de figer les prévisions. '
+                       'Les calculs utilisent les données disponibles maintenant, sans résultat futur.')
+        if report and report.get('day') == day.isoformat():
             st.caption(f"Dernière préparation : {report.get('created', 0)} analyse(s) enregistrée(s), "
                        f"{report.get('remaining', 0)} à traiter. {PREPARATION.get(report.get('status'), 'Préparation disponible')}.")
+        elif day >= today:
+            st.caption(f"Aucune préparation enregistrée pour le {day.strftime('%d/%m/%Y')}. "
+                       'Le bouton ci-dessus permet de lancer une préparation explicite.')
         with st.expander('Comment les analyses sont-elles sélectionnées ?'):
             st.markdown('Les rencontres doivent disposer de profils historiques exploitables dans leur propre compétition. '
                         'Les groupes sont classés selon un indice d’appui des données, calculé par match pour comparer les tailles. '
                         'Les tailles de 2 à 20 sont explorées par regroupements déterministes ; toutes les combinaisons possibles '
                         'ne sont pas énumérées. La précision de cette nouvelle sélection sera mesurée dans son suivi prospectif.')
-            st.caption('La préparation automatique reprend à chaque cycle du service. Les limites de traitement étalent '
-                       'les calculs, sans fixer de nombre maximal d’analyses retenues.')
+            st.caption('Le service prépare automatiquement aujourd’hui. Pour une autre date à venir, utilisez le bouton de préparation. '
+                       'Les limites de traitement étalent les calculs, sans fixer de nombre maximal d’analyses retenues.')
             st.page_link('ui_pages/daily_evaluation.py', label='Consulter le bilan de la sélection', icon=':material/fact_check:')
     context = (today.isoformat(), mode, day.isoformat())
     if st.session_state.get('daily_context') != context:
         st.session_state['daily_context'] = context
         for key in list(st.session_state):
-            if key in ('daily_selected', 'daily_preferences') or key.startswith(('daily_matrix_', 'daily_page_', 'daily_state', 'daily_verdict', 'daily_search')):
+            if key in ('daily_selected', 'daily_preferences', 'daily_group_size') or key.startswith(('daily_matrix_', 'daily_page_', 'daily_state', 'daily_verdict', 'daily_search')):
                 st.session_state.pop(key, None)
     selected_rows = data.on_day(rows, day, today=today)
+    # History determines the available dates, but result explanations are only
+    # needed for the day the reader opened. Shared forecasts linked by several
+    # scenario intents need one annotation, without changing any saved entry.
+    selected_entries = {row['entry']['id']: row['entry'] for row in selected_rows}
+    explained = {entry['id']: entry for entry in result_explanations.annotate_entries(
+        selected_entries.values(), now=_now())}
+    selected_rows = [dict(row, entry=explained[row['entry']['id']]) for row in selected_rows]
     st.caption(f"Matchs du {day.strftime('%d/%m/%Y')} · Les critères propres à chaque analyse sont conservés avant match.")
     st.caption('« Réalisé » signifie que les matchs ont été évalués. La réussite des scénarios est indiquée séparément dès la liste, puis dans la fiche.')
     stats = st.columns(3)
@@ -238,6 +289,7 @@ def render_daily():
                                   (len(selected_rows), sum(row['status'] == 'pending' for row in selected_rows),
                                    sum(row['status'] == 'settled' for row in selected_rows))):
         column.metric(label, value)
+    st.caption('Ces compteurs couvrent toute la journée. Le filtre de taille ci-dessous concerne la liste des groupes.')
     indexed = {row['id']: row for row in selected_rows}
     selected = st.session_state.get('daily_selected')
     if selected in indexed:
@@ -250,6 +302,7 @@ def render_daily():
             if key not in st.session_state:
                 st.session_state[key] = value
         with st.container(horizontal=True):
+            group_size = render_group_size_filter('daily_group_size')
             state = st.selectbox('État des analyses', [None, *data.STATE_LABELS],
                                  format_func=lambda value: 'Tous les états' if value is None else data.STATE_LABELS[value],
                                  key='daily_state', persist_state='page')
@@ -257,7 +310,8 @@ def render_daily():
                                     format_func=tables.OUTCOME_FILTERS.get, key='daily_verdict', persist_state='page')
             search = st.text_input('Rechercher un club ou une compétition', key='daily_search', persist_state='page')
         needle = search.casefold().strip()
-        filtered = [row for row in selected_rows if (state is None or row['status'] == state) and
+        filtered = [row for row in selected_rows if (group_size is None or row['entry']['size'] == group_size) and
+                    (state is None or row['status'] == state) and
                     (verdict == 'all' or row['scenario_outcome']['state'] == verdict) and
                     (not needle or needle in (' '.join(f"{fixture['home']} {fixture['away']}" for fixture in row['entry']['fixtures'])
                                               + ' ' + _names(row)).casefold())]
@@ -267,7 +321,7 @@ def render_daily():
             st.session_state.pop(size_key)
         with st.container(horizontal=True):
             per_page = st.selectbox('Analyses par page',[10,20,50],index=2,key=size_key,persist_state='session')
-            list_context = (day.isoformat(),state,verdict,needle,per_page)
+            list_context = (day.isoformat(),group_size,state,verdict,needle,per_page)
             if st.session_state.get('daily_list_context') != list_context:
                 st.session_state['daily_list_context'] = list_context
                 st.session_state.pop(page_key,None)
@@ -277,12 +331,14 @@ def render_daily():
                 st.session_state.pop(page_key,None)
             page = (st.selectbox('Page des analyses',range(pages),format_func=lambda value:f'Page {value+1}',
                                  key=page_key,persist_state='page') if pages>1 else 0)
-        st.session_state['daily_preferences'] = dict(daily_state=state,daily_verdict=verdict,daily_search=search,
+        st.session_state['daily_preferences'] = dict(daily_group_size=group_size,daily_state=state,daily_verdict=verdict,daily_search=search,
                                                      **{size_key:per_page,page_key:page})
+        st.caption(f'{len(filtered)} analyse(s) affichable(s) sur {len(selected_rows)} pour cette journée · '
+                   + ('Toutes les tailles.' if group_size is None else f'Groupes de {group_size} matchs exactement.'))
         if not filtered:
             if selected_rows:
                 st.info('Aucune analyse ne correspond à ces filtres.')
-            elif mode == 'today' and status.get('day') == today.isoformat() and status.get('remaining', 0):
+            elif mode == 'today' and status.get('day') == day.isoformat() and status.get('remaining', 0):
                 st.info(f"{status['remaining']} groupe(s) attendent encore leur préparation ou leur confirmation API. "
                         'Les analyses apparaîtront ici après leur enregistrement avant match.')
             else:
@@ -291,7 +347,8 @@ def render_daily():
             for row in filtered[page*per_page:(page+1)*per_page]:
                 entry = row['entry']
                 try:
-                    count = len({tuple(item['sequence']) for method in entry['methods'].values() for item in method['ranking']})
+                    proposed_methods = effective_methods(entry)
+                    count = len({tuple(item['sequence']) for method in proposed_methods.values() for item in method['ranking']})
                     scenarios_label = f'{count} scénarios distincts enregistrés'
                 except (KeyError, TypeError, AttributeError):
                     scenarios_label = 'Classement à vérifier'
@@ -300,10 +357,15 @@ def render_daily():
                     with left:
                         st.markdown(f"**{entry['size']} matchs · {_markdown(_names(row))}**")
                         st.badge(row['status_label'], color=COLORS[row['status']])
+                        explanation = entry.get('result_explanation') or {}
+                        if explanation.get('blocking'):
+                            st.badge(explanation.get('label') or 'Résultat non évaluable', color='orange')
+                            if explanation.get('summary'):
+                                st.caption(_markdown(explanation['summary']))
                         if row.get('searched_scenario'):
-                            st.caption('Réalisation des trois premiers choix du moteur')
-                        tables.render_outcome(row['scenario_outcome'])
-                        st.caption(f"{len(entry['methods'])} méthode(s) · {scenarios_label} · "
+                            st.caption('Réalisation de l’ensemble des choix des méthodes conservées')
+                        tables.render_outcome(row['scenario_outcome'], show_sequence=True, show_explanation=False)
+                        st.caption(f"{len(proposed_methods)} méthode(s) · {scenarios_label} · "
                                    f"{performance.observed_count(entry)}/{entry['size']} résultats connus")
                         st.caption(' · '.join(_markdown(f"{fixture['home']} — {fixture['away']}") for fixture in entry['fixtures'][:2]) +
                                    (f" · +{entry['size']-2} matchs" if entry['size'] > 2 else ''))
@@ -323,7 +385,9 @@ def render_daily():
                             st.rerun()
             st.caption(f'{page*per_page+1}–{min((page+1)*per_page,len(filtered))} sur {len(filtered)} analyses · '
                        f'Page {page+1}/{pages} · {per_page} par page · Aucun plafond de sélection.')
-    st.download_button('Exporter les analyses sélectionnées', json.dumps([
+    st.caption('L’export de la journée conserve les groupes complets, toutes tailles confondues.')
+    st.download_button('Exporter les analyses sélectionnées', lambda: json.dumps([
         dict(row['entry'], scenario_intent=row['scenario_intent']) if row.get('scenario_intent') else row['entry']
-        for row in rows], ensure_ascii=False, indent=2),
-                       file_name='patternlab_analyses_du_jour.json', mime='application/json', key='daily_export')
+        for row in selected_rows], ensure_ascii=False, indent=2),
+                       file_name=f'patternlab_analyses_{day.isoformat()}.json', mime='application/json',
+                       key='daily_export', on_click='ignore')

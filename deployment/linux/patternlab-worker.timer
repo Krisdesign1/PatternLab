@@ -1,0 +1,13 @@
+[Unit]
+Description=Run PatternLab automation after the previous cycle has finished
+
+[Timer]
+# First cycle is delayed after deliberate activation. Subsequent cycles wait
+# fifteen minutes after completion, including long-running model preparation.
+OnActiveSec=1min
+OnUnitInactiveSec=15min
+AccuracySec=30s
+Unit=patternlab-worker.service
+
+[Install]
+WantedBy=timers.target

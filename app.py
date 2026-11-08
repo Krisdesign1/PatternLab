@@ -5,8 +5,12 @@ from scenario_odds import DEFAULT_ODDS, format_odds
 from cloud_ui import guarded, install_retry_watchdog
 from admin_access import render_identity
 from navigation_local import pages, render_workflow_navigation
+from halftime_collection_panel import render_compact
+from analysis_date import render_date_selector, install_date_watchdog
+from table_views import begin_render as begin_table_render
 
 st.set_page_config(page_title="PatternLab", page_icon=":material/schema:", layout="wide")
+begin_table_render()
 st.set_option("client.toolbarMode", "viewer")
 if st.session_state.get('api_only_data_version') != '2026-10-18-v1':
     st.session_state.clear()
@@ -15,6 +19,7 @@ render_brand()
 page = st.navigation(pages())
 with st.sidebar:
     render_identity()
+    render_compact()
     with st.expander('Comprendre 1st, Égal et 2nd'):
         st.markdown(f":blue-badge[1st] · **{format_odds(DEFAULT_ODDS['1st'])}** · Plus de buts avant la pause  \n"
                     f":violet-badge[Égal] · **{format_odds(DEFAULT_ODDS['Égal'])}** · Autant dans chaque période  \n"
@@ -22,5 +27,7 @@ with st.sidebar:
         st.caption("Cotes fixes de référence renseignées manuellement.")
     st.caption("Horaires : Africa/Kinshasa · UTC+1")
 render_workflow_navigation(page)
+render_date_selector()
+install_date_watchdog()
 install_retry_watchdog()
 guarded(page.run)()

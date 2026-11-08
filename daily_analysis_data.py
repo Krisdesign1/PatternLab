@@ -128,8 +128,8 @@ def project(entries, selections=(), scenario_intents=()):
 
 
 def on_day(rows, day, *, today):
-    if type(day) is not date or type(today) is not date or day > today:
-        raise ValueError('Choisissez aujourd’hui ou une journée passée.')
+    if type(day) is not date or type(today) is not date:
+        raise ValueError('Choisissez une date de calendrier valide.')
     return [row for row in rows if row['day'] == day]
 
 

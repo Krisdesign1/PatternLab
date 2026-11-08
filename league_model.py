@@ -1,31 +1,16 @@
 """Competition analysis of verified, active Forebet imports (no database writes)."""
 import json
 import math
-import re
 from collections import Counter, defaultdict
 from datetime import datetime
 from coupon_sizes import top_independent
 from pathlib import Path
+from halftime_domain import CLASS_ORDER as VALUES, parse_score as score, outcome
 
-VALUES = ('1st', 'Égal', '2nd')
 DATA_DIR = Path(__file__).resolve().parent / 'data' / 'forebet'
 PRIOR_WEIGHT = 30
 MIN_MATCHES = 30
 MIN_DAYS = 3
-
-
-def score(text):
-    parts = re.fullmatch(r'\s*\(?\s*(\d+)\s*-\s*(\d+)\s*\)?\s*', text or '')
-    if not parts:
-        raise ValueError('Score HT/FT absent ou invalide')
-    return tuple(map(int, parts.groups()))
-
-
-def outcome(ht, ft):
-    if any(a > b for a, b in zip(ht, ft)):
-        raise ValueError('HT supérieur au FT')
-    first, second = sum(ht), sum(ft) - sum(ht)
-    return '1st' if first > second else '2nd' if second > first else 'Égal'
 
 
 def load_matches(coupons, directory=DATA_DIR):

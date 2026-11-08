@@ -34,6 +34,22 @@ def entry(identifier='entry-full-identity', *, size=4, league='39', status='pend
 
 
 class JournalBrowserDataTests(unittest.TestCase):
+    def test_saved_result_cause_survives_projection_without_changing_state(self):
+        value = entry(status='unresolved')
+        value['result_explanation'] = dict(label='Match reporté',
+            summary='Étoile 0 — Léopards 0 : report signalé.',
+            matches=[dict(match_id='1000', label='Reporté', reason='Report signalé.',
+                          state='postponed', raw_status='PST')],
+            blocking=[dict(match_id='1000', label='Reporté', reason='Report signalé.',
+                           state='postponed', raw_status='PST')])
+        before = copy.deepcopy(value)
+        row = browser.build_rows([value], now=NOW)[0]
+        self.assertEqual(row['state'], 'unresolved')
+        self.assertEqual(row['status_label'], 'À vérifier')
+        self.assertEqual(row['result_explanation'], value['result_explanation'])
+        row['result_explanation']['matches'][0]['label'] = 'Changed'
+        self.assertEqual(value, before)
+
     def test_primary_choice_uses_saved_selected_engine_not_highest_probability_or_results(self):
         value=entry(selected='catboost')
         original=copy.deepcopy(value)
@@ -127,16 +143,26 @@ class JournalBrowserDataTests(unittest.TestCase):
         self.assertEqual(rows[0]['kickoff_range'],'00:00–23:59')
         self.assertEqual(rows[0]['status_label'],'Résultats attendus')
 
-    def test_archive_selector_rejects_future_and_invalid_local_dates(self):
+    def test_selector_accepts_future_and_rejects_invalid_local_dates(self):
         value=entry()
-        for day in (date(2026,10,21),datetime(2026,10,19), '2026-10-19',False):
+        for day in (datetime(2026,10,19), '2026-10-19',False):
             with self.subTest(day=day),self.assertRaises(ValueError):
                 browser.build_rows([value],now=NOW,day=day)
         # 23:00 UTC already belongs to tomorrow in Kinshasa.
         next_now=datetime(2026,10,20,23,1,tzinfo=timezone.utc)
         next_day=entry('next-local-day',day='2026-10-21')
+        row=browser.build_rows([value,next_day],now=NOW,day=date(2026,10,21))[0]
+        self.assertEqual((row['id'],row['state']),('next-local-day','pending'))
         self.assertEqual([row['id'] for row in browser.build_rows(
             [value,next_day],now=next_now,day=date(2026,10,21))],['next-local-day'])
+
+    def test_future_day_rejects_unsaved_forecasts_and_premature_results(self):
+        for changes in ({'created_at':'2026-10-20T11:00:00Z'}, {'status':'settled'},
+                        {'observed':[dict(match_id='1000',value='2nd',ht='0-0',ft='1-0')]}):
+            value=entry(day='2026-10-21')
+            value.update(changes)
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                browser.build_rows([value],now=NOW,day=date(2026,10,21))
 
     def test_archive_consultation_does_not_fetch_rebuild_or_record_predictions(self):
         value=entry('archived',day='2026-10-19',selected='context_neighbors')

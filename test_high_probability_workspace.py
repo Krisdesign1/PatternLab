@@ -14,6 +14,7 @@ import high_probability_workspace as workspace
 import prediction_journal as journal
 import prospective_models as models
 import probability_scenario_store as scenario_store
+import high_probability_archive as archive
 from test_high_probability_engine import fixture, history, NOW
 
 
@@ -42,6 +43,92 @@ class HighProbabilityWorkspaceTests(unittest.TestCase):
         report = scan(leagues)
         return workspace.prepare_group(report, [row['fixture']['match_id'] for row in report['rows']], NOW)
 
+    def test_selected_day_partitions_cache_and_keeps_actual_history_cutoff(self):
+        tomorrow = (NOW+timedelta(days=1)).date()
+        targets = [fixture(100001), fixture(100002, stamp='2026-10-23T15:00:00+00:00')]
+        raw = history()+targets+[fixture(900000, status='FT', stamp='2026-10-22T01:00:00+00:00')]
+        api.save_fixtures(raw, self.root/'fixtures.json')
+        with patch.object(engine, 'scan', wraps=engine.scan) as calculate:
+            today = workspace.load_scan(self.root, NOW)
+            future = workspace.load_scan(self.root, NOW, day=tomorrow)
+            repeated = workspace.load_scan(self.root, NOW+timedelta(minutes=1), day=tomorrow)
+            self.assertEqual(calculate.call_count, 2)
+        self.assertEqual([row['fixture']['match_id'] for row in today['rows']], ['100001'])
+        self.assertEqual([row['fixture']['match_id'] for row in future['rows']], ['100002'])
+        self.assertEqual(future['rows'], repeated['rows'])
+        self.assertEqual(future['before'], NOW.date().isoformat())
+        self.assertEqual(future['rows'][0]['training'], 36)
+        midnight = datetime.fromisoformat('2026-10-22T23:01:00+00:00')
+        after = workspace.load_scan(self.root, midnight, day=tomorrow)
+        self.assertEqual(after['rows'], future['rows'])
+        self.assertEqual(after['day'], future['day'])
+        next_utc_day = workspace.load_scan(self.root, datetime.fromisoformat('2026-10-23T00:01:00+00:00'), day=tomorrow)
+        self.assertEqual(next_utc_day['before'], '2026-10-23')
+        self.assertEqual(next_utc_day['rows'][0]['training'], 37)
+
+    def test_tomorrow_sqlite_scan_reads_only_history_before_the_real_utc_day(self):
+        import fixture_store
+        tomorrow = (NOW+timedelta(days=1)).date()
+        raw = history()+[fixture(100002, stamp='2026-10-23T15:00:00+00:00'),
+            fixture(900000, status='FT', stamp='2026-10-22T01:00:00+00:00', ht=(9, 0), ft=(9, 0))]
+        path = self.root/'fixtures.json'
+        api.save_fixtures(raw, path)
+        fixture_store.migrate_json(path)
+        with patch.object(api, 'load_matches', wraps=api.load_matches) as load:
+            report = workspace.load_scan(self.root, NOW, day=tomorrow)
+        self.assertEqual(load.call_args.kwargs['end'], '2026-10-22')
+        self.assertEqual(report['rows'][0]['training'], 36)
+        self.assertEqual(report['day'], '2026-10-23')
+        self.assertEqual(report['before'], '2026-10-22')
+
+    def test_refresh_uses_selected_day_without_advancing_the_prediction_clock(self):
+        tomorrow = (NOW+timedelta(days=1)).date()
+        with patch.object(workspace.calendar, 'refresh_day', return_value={}) as refresh, \
+                patch.object(workspace, 'load_scan', return_value={'day': tomorrow.isoformat()}) as load:
+            workspace.refresh_scan(self.root, NOW, day=tomorrow)
+        self.assertEqual(refresh.call_args.args[0], tomorrow)
+        load.assert_called_once_with(root=self.root, now=NOW, day=tomorrow)
+
+    def test_tomorrow_group_and_requested_scenario_are_saved_before_actual_kickoff(self):
+        tomorrow = (NOW+timedelta(days=1)).date()
+        targets = raw_targets()
+        for target in targets:
+            target['fixture']['date'] = target['fixture']['date'].replace('2026-10-22', '2026-10-23')
+        raw = history(league=39)+history(league=61, start=1000)+targets
+        report = engine.scan(raw, NOW, day=tomorrow)
+        ids = [row['fixture']['match_id'] for row in report['rows']]
+        prepared = workspace.prepare_group(report, ids, NOW, choices={identity: '1st' for identity in ids})
+        context = models.group_context(prepared['fixtures'], decision_at=NOW)
+        self.assertEqual(prepared['methods']['clubs']['training_before'], report['before'])
+        self.assertEqual(prepared['methods']['clubs']['history_cutoff_exclusive'], report['before'])
+        self.assertEqual(prepared['methods']['clubs']['decision_at'], NOW.isoformat())
+        self.assertEqual(prepared['methods']['clubs']['ordered_match_ids'], context['ordered_match_ids'])
+        self.assertEqual(prepared['methods']['clubs']['fixture_fingerprint'], context['fixture_fingerprint'])
+        for component in prepared['methods']['clubs']['distribution']['components']:
+            method = component['method']
+            subset = [prepared['fixtures'][index] for index in component['indices']]
+            self.assertEqual(method['training_before'], report['before'])
+            self.assertEqual(method['history_cutoff_exclusive'], report['before'])
+            self.assertEqual(method['decision_at'], NOW.isoformat())
+            self.assertEqual(method['ordered_match_ids'], [row['match_id'] for row in subset])
+            self.assertEqual(method['fixture_fingerprint'], models._context(subset, report['before'], NOW)['fixture_fingerprint'])
+        with patch.object(api.ApiFootballClient, 'get', side_effect=AssertionError('No real API')):
+            entry = workspace.record_group(prepared, self.root, clock=lambda: NOW, fetch=lambda **_: targets)
+        self.assertTrue(entry['created'])
+        self.assertEqual(prepared['day'], '2026-10-23')
+        self.assertEqual(entry['metadata']['selection']['match_day'], '2026-10-23')
+        self.assertEqual(datetime.fromisoformat(entry['created_at']), NOW)
+        self.assertEqual(entry['status'], 'pending')
+        self.assertEqual(entry['scenario_intent']['selection']['match_day'], '2026-10-23')
+        self.assertEqual(entry['methods'], prepared['methods'])
+        archive.capture(report, self.root, clock=lambda: NOW)
+        self.assertEqual(len(archive.list_entries(self.root)), 2)
+        invalid = deepcopy(report)
+        invalid['rows'][0]['fixture']['timestamp'] = '2026-10-24T15:00:00'
+        with self.assertRaises(ValueError):
+            workspace.prepare_group(invalid, ids, NOW)
+
+
     def test_local_scan_cache_reads_only_and_expires_exactly_at_kickoff(self):
         raw = history()+[fixture(100001, stamp='2026-10-22T09:00:30+00:00')]
         api.save_fixtures(raw, self.root/'fixtures.json')
@@ -59,6 +146,31 @@ class HighProbabilityWorkspaceTests(unittest.TestCase):
             self.assertEqual(calculate.call_count, 1)
         self.assertEqual((self.root/'fixtures.json').read_bytes(), original)
         self.assertFalse(self.path.exists())
+
+    def test_automatic_archive_keeps_all_calculable_matches_without_a_group_or_api_call(self):
+        report=scan()
+        with (patch.object(api.ApiFootballClient,'get',side_effect=AssertionError('No API')),
+              patch.object(journal,'record_mixed',side_effect=AssertionError('No group needed')),
+              patch.object(archive,'reconcile',side_effect=AssertionError('No whole history reconciliation'))):
+            result=workspace.archive_scan(report,root=self.root,clock=lambda:NOW)
+        self.assertEqual(result['created'],len(report['rows']))
+        records=archive.list_entries(self.root)
+        self.assertEqual(len(records),len(report['rows']))
+        expected={row['fixture']['match_id']:row['probabilities'] for row in report['rows']}
+        self.assertEqual({row['fixture']['match_id']:row['probabilities'] for row in records},expected)
+        self.assertFalse(self.path.exists())
+
+    def test_unchanged_ranking_reuses_capture_but_new_probabilities_are_archived(self):
+        report=scan()
+        workspace.archive_scan(report,root=self.root,clock=lambda:NOW)
+        with patch.object(archive,'capture',wraps=archive.capture) as capture:
+            repeated=workspace.archive_scan(report,root=self.root,clock=lambda:NOW)
+            self.assertEqual(repeated['created'],0)
+            capture.assert_not_called()
+            report['rows'][0]['probabilities']={'1st':.6,'Égal':.3,'2nd':.1}
+            workspace.archive_scan(report,root=self.root,clock=lambda:NOW+timedelta(minutes=1))
+            capture.assert_called_once()
+        self.assertEqual(len(archive.list_entries(self.root)),3)
 
     def test_cache_survives_minute_changes_with_identical_active_probabilities(self):
         raw = history()+[fixture(100001, stamp='2026-10-22T09:00:30+00:00'),
@@ -111,12 +223,43 @@ class HighProbabilityWorkspaceTests(unittest.TestCase):
             for index, probabilities in zip(component['indices'], component['method']['distribution']['distributions']):
                 self.assertEqual(probabilities, by_id[prepared['fixtures'][index]['match_id']]['probabilities'])
             self.assertEqual(component['method']['history_cutoff_exclusive'], report['before'])
+            self.assertEqual(component['method']['training_before'], report['before'])
+            self.assertEqual(component['method']['decision_at'], NOW.isoformat())
         sequence = method['ranking'][0]['sequence']
         expected = math.prod(by_id[row['match_id']]['probabilities'][value]
                              for row, value in zip(prepared['fixtures'], sequence))
         self.assertAlmostEqual(method['ranking'][0]['probability'], expected)
         self.assertLess(sum(row['probability'] for row in method['ranking']), 1)
         self.assertFalse(self.path.exists())
+
+    def test_selected_rows_cannot_claim_a_different_or_unknown_history_cutoff(self):
+        for cutoff in ('2026-10-21', '2026-10-23', None):
+            report = scan()
+            report['rows'][0]['before'] = cutoff
+            with self.subTest(cutoff=cutoff), self.assertRaisesRegex(ValueError, 'coupure historique'):
+                workspace.prepare_group(report, ['100000', '100001'], NOW)
+
+    def test_report_history_cutoff_is_canonical_not_a_future_day(self):
+        for cutoff in ('2026-10-23', '2026-1-2', '20261022', None):
+            report = scan(); report['before'] = cutoff
+            with self.subTest(cutoff=cutoff), self.assertRaises(ValueError):
+                workspace.prepare_group(report, ['100000', '100001'], NOW)
+
+    def test_provider_name_whitespace_keeps_the_same_ids_and_snapshot(self):
+        report = scan()
+        for row in report['rows']:
+            row['fixture']['home'] = ' '+row['fixture']['home']+' '
+            row['fixture']['away'] = '\t'+row['fixture']['away']+' '
+        prepared = workspace.prepare_group(report, ['100000', '100001'], NOW)
+        fresh = raw_targets()
+        for raw in fresh:
+            raw['teams']['home']['name'] = ' '+raw['teams']['home']['name']+' '
+            raw['teams']['away']['name'] = '\t'+raw['teams']['away']['name']+' '
+        saved = workspace.record_group(prepared, self.root, clock=lambda: NOW, fetch=lambda **_:fresh)
+        self.assertTrue(saved['created'])
+        self.assertEqual(saved['methods'], prepared['methods'])
+        self.assertTrue(all(row['home'] == row['home'].strip() and row['away'] == row['away'].strip()
+                            for row in saved['fixtures']))
 
     def test_group_validation_rejects_old_days_expired_unknown_duplicate_and_oversized(self):
         report = scan()

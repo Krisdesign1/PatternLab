@@ -81,6 +81,8 @@ class CalendarPanelTests(unittest.TestCase):
         self._patch(api_football, 'STORE_PATH', self.root / 'fixtures.json')
         self._patch(workspace.sources, 'selected_source', return_value='API-Football')
         self._patch(workspace, 'datetime', FrozenDateTime)
+        import analysis_date
+        self._patch(analysis_date, 'datetime', FrozenDateTime)
         self._patch(calendar, 'datetime', FrozenDateTime)
         self.clock = self._patch(calendar, 'monotonic', return_value=1000.0)
         self.signature = self._patch(workspace, '_signature', return_value=('isolated-calendar', 1, 1))
@@ -143,6 +145,7 @@ class CalendarPanelTests(unittest.TestCase):
         self.assertEqual(len(table), 10)
         self.assertEqual(set(table['Compétition']), {'Premier League', 'Ligue 1', 'Bundesliga', 'World Cup'})
         self.assertEqual(sum(table['Compétition'] == 'Premier League'), 6)
+        self.assertEqual(set(table['Date']), {'18/10/2026'})
         self.assertEqual(sum(table['Domicile'] == 'Club à confirmer'), 1)
         unknown = table[table['Compétition'] == 'World Cup'].iloc[0]
         self.assertEqual(unknown['Score'], '—')
@@ -151,6 +154,16 @@ class CalendarPanelTests(unittest.TestCase):
         self.assertFalse(any(button.key == 'workspace_predict' for button in self.at.button))
         self.assertFalse(self.at.toggle(key='workspace_auto').value)
         self.refresh.assert_not_called()
+        self._assert_no_prediction_or_real_network()
+
+    def test_period_export_is_loaded_only_when_its_block_is_open(self):
+        with patch('calendar_export_panel.render_export') as export:
+            self.at.run()
+            export.assert_not_called()
+            self.at.session_state['calendar_export_open'] = True
+            self.at.run()
+            self.assertFalse(self.at.exception)
+            export.assert_called_once_with(DAY, selected_league=calendar.ALL)
         self._assert_no_prediction_or_real_network()
 
     def test_first_refresh_after_empty_cloud_start_selects_all_competitions(self):
@@ -179,7 +192,7 @@ class CalendarPanelTests(unittest.TestCase):
         self.assertEqual(len(self.at.checkbox), 6)
         self._assert_no_prediction_or_real_network()
 
-    def test_refresh_removing_selected_competition_returns_to_all_matches(self):
+    def test_refresh_missing_competition_preserves_choice_until_user_changes_it(self):
         self._competition('39')
 
         def refreshed(source, day):
@@ -189,7 +202,12 @@ class CalendarPanelTests(unittest.TestCase):
         self.refresh.side_effect = refreshed
         self.at.button(key='workspace_refresh').click().run()
         self.assertFalse(self.at.exception)
-        self.assertEqual(self.at.selectbox(key=f'workspace_league_API-Football_{DAY}').value, calendar.ALL)
+        self.assertEqual(self.at.selectbox(key=f'workspace_league_API-Football_{DAY}').value, '39')
+        self.assertTrue(any('Votre compétition est absente du dernier relevé' in item.value
+                            for item in self.at.info))
+        self.assertFalse(self.at.checkbox)
+        self.assertFalse(any('Domicile' in item.value.columns for item in self.at.dataframe))
+        self._competition(calendar.ALL)
         self.assertEqual(len(self._table()), 4)
         self.assertNotIn('Premier League', set(self._table()['Compétition']))
         self.refresh.assert_called_once()
@@ -220,6 +238,29 @@ class CalendarPanelTests(unittest.TestCase):
         self.assertEqual((paris['Score'], paris['Minute'], paris['Statut']), ('2–1', '67′', 'Seconde mi-temps'))
         self.assertEqual((paused['Score'], paused['Minute'], paused['Statut']), ('0–0', '45′', 'Mi-temps'))
         self.assertEqual(paris['À 90 minutes'], '—')
+        self.assertEqual(list(paris['Verdict final']), ['En cours'])
+        self.refresh.assert_not_called()
+        self._assert_no_prediction_or_real_network()
+
+    def test_calendar_shows_final_verdict_and_keeps_missing_scores_explicit(self):
+        table = self._table()
+        berlin = table[table['Domicile'] == 'Berlin'].iloc[0]
+        self.assertEqual(list(berlin['Verdict final']), ['2nd'])
+        future = table[table['Domicile'] == 'English Club 1'].iloc[0]
+        self.assertEqual(list(future['Verdict final']), ['En attente'])
+        frame = next(frame for frame in self.at.dataframe if 'Verdict final' in frame.value.columns)
+        import json
+        config = json.loads(frame.proto.columns)['Verdict final']
+        self.assertEqual(config['type_config']['type'], 'multiselect')
+        options = config['type_config']['options'][:3]
+        self.assertEqual([option['value'] for option in options], ['1st', 'Égal', '2nd'])
+        self.assertEqual(len({option['color'] for option in options}), 3)
+        self.raw[8]['score']['halftime']['home'] = None
+        self.at.run()
+        self.assertFalse(self.at.exception)
+        berlin = self._table().query("Domicile == 'Berlin'").iloc[0]
+        self.assertEqual(list(berlin['Verdict final']), ['Non évaluable'])
+        self.assertIn('Score à la pause absent', berlin['Statut'])
         self.refresh.assert_not_called()
         self._assert_no_prediction_or_real_network()
 
@@ -342,12 +383,26 @@ class CalendarPanelTests(unittest.TestCase):
         self.at.session_state['workspace_day'] = DAY - timedelta(days=1)
         self.at.run()
         self.assertFalse(self.at.exception)
-        self.assertEqual(self.at.date_input(key='workspace_day').value, DAY)
-        self.assertTrue(self.at.date_input(key='workspace_day').disabled)
+        self.assertEqual(self.at.date_input(key='analysis_day_widget').value, DAY)
+        self.assertFalse(self.at.date_input(key='analysis_day_widget').disabled)
         self.at.toggle(key='workspace_auto').set_value(True).run()
         self.assertFalse(self.at.exception)
         self.refresh.assert_called_once_with('API-Football', DAY)
         self._assert_no_prediction_or_real_network()
+
+    def test_future_auto_refresh_uses_selected_day_and_past_day_is_manual(self):
+        tomorrow = DAY + timedelta(days=1)
+        self.at.button(key='analysis_tomorrow').click().run()
+        self.at.toggle(key='workspace_auto').set_value(True).run()
+        self.assertFalse(self.at.exception)
+        self.refresh.assert_called_once_with('API-Football', tomorrow)
+        self.refresh.reset_mock()
+        self.at.date_input(key='analysis_day_widget').set_value(DAY - timedelta(days=1)).run()
+        self.assertFalse(self.at.exception)
+        self.refresh.assert_not_called()
+        self.at.button(key='workspace_refresh').click().run()
+        self.assertFalse(self.at.exception)
+        self.refresh.assert_called_once_with('API-Football', DAY - timedelta(days=1))
 
 
 if __name__ == '__main__':

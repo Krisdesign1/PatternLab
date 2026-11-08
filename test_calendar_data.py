@@ -1,4 +1,5 @@
 from datetime import date
+from copy import deepcopy
 import unittest
 
 import calendar_data as calendar
@@ -13,6 +14,78 @@ def raw(match_id=1, status="NS", stamp="2026-10-18T12:00:00Z", league=39):
 
 
 class CalendarTests(unittest.TestCase):
+    def test_final_verdict_compares_both_halves_including_goalless_draw(self):
+        for ht, ft, expected in (((2, 1), (3, 1), '1st'), ((1, 0), (2, 0), 'Égal'),
+                                 ((0, 0), (1, 1), '2nd'), ((0, 0), (0, 0), 'Égal')):
+            with self.subTest(halftime=ht, fulltime=ft):
+                item = raw(status='FT')
+                item['score'] = {'halftime': dict(zip(('home', 'away'), ht)),
+                                 'fulltime': dict(zip(('home', 'away'), ft))}
+                before = deepcopy(item)
+                row = calendar.from_raw(item)
+                self.assertEqual(row['final_verdict'], expected)
+                self.assertEqual(item, before)
+
+    def test_live_and_future_matches_never_get_final_verdict_from_provisional_scores(self):
+        for status in ('1H', 'HT', '2H', 'ET', 'BT', 'P', 'LIVE', 'NS', 'TBD'):
+            with self.subTest(status=status):
+                expected = 'En attente' if status in ('NS', 'TBD') else 'En cours'
+                self.assertEqual(calendar.from_raw(raw(status=status))['final_verdict'], expected)
+
+    def test_overtime_and_penalties_do_not_change_the_regulation_verdict(self):
+        for status in ('AET', 'PEN'):
+            with self.subTest(status=status):
+                item = raw(status=status)
+                item['score'].update(extratime={'home': 6, 'away': 1}, penalty={'home': 5, 'away': 4})
+                item['goals'] = {'home': 6, 'away': 1}
+                # HT has one goal, regulation FT two goals: one in each half.
+                self.assertEqual(calendar.from_raw(item)['final_verdict'], 'Égal')
+                del item['score']['fulltime']
+                self.assertEqual(calendar.from_raw(item)['final_verdict'], 'Non évaluable')
+
+    def test_missing_or_invalid_final_scores_are_not_evaluated(self):
+        for period in ('halftime', 'fulltime'):
+            for invalid in (None, -1, True, 1.5, '1'):
+                with self.subTest(period=period, value=invalid):
+                    item = raw(status='FT')
+                    item['score'][period]['home'] = invalid
+                    row = calendar.from_raw(item)
+                    self.assertEqual(row['final_verdict'], 'Non évaluable')
+                    self.assertIn('absent ou invalide', row['final_verdict_reason'])
+
+    def test_per_team_score_regression_requires_review_even_with_consistent_totals(self):
+        item = raw(status='FT')
+        item['score']['halftime'] = {'home': 2, 'away': 0}
+        item['score']['fulltime'] = {'home': 1, 'away': 3}
+        row = calendar.from_raw(item)
+        self.assertEqual(row['final_verdict'], 'À vérifier')
+        self.assertIn('incohérents', row['final_verdict_reason'])
+
+    def test_administrative_statuses_and_unknown_state_never_get_sporting_verdict(self):
+        for status in ('CANC', 'ABD', 'AWD', 'WO', 'PST', 'SUSP', 'INT', 'UNKNOWN'):
+            with self.subTest(status=status):
+                expected = 'À vérifier' if status == 'UNKNOWN' else 'Non évaluable'
+                self.assertEqual(calendar.from_raw(raw(status=status))['final_verdict'], expected)
+
+    def test_quarantined_complete_result_is_not_published_as_final(self):
+        item = raw(status='FT')
+        item['_patternlab_import'] = {'quarantined': True, 'reason': 'identity_changed'}
+        row = calendar.from_raw(item)
+        self.assertEqual(row['final_verdict'], 'À vérifier')
+        self.assertIn('Quarantaine', row['final_verdict_reason'])
+
+    def test_wrong_provider_or_unconfirmed_identity_blocks_final_verdict(self):
+        for kind in ('provider', 'missing_team', 'same_team'):
+            with self.subTest(kind=kind):
+                item = raw(status='FT')
+                if kind == 'provider':
+                    item['provider'] = 'other-provider'
+                elif kind == 'missing_team':
+                    item['teams']['home']['id'] = None
+                else:
+                    item['teams']['away']['id'] = item['teams']['home']['id']
+                self.assertEqual(calendar.from_raw(item)['final_verdict'], 'À vérifier')
+
     def test_live_rows_have_score_halftime_phase_and_minute_without_final_result(self):
         item = raw(status="2H")
         item["fixture"]["status"].update(elapsed=90, extra=4)

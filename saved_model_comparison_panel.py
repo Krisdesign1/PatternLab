@@ -1,4 +1,5 @@
 """Read-only paired model comparison, computed from saved forecasts alone."""
+import table_views
 import streamlit as st
 from hashlib import sha256
 
@@ -6,6 +7,7 @@ import journal_protocol
 import prediction_journal as journal
 from probability_reliability_panel import _storage_signature
 import saved_model_comparison as comparison
+from group_size_filter import matches, render as render_group_size_filter
 
 
 NAMES = {'frequency':'Répétitions seules', 'clubs':'Clubs', 'combined':'Clubs + répétitions',
@@ -21,7 +23,14 @@ def _load(path, signature, protocol, version):
     return comparison.build(journal.list_entries(path), protocol)
 
 
+def _reset_cohort_index(key, count):
+    index = st.session_state.get(key, 0)
+    if type(index) is not int or not 0 <= index < count:
+        st.session_state[key] = 0
+
+
 def _render_strict():
+    selected_size = render_group_size_filter('saved_model_comparison_group_size')
     st.subheader('Comparer les modèles sur les mêmes matchs', icon=':material/balance:')
     st.caption('Prévisions réellement enregistrées avant match, depuis le protocole prospectif. '
                'La comparaison exige Répétitions, Clubs et CatBoost dans le même enregistrement. '
@@ -39,24 +48,28 @@ def _render_strict():
     st.caption(f"Protocole {report['protocol_version']} enregistré le {report['registered_at']}. "
                'Les compétitions, tailles et versions restent séparées.')
     exclusions = report['snapshot_exclusions']
+    st.caption('Exclusions et doublons : comptes globaux, toutes tailles confondues.')
     st.caption(f"{exclusions.get('before_protocol',0)} groupe(s) antérieur(s) au protocole · "
                f"{exclusions.get('missing_catboost',0)} sans CatBoost · "
                f"{exclusions.get('invalid_snapshot',0)} incompatible(s) · "
                f"{report['duplicates_removed']} répétition(s) de matchs retirée(s) dans leur cohorte.")
-    if not report['cohorts']:
-        st.info('Aucune cohorte comparable disponible. Une méthode manquante ou un résultat en attente '
+    cohorts = [cohort for cohort in report['cohorts'] if matches(cohort.get('size'), selected_size)]
+    if not cohorts:
+        st.info('Aucun groupe correspondant à cette taille dans les cohortes comparables.' if selected_size is not None
+                else 'Aucune cohorte comparable disponible. Une méthode manquante ou un résultat en attente '
                 'ne compte jamais comme un échec. Les prochaines prévisions alimenteront ce suivi.')
         return
-    index = st.selectbox('Cohorte de comparaison', range(len(report['cohorts'])),
-        format_func=lambda i: f"Compétition {report['cohorts'][i]['league']} · "
-            f"groupes de {report['cohorts'][i]['size']} matchs · versions {i+1}",
+    _reset_cohort_index('saved_model_comparison_cohort', len(cohorts))
+    index = st.selectbox('Cohorte de comparaison', range(len(cohorts)),
+        format_func=lambda i: f"Compétition {cohorts[i]['league']} · "
+            f"groupes de {cohorts[i]['size']} matchs · versions {i+1}",
         key='saved_model_comparison_cohort')
-    cohort = report['cohorts'][index]
+    cohort = cohorts[index]
     with st.container(horizontal=True):
         st.metric('Matchs comparés',cohort['evaluated'])
         st.metric('En attente',cohort['pending'])
         st.metric('Résultats exclus',cohort['excluded'])
-    st.dataframe([{'Méthode':NAMES[method],
+    table_views.dataframe([{'Méthode':NAMES[method],
                    'Version':cohort['versions'][method]['version'],
                    'Génération':cohort['versions'][method]['generation'] or ('Composants '+
                        sha256(cohort['versions'][method]['components'].encode()).hexdigest()[:12]
@@ -71,7 +84,7 @@ def _render_strict():
                      'Erreur probabiliste ↓':st.column_config.NumberColumn(format='%.4f'),
                      'Score de Brier ↓':st.column_config.NumberColumn(format='%.4f'),
                      'Premier choix correct (%)':st.column_config.NumberColumn(format='%.2f')},
-                 key='saved_model_comparison_scores')
+                 key='saved_model_comparison_scores', table_id='saved_model_comparison_panel:_render_strict:dataframe:1')
     label = st.segmented_control('Catégorie à comparer',['1st','Égal','2nd'],
                                  default='1st',required=True,key='saved_model_comparison_outcome')
     categories = []
@@ -85,7 +98,7 @@ def _render_strict():
                     'Premiers choix réalisés':row['predicted_hits'],
                     'Brier de cette catégorie ↓':row['brier']})
     if categories:
-        st.dataframe(categories,hide_index=True,width='stretch',key='saved_model_comparison_categories')
+        table_views.dataframe(categories,hide_index=True,width='stretch',key='saved_model_comparison_categories', table_id='saved_model_comparison_panel:_render_strict:dataframe:2')
     st.caption('Chaque match compte une fois dans cette cohorte : son premier enregistrement commun '
                'aux trois méthodes est conservé, même s’il attend encore un résultat. Les probabilités '
                'par match sont les marginales exactes des distributions de scénarios sauvegardées.')
@@ -175,6 +188,7 @@ def _explanations(report,protocol,challenger=None,cohort=None):
 
 
 def _render_pairs():
+    selected_size = render_group_size_filter('saved_model_comparison_group_size')
     st.subheader('Les clubs apportent-ils plus que les répétitions seules ?',icon=':material/balance:')
     st.caption('Scores descriptifs de prévisions figées avant match, comparées sur les mêmes rencontres.')
     try:
@@ -188,22 +202,25 @@ def _render_pairs():
         st.warning('Le bilan prospectif ne peut pas être lu. Aucune donnée n’a été modifiée.')
         return
     coverage=report['coverage']
-    st.caption(f"Couverture : {coverage['unique_matches']} matchs uniques · "
+    st.caption(f"Couverture globale, toutes tailles confondues : {coverage['unique_matches']} matchs uniques · "
                f"{coverage['comparable_groups']} groupes admissibles · "
                f"{coverage['overlapping_matches']} matchs communs à plusieurs groupes. "
                f"{coverage['mature_cohorts']}/{coverage['cohorts']} cohortes atteignent le minimum "
                'de recul; aucun gain prédictif confirmé.')
-    if not report['cohorts']:
-        st.info('Pas encore de paire exploitable enregistrée avant match depuis le protocole. '
+    matching_cohorts = [cohort for cohort in report['cohorts'] if matches(cohort.get('size'), selected_size)]
+    if not matching_cohorts:
+        st.info('Aucun groupe correspondant à cette taille dans les paires comparables.' if selected_size is not None
+                else 'Pas encore de paire exploitable enregistrée avant match depuis le protocole. '
                 'Une méthode absente ou un résultat en attente ne compte pas comme un échec.')
         _explanations(report,protocol)
         return
     available = [name for name in comparison.CHALLENGERS
-                 if any(cohort['challenger']==name for cohort in report['cohorts'])]
+                 if any(cohort['challenger']==name for cohort in matching_cohorts)]
     challenger = st.selectbox('Méthode face aux répétitions seules',available,
         format_func=lambda name:NAMES[name],key='saved_pair_challenger')
-    cohorts = sorted((cohort for cohort in report['cohorts'] if cohort['challenger']==challenger),
+    cohorts = sorted((cohort for cohort in matching_cohorts if cohort['challenger']==challenger),
                      key=_cohort_order)
+    _reset_cohort_index('saved_pair_cohort', len(cohorts))
     index = st.selectbox('Compétition, taille et versions',range(len(cohorts)),
         format_func=lambda i:f"Compétition {cohorts[i]['league']} · {cohorts[i]['size']} matchs · "
                             f"{cohorts[i]['evaluated']} évalués · cohorte {i+1}",
@@ -216,7 +233,7 @@ def _render_pairs():
         st.metric('En attente',cohort['pending'])
         st.metric('Exclus',cohort['excluded'])
     names = ('frequency',challenger)
-    st.dataframe([{'Méthode':NAMES[name], 'Matchs identiques':cohort['scores'][name]['evaluated'],
+    table_views.dataframe([{'Méthode':NAMES[name], 'Matchs identiques':cohort['scores'][name]['evaluated'],
                    'Erreur probabiliste ↓':cohort['scores'][name]['logloss'],
                    'Brier multiclasses ↓':cohort['scores'][name]['brier'],
                    'Premier choix correct (%)':None if cohort['scores'][name]['accuracy'] is None
@@ -229,7 +246,7 @@ def _render_pairs():
                  column_config={
                      'Erreur probabiliste ↓':st.column_config.NumberColumn(format='%.4f'),
                      'Brier multiclasses ↓':st.column_config.NumberColumn(format='%.4f'),
-                     'Premier choix correct (%)':st.column_config.NumberColumn(format='%.2f')})
+                     'Premier choix correct (%)':st.column_config.NumberColumn(format='%.2f')}, table_id='saved_model_comparison_panel:_render_pairs:dataframe:1')
     estimate = cohort['uncertainty']
     st.subheader('Recul disponible et incertitude')
     st.metric('Blocs hebdomadaires clos',f"{estimate['blocks']} / {protocol['min_blocks']}")
@@ -238,12 +255,12 @@ def _render_pairs():
     else:
         st.info('Intervalles descriptifs par semaines closes; aucun avantage prédictif confirmé.')
     if estimate['matches']:
-        st.dataframe([{'Gain du challenger':label,
+        table_views.dataframe([{'Gain du challenger':label,
                    'Estimation et intervalle descriptif à 95 %':_interval(estimate['gains'][name])}
                   for name,label in [('logloss','Réduction de l’erreur probabiliste'),
                                      ('brier','Réduction du Brier'),
                                      ('accuracy','Gain de premiers choix corrects (proportion)')]],
-                     hide_index=True,width='stretch',key='saved_pair_intervals')
+                     hide_index=True,width='stretch',key='saved_pair_intervals', table_id='saved_model_comparison_panel:_render_pairs:dataframe:2')
         st.caption('Un gain positif favorise la méthode testée, sur les seuls blocs clos complets.')
     if not st.toggle('Afficher la calibration des probabilités',key='saved_pair_show_calibration'):
         return
@@ -260,9 +277,9 @@ def _render_pairs():
                          'Moyenne annoncée (%)':None if row['announced'] is None else 100*row['announced'],
                          'Taux observé (%)':None if row['observed_rate'] is None else 100*row['observed_rate'],
                          'En attente':row['pending'],'Exclus':row['excluded']})
-    st.dataframe(rows,hide_index=True,width='stretch',key='saved_pair_calibration',column_config={
+    table_views.dataframe(rows,hide_index=True,width='stretch',key='saved_pair_calibration',column_config={
         'Moyenne annoncée (%)':st.column_config.NumberColumn(format='%.2f'),
-        'Taux observé (%)':st.column_config.NumberColumn(format='%.2f')})
+        'Taux observé (%)':st.column_config.NumberColumn(format='%.2f')}, table_id='saved_model_comparison_panel:_render_pairs:dataframe:3')
 
 
 def render():

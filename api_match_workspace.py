@@ -77,6 +77,10 @@ def local_day_matches(day, timezone_name=DEFAULT_TIMEZONE, *, path=None):
 def fixture_from_raw(raw):
     """Create a score-free contextual fixture only for two confirmed participants."""
     try:
+        from fixture_import_policy import quality_error
+        conflict = quality_error(raw)
+        if conflict:
+            raise ValueError(conflict)
         event, competition = raw["fixture"], raw["league"]
         home, away = raw["teams"]["home"], raw["teams"]["away"]
         home_id = api._numeric_id(home["id"], "du club à domicile")

@@ -1,0 +1,12 @@
+# install.sh substitutes a validated, explicit public DNS hostname.
+# Certificates are stored in /var/lib/patternlab-caddy by the proxy service.
+@@PATTERNLAB_DOMAIN@@ {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "same-origin"
+        -Server
+    }
+    reverse_proxy 127.0.0.1:8501
+}

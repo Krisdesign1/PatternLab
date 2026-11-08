@@ -41,6 +41,23 @@ def ranked_row(mid, probabilities, *, rank=1, stamp='2026-10-22T15:00:00+00:00')
 
 
 class HighProbabilityEngineTests(unittest.TestCase):
+    def test_tomorrow_uses_real_clock_and_excludes_current_and_future_utc_results(self):
+        tomorrow = (NOW + timedelta(days=1)).date()
+        targets = [fixture(100001), fixture(100002, stamp='2026-10-23T15:00:00+00:00')]
+        original = engine.scan(history()+targets, NOW, day=tomorrow)
+        injected = [fixture(200000+i, status='FT', stamp=stamp, ht=(9, 0), ft=(9, 0))
+                    for i, stamp in enumerate(('2026-10-22T01:00:00+00:00',
+                                               '2026-10-23T01:00:00+00:00'))]
+        after = engine.scan(history()+targets+injected, NOW, day=tomorrow)
+        self.assertEqual(after['day'], '2026-10-23')
+        self.assertEqual(after['generated_at'], NOW.isoformat(timespec='seconds'))
+        self.assertEqual(after['before'], '2026-10-22')
+        self.assertEqual([row['fixture']['match_id'] for row in after['rows']], ['100002'])
+        self.assertEqual(after['rows'], original['rows'])
+        self.assertEqual(after['history_fingerprint'], original['history_fingerprint'])
+        with self.assertRaises(ValueError):
+            engine.scan(history()+targets, NOW, day=NOW)
+
     def test_known_ids_distinguish_namesakes_and_preserve_renamed_history(self):
         raw = history()
         for index, row in enumerate(raw):

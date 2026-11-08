@@ -1,10 +1,12 @@
 """Read-only display of the reliability of saved Clubs match probabilities."""
+import table_views
 from pathlib import Path
 
 import streamlit as st
 
 import prediction_journal as journal
 import probability_reliability as reliability
+from result_explanations_panel import render_pending_overview
 
 
 def _storage_signature(path):
@@ -44,7 +46,11 @@ def render_probability_reliability():
         st.caption('Prévisions Clubs enregistrées avant match, toutes compétitions confondues. '
                    'Chaque match compte une fois par version : sa première prévision est conservée, '
                    'y compris lorsqu’elle attend encore son résultat.')
+        st.caption('Un match terminé avec une observation valide reste évaluable individuellement, '
+                   'même si une autre rencontre annule son groupe. Le scénario complet de ce groupe '
+                   'reste non évaluable ; aucune prévision ni aucun score n’est recalculé ici.')
         path = Path(journal.DB_PATH)
+        render_pending_overview(lambda: journal.list_entries(path), key='reliability_result_reasons')
         try:
             report = _load(str(path), _storage_signature(path), reliability.VERSION)
         except (journal.JournalError, OSError):
@@ -76,7 +82,7 @@ def render_probability_reliability():
                 value = row[name]
                 row[name] = ('—' if value is None else f'{value:+.2f}' if name.startswith('Écart')
                              else f'{value:.2f}')
-        st.dataframe(table, hide_index=True, width='stretch', key='hp_reliability_bins')
+        table_views.dataframe(table, hide_index=True, width='stretch', key='hp_reliability_bins', table_id='probability_reliability_panel:render_probability_reliability:dataframe:1')
         st.caption('Tranches fermées à gauche et ouvertes à droite ; 100 % appartient à la dernière. '
                    'Un tiret indique l’absence de match évalué. Un écart positif signifie une fréquence '
                    'observée supérieure à la moyenne annoncée. Ces statistiques sont descriptives ; '

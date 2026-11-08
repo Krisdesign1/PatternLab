@@ -209,7 +209,8 @@ class FrozenMethodTests(unittest.TestCase):
                 self.assertEqual(saved['ranking'],
                                  [{'sequence': row['sequence'], 'probability': row['probability']}
                                   for row in prediction['ranking']])
-                self.assertEqual(saved['fixture_fingerprint'], neighbors.fixture_fingerprint(chosen))
+                self.assertEqual(saved['engine_fixture_fingerprint'], neighbors.fixture_fingerprint(chosen))
+                self.assertEqual(saved['fixture_fingerprint'], models.group_context(chosen)['fixture_fingerprint'])
                 self.assertEqual(saved['support'], prediction['support'])
                 self.assertAlmostEqual(fsum(models.probability_for_sequence(saved, seq)
                                            for seq in product(VALUES, repeat=4)), 1)

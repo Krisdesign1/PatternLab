@@ -4,6 +4,7 @@ No history, current API status or model is consulted. A past kickoff alone
 means results are awaited; it never proves that a match is live or successful.
 """
 from datetime import date, datetime, timezone
+from copy import deepcopy
 from math import isfinite
 import unicodedata
 from zoneinfo import ZoneInfo
@@ -50,7 +51,8 @@ def _identity(value):
 
 
 def _primary(entry, size):
-    methods = entry.get('methods') or {}
+    from adaptive_scenario_proposals import effective_methods
+    methods = effective_methods(entry) if 'proposal_selection' in entry else entry.get('methods') or {}
     if not isinstance(methods, dict):
         raise ValueError('Les méthodes enregistrées sont invalides.')
     metadata = entry.get('metadata') or {}
@@ -108,6 +110,13 @@ def _row(entry, current):
     if stamps != sorted(stamps):
         raise ValueError('Le groupe enregistré doit conserver son ordre chronologique.')
     created = _stamp(entry['created_at'])
+    if stamps[0].astimezone(ZONE).date() > current.astimezone(ZONE).date():
+        # A selected future day is valid; a forecast not yet saved, or a
+        # result from that future day, is not evidence available right now.
+        if created > current or created >= min(stamps):
+            raise ValueError('La prévision future doit être déjà enregistrée avant le coup d’envoi.')
+        if entry.get('status') == 'settled' or performance.observed_count(entry):
+            raise ValueError('Une rencontre future ne peut pas déjà avoir un résultat évalué.')
     status = entry.get('status')
     if status not in ('pending','settled','void','unresolved'):
         raise ValueError('L’état enregistré du groupe est invalide.')
@@ -133,6 +142,8 @@ def _row(entry, current):
         scenario_outcome=scenario_outcomes.summarize(entry),
         day=local[0].date().isoformat())
     result.update(_primary(entry,size))
+    if isinstance(entry.get('result_explanation'), dict):
+        result['result_explanation'] = deepcopy(entry['result_explanation'])
     return result
 
 
@@ -151,8 +162,8 @@ def build_rows(entries, now=None, *, day=None):
     current = _now(now)
     today = current.astimezone(ZONE).date()
     day = today if day is None else day
-    if not isinstance(day, date) or isinstance(day, datetime) or day > today:
-        raise ValueError('La journée consultée doit être aujourd’hui ou une date passée à Kinshasa.')
+    if not isinstance(day, date) or isinstance(day, datetime):
+        raise ValueError('La journée consultée doit être une date locale à Kinshasa.')
     entries = list(entries)
     if any(not isinstance(entry,dict) for entry in entries):
         raise ValueError('Les prévisions doivent conserver leur structure enregistrée.')

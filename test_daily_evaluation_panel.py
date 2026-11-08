@@ -30,11 +30,11 @@ def report():
 
 class DailyEvaluationPanelTests(unittest.TestCase):
     def setUp(self):
-        self.value=report();self.entries=[]
+        self.value=report();self.entries=[];self.selections=[]
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.load=self.patch(store,'load_latest',side_effect=lambda:self.value)
         self.read=self.patch(journal,'list_entries',side_effect=lambda:self.entries)
-        self.patch(worker,'load_selections',return_value=[])
+        self.patch(worker,'load_selections',side_effect=lambda *args:self.selections)
         self.network=self.patch(api.ApiFootballClient,'get',side_effect=AssertionError('No API'))
         self.reconcile=self.patch(journal,'reconcile',side_effect=AssertionError('No reconciliation'))
         self.build=self.patch(models,'build_mixed_methods',side_effect=AssertionError('No forecasting'))
@@ -108,6 +108,69 @@ class DailyEvaluationPanelTests(unittest.TestCase):
         at=self.open()
         self.assertTrue(any('Rapport figé invalide' in node.value for node in at.error))
         self.assertFalse(at.dataframe);self.assert_readonly()
+
+    def test_exact_size_filters_historical_views_and_dates_without_mutating_report(self):
+        for name in ('production_by_size',):
+            row=copy.deepcopy(self.value[name][0]);row['size']=20
+            self.value[name].append(row)
+        row=copy.deepcopy(self.value['paired_summary']['by_size'][0]);row['size']=20
+        self.value['paired_summary']['by_size'].append(row)
+        row=copy.deepcopy(self.value['paired_records'][0]);row.update(size=20,day='2026-02-01')
+        self.value['paired_records'].append(row)
+        before=copy.deepcopy(self.value)
+        at=self.open()
+        self.assertIsNone(at.selectbox(key='daily_audit_group_size').value)
+        self.assertEqual(next(node.value for node in at.dataframe if 'Groupes par politique' in node.value.columns)
+                         ['Matchs par groupe'].tolist(),[3,20])
+        at.selectbox(key='daily_audit_group_size').select(20).run()
+        self.assertFalse(at.exception)
+        for column in ('Groupes par politique','Groupes construits'):
+            self.assertEqual(next(node.value for node in at.dataframe if column in node.value.columns)
+                             ['Matchs par groupe'].tolist(),[20])
+        self.assertEqual(at.selectbox(key='daily_audit_size').value,20)
+        dates=next(node.value for node in at.caption if 'Cohortes complètes comparables' in node.value)
+        self.assertIn('2026-02-01',dates);self.assertNotIn('2026-01-01',dates)
+        self.assertTrue(any('Vue globale par match' in node.value for node in at.caption))
+        self.assertEqual(next(node.value for node in at.metric if node.label=='Journées reconstruites'),'100')
+        at.selectbox(key='daily_audit_group_size').select(2).run()
+        self.assertFalse(at.exception)
+        self.assertFalse(any('Matchs par groupe' in node.value.columns for node in at.dataframe))
+        self.assertTrue(any('Aucun groupe correspondant' in node.value for node in at.info))
+        at.selectbox(key='daily_audit_group_size').select(None).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(next(node.value for node in at.dataframe if 'Groupes par politique' in node.value.columns)
+                         ['Matchs par groupe'].tolist(),[3,20])
+        self.assertEqual(self.value,before);self.assert_readonly()
+
+    def test_prospective_size_scopes_entries_selection_links_and_kpis_before_summary(self):
+        settled=entry('twenty',status='settled',size=20)
+        settled['metadata'].pop('daily_policy')
+        settled['evaluations']={'clubs':dict(top1=False,top3=True,loss=24,probability=.09)}
+        self.entries=[entry('three'),settled]
+        self.selections=[dict(entry_id='three',selection={'policy':'three'}),
+                         dict(entry_id='twenty',selection={'policy':'twenty'}),
+                         dict(entry_id='absent',selection={'policy':'orphan'})]
+        before=copy.deepcopy((self.entries,self.selections))
+        with patch.object(panel.live,'summarize',wraps=panel.live.summarize) as summarize:
+            at=self.open();at.segmented_control(key='daily_audit_view').set_value('prospective').run()
+            at.selectbox(key='daily_audit_group_size').select(20).run()
+            self.assertFalse(at.exception)
+            entries,selections=summarize.call_args.args
+            self.assertEqual([value['id'] for value in entries],['twenty'])
+            self.assertEqual([value['entry_id'] for value in selections],['twenty'])
+        metrics={node.label:node.value for node in at.metric}
+        self.assertEqual(metrics['Analyses enregistrées'],'1')
+        self.assertEqual(metrics['En attente'],'0');self.assertEqual(metrics['Réalisées'],'1')
+        table=next(node.value for node in at.dataframe if 'Génération' in node.value.columns)
+        self.assertEqual(table['Matchs par groupe'].tolist(),[20])
+        self.assertEqual(table['Politique'].tolist(),['twenty'])
+        self.assertTrue(any('20 matchs distincts' in node.value for node in at.caption))
+        at.selectbox(key='daily_audit_group_size').select(2).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(next(node.value for node in at.metric if node.label=='Analyses enregistrées'),'0')
+        self.assertFalse(at.dataframe)
+        self.assertTrue(any('Aucun groupe correspondant' in node.value for node in at.info))
+        self.assertEqual((self.entries,self.selections),before);self.assert_readonly()
 
 
 if __name__=='__main__':unittest.main()

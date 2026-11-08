@@ -242,6 +242,28 @@ def _split_details(examples, groups):
     return dict(matches=len(examples), start=min(days), end=max(days), groups=len(groups))
 
 
+def select_validation(fit_model, evaluate_model, candidates=None, alphas=None):
+    """One canonical native selection: joint validation loss, stable first tie.
+
+    Callers supply only training and validation inputs. No test metric belongs
+    in this function. The seasonal native procedure uses the very same rule.
+    """
+    selection, selected_model, selected_metrics, selected_targets = None, None, None, None
+    trials = []
+    for params in (CANDIDATES if candidates is None else candidates):
+        model = fit_model(dict(params))
+        for alpha in (ALPHAS if alphas is None else alphas):
+            metrics, targets = evaluate_model(model, alpha)
+            loss = metrics['catboost']['loss']
+            trials.append(dict(params=dict(params), alpha=alpha, loss=loss))
+            if selection is None or loss < selection['validation_loss']:
+                selection = dict(params=dict(params), alpha=alpha, validation_loss=loss)
+                selected_model, selected_metrics, selected_targets = model, metrics, targets
+    if selection is None:
+        raise ModelError('Aucun réglage de validation disponible.')
+    return selection, trials, selected_model, selected_metrics, selected_targets
+
+
 @cloud_storage.persisted
 def _publish(model, report, source, league, directory):
     if Path(directory or DATA_DIR).resolve() == Path(DATA_DIR).resolve():
@@ -309,17 +331,9 @@ def train(rows, league, source, directory=None, *, before=None):
     train_fit = fit_sequences([block["sequence"] for block in groups["train"]], GROUP_SIZE)
     validation_inputs = _group_inputs(module, history, groups["validation"])
     test_inputs = _group_inputs(module, history, groups["test"])
-    selection = None
-    trials = []
-    for params in CANDIDATES:
-        model = _fit(split["train"], params, columns, categorical)
-        for alpha in ALPHAS:
-            metrics, targets = _evaluate(model, validation_inputs, train_fit, alpha, columns, categorical)
-            loss = metrics["catboost"]["loss"]
-            trials.append(dict(params=dict(params), alpha=alpha, loss=loss))
-            if selection is None or loss < selection["validation_loss"]:
-                selection = dict(params=dict(params), alpha=alpha, validation_loss=loss)
-                selected_validation, validation_targets = metrics, targets
+    selection, trials, _, selected_validation, validation_targets = select_validation(
+        lambda params: _fit(split['train'], params, columns, categorical),
+        lambda model, alpha: _evaluate(model, validation_inputs, train_fit, alpha, columns, categorical))
     train_val = split["train"] + split["validation"]
     frozen = _fit(train_val, selection["params"], columns, categorical)
     train_val_groups = _contained(blocks, train_val)

@@ -3,6 +3,7 @@ import copy
 from datetime import date, timedelta
 import importlib.util
 import json
+from math import log
 from pathlib import Path
 import tempfile
 import unittest
@@ -95,6 +96,27 @@ class SeasonalPlanTests(unittest.TestCase):
             planned = evaluation.plan(sample(), '39')
         self.assertTrue(planned['folds'][-1]['partial'])
 
+    def test_explicit_cutoff_preserves_the_frozen_population_and_partial_season_after_clock_changes(self):
+        rows = sample()
+        rows.append(dict(rows[-1], match_id='999991', timestamp='2026-10-19T12:00:00'))
+        with patch.object(evaluation, '_today', return_value='2026-10-18'):
+            initial = evaluation.plan(rows, '39')
+        with patch.object(evaluation, '_today', return_value='2027-08-01'):
+            resumed = evaluation.plan(rows, '39', before='2026-10-18')
+            later = evaluation.plan(rows, '39')
+        self.assertEqual(initial, resumed)
+        self.assertTrue(resumed['folds'][-1]['partial'])
+        self.assertFalse(later['folds'][-1]['partial'])
+        self.assertNotEqual(initial['fingerprint'], later['fingerprint'])
+
+    def test_invalid_and_future_explicit_cutoffs_are_refused_before_training(self):
+        with patch.object(evaluation, '_today', return_value='2026-10-18'), \
+             patch.object(evaluation, '_fit', side_effect=AssertionError('No training')):
+            for cutoff in ('2026-10-19', '2026-02-30', '2026-1-01', 'bad', True, 20261018):
+                for operation in (evaluation.plan, evaluation.run):
+                    with self.subTest(cutoff=cutoff, operation=operation.__name__), self.assertRaises(evaluation.SeasonalError):
+                        operation(sample(), '39', before=cutoff)
+
 
 class SeasonalCausalTests(unittest.TestCase):
     def test_incremental_group_features_match_reference_and_never_use_earlier_group_members(self):
@@ -133,6 +155,42 @@ class SeasonalRunTests(unittest.TestCase):
              patch.object(evaluation, 'CANDIDATES', ({'depth': 2, 'iterations': 8}, {'depth': 3, 'iterations': 10})):
             return evaluation.run(rows or sample(), '39', **kwargs)
 
+    def test_native_procedure_shares_joint_selection_and_global_anchors(self):
+        # Uneven seasons distinguish native global blocks from per-season
+        # anchors. The same shared selector must choose alpha/params once on4.
+        rows=sample(49)
+        with patch.object(evaluation,'_fit',side_effect=fake_fit), \
+             patch.object(evaluation,'_predict',side_effect=fake_predict), \
+             patch.object(ml,'CANDIDATES',({'depth':2,'iterations':8},{'depth':3,'iterations':10})), \
+             patch.object(ml,'select_validation',wraps=ml.select_validation) as selector:
+            report=evaluation.run(rows,'39',sizes=(2,4,6),procedure='native')
+        self.assertEqual(selector.call_count,3)
+        self.assertEqual(report['procedure'],'native')
+        for fold in report['folds']:
+            outputs=list(fold['sizes'].values())
+            self.assertEqual(len({json.dumps(o['selection']['params'],sort_keys=True) for o in outputs}),1)
+            self.assertEqual(len({o['selection']['alpha'] for o in outputs}),1)
+            self.assertEqual({o['selection']['window'] for o in outputs},{'all'})
+            split=evaluation._fold_rows(rows,tuple(fold['split']['train']['seasons']),
+                fold['split']['validation']['seasons'][0],fold['test_season'])
+            scope=sorted(sum(split.values(),[]),key=lambda r:(r['timestamp'],int(r['match_id'])))
+            expected=ml._contained(ml._blocks(scope,4),[dict(match=r) for r in split['test']])
+            self.assertEqual([v['match_ids'] for v in fold['sizes']['4']['targets']['test']],
+                             [[str(r['match_id']) for r in b['matches']] for b in expected])
+
+    def test_native_test_labels_cannot_change_joint_parameters_or_repetition_strength(self):
+        with patch.object(ml,'CANDIDATES',({'depth':2,'iterations':8},)):
+            original=self.run_fake(sizes=(2,4),procedure='native')
+            rows=sample()
+            for row in rows:
+                if row['season']==2026: row.update(ht='0-0',ft='0-0',value='Égal')
+            changed=self.run_fake(rows,sizes=(2,4),procedure='native')
+        for size in ('2','4'):
+            first=original['folds'][-1]['sizes'][size];second=changed['folds'][-1]['sizes'][size]
+            self.assertEqual(first['selection'],second['selection'])
+            self.assertEqual(first['validation'],second['validation'])
+            self.assertNotEqual(first['test'],second['test'])
+
     def test_all_methods_share_target_cohorts_and_sizes_are_never_pooled(self):
         progress = []
         report = self.run_fake(progress=lambda fraction, text: progress.append(fraction))
@@ -149,6 +207,17 @@ class SeasonalRunTests(unittest.TestCase):
                 self.assertEqual(output['selection']['parameter_size'], 4)
                 self.assertIn(output['selection']['alpha'], evaluation.ALPHAS)
                 self.assertIn(output['selection']['window'], evaluation.WINDOWS)
+                diagnostics = output['diagnostics']
+                self.assertEqual(diagnostics['version'], evaluation.DIAGNOSTICS_VERSION)
+                for method in ('clubs', 'catboost_plain'):
+                    self.assertEqual(diagnostics['calibration']['test'][method]['matches'], expected*int(size))
+                    self.assertEqual(set(diagnostics['calibration']['test'][method]['reliability']), set(ml.VALUES))
+                for method in evaluation.METHODS:
+                    coverage = diagnostics['group_coverage']['test'][method]
+                    self.assertEqual(coverage['groups'], expected)
+                    self.assertAlmostEqual(coverage['observed_top1_rate'], output['test'][method]['top1_rate'])
+                    self.assertLessEqual(coverage['mean_top1_probability'], coverage['mean_top3_probability'])
+                    self.assertLessEqual(coverage['mean_top3_probability'], 1+1e-12)
         for size in report['sizes']:
             key = str(size)
             for name in evaluation.METHODS:
@@ -181,6 +250,25 @@ class SeasonalRunTests(unittest.TestCase):
         self.assertEqual(a['selection'], b['selection'])
         self.assertEqual(a['validation'], b['validation'])
         self.assertNotEqual(a['test'], b['test'])
+        self.assertEqual(a['diagnostics']['calibration']['validation'], b['diagnostics']['calibration']['validation'])
+        self.assertNotEqual(a['diagnostics']['calibration']['test'], b['diagnostics']['calibration']['test'])
+
+    def test_run_explicit_cutoff_remains_frozen_when_resumed_in_a_later_year(self):
+        with patch.object(evaluation, '_today', return_value='2027-08-01'):
+            report = self.run_fake(sizes=(4,), before='2026-10-18')
+        self.assertEqual(report['cutoff'], '2026-10-18')
+        self.assertTrue(report['folds'][-1]['partial'])
+
+    def test_calibration_sizes_preserve_distinct_target_populations(self):
+        report = self.run_fake(sizes=(2, 20))
+        for fold in report['folds']:
+            for method in ('clubs', 'catboost_plain'):
+                small = fold['sizes']['2']['diagnostics']['calibration']['test'][method]
+                large = fold['sizes']['20']['diagnostics']['calibration']['test'][method]
+                self.assertEqual(small['matches'], 48)
+                self.assertEqual(large['matches'], 40)
+        self.assertFalse(report['protocol']['test_selection'])
+        self.assertIn('No learned calibration', report['protocol']['diagnostics'])
 
     def test_run_never_mutates_or_publishes_data_models_reports_or_journal(self):
         rows = sample()
@@ -211,6 +299,69 @@ class SeasonalRunTests(unittest.TestCase):
             self.assertEqual(list(Path(td).glob('*.tmp')), [])
             path.write_text('{invalid')
             with self.assertRaises(evaluation.SeasonalError): evaluation.load_report('39')
+
+    def test_legacy_reports_without_probability_diagnostics_remain_readable(self):
+        report = self.run_fake(sizes=(4,))
+        report['protocol'].pop('diagnostics')
+        for fold in report['folds']:
+            for output in fold['sizes'].values():
+                output.pop('diagnostics')
+                for period in ('validation', 'test'):
+                    for metrics in output[period].values():
+                        metrics.pop('mean_top1_probability')
+                        metrics.pop('mean_top3_probability')
+        with tempfile.TemporaryDirectory() as td, patch.object(evaluation, 'REPORT_DIR', Path(td)):
+            evaluation.save_report(report)
+            self.assertEqual(evaluation.load_report('39'), report)
+
+
+class SeasonalProbabilityDiagnosticsTests(unittest.TestCase):
+    def contexts(self):
+        distributions = [{'1st': 1., 'Égal': 0., '2nd': 0.}, {'1st': .2, 'Égal': .3, '2nd': .5}]
+        group = dict(before='2024-08-01', feature_keys=[('1', '2024-08-01'), ('2', '2024-08-01')],
+            clubs=distributions, block=dict(matches=[dict(match_id='1', value='1st'), dict(match_id='2', value='Égal')],
+                sequence=['1st', 'Égal']))
+        return group, dict(zip(group['feature_keys'], distributions))
+
+    def test_match_metrics_use_multiclass_definition_and_probability_one_final_bin(self):
+        group, predictions = self.contexts()
+        clubs = evaluation._calibration([group], predictions, 'clubs')
+        self.assertEqual(clubs['matches'], 2)
+        self.assertAlmostEqual(clubs['logloss'], -log(.3)/2)
+        self.assertAlmostEqual(clubs['brier'], .39)
+        self.assertEqual(clubs, evaluation._calibration([group], predictions, 'catboost_plain'))
+        final = clubs['reliability']['1st'][-1]
+        self.assertEqual((final['count'], final['mean_probability'], final['observed_rate']), (1, 1, 1))
+        for label in ml.VALUES:
+            bins = clubs['reliability'][label]
+            self.assertEqual(sum(row['count'] for row in bins), 2)
+            self.assertEqual(len(bins), 10)
+            self.assertTrue(all(row['mean_probability'] is None and row['observed_rate'] is None
+                                for row in bins if row['count'] == 0))
+
+    def test_repeated_fixture_cutoffs_are_deduplicated_and_conflicts_refused(self):
+        group, predictions = self.contexts()
+        self.assertEqual(evaluation._calibration([group, copy.deepcopy(group)], predictions, 'clubs')['matches'], 2)
+        later = copy.deepcopy(group)
+        later['before'] = '2024-08-02'
+        self.assertEqual(evaluation._calibration([group, later], predictions, 'clubs')['matches'], 4)
+        conflicting = copy.deepcopy(group)
+        conflicting['block']['matches'][0]['value'] = '2nd'
+        with self.assertRaises(evaluation.SeasonalError):
+            evaluation._calibration([group, conflicting], predictions, 'clubs')
+
+    def test_group_coverage_is_full_distribution_mass_without_display_renormalization(self):
+        group, predictions = self.contexts()
+        group['clubs'] = [{'1st': .6, 'Égal': .25, '2nd': .15}, {'1st': .2, 'Égal': .3, '2nd': .5}]
+        predictions = dict(zip(group['feature_keys'], group['clubs']))
+        group['block']['sequence'] = ['1st', '2nd']
+        fitted = evaluation.fit_sequences([('1st', 'Égal'), ('2nd', '2nd')], 2)
+        metrics = evaluation._metrics([group], fitted, 'catboost_plain', predictions)
+        probabilities = sorted((a*b for a in group['clubs'][0].values() for b in group['clubs'][1].values()), reverse=True)
+        self.assertAlmostEqual(metrics['mean_top1_probability'], probabilities[0])
+        self.assertAlmostEqual(metrics['mean_top3_probability'], sum(probabilities[:3]))
+        self.assertLess(metrics['mean_top3_probability'], 1)
+        self.assertEqual(metrics['top1_rate'], 1)
 
 
 @unittest.skipUnless(importlib.util.find_spec('catboost'), 'CatBoost runtime unavailable')

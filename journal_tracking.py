@@ -78,7 +78,7 @@ def register(rows, fixtures, estimate, engine, *, competition=None):
     if existing:
         return dict(state='recorded', id=existing['id'], created=False,
                     message='La première prévision de ce groupe est déjà verrouillée dans le journal.')
-    frozen = models.build_methods(rows, fixtures, estimate=estimate, engine=engine)
+    frozen = models.build_methods(rows, fixtures, estimate=estimate, engine=engine, decision_at=now)
     selected = {'statistical': 'combined', 'combined': 'combined', 'catboost': 'catboost',
                 'context_neighbors': 'context_neighbors'}.get(engine)
     if selected not in frozen['methods']:

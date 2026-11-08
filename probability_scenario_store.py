@@ -87,6 +87,12 @@ def _snapshot(entry):
     if not isinstance(entry, dict) or entry.get('source') != 'API-Football':
         raise ScenarioStoreError('Seules les prévisions API-Football peuvent recevoir un scénario.')
     fixtures = journal._fixtures(entry.get('fixtures', []), allow_mixed=True)
+    days = {journal._stamp(row['timestamp']).astimezone(ZONE).date().isoformat() for row in fixtures}
+    metadata = entry.get('metadata') or {}
+    selection = metadata.get('selection') or {}
+    if (len(days) != 1 or metadata.get('match_day', next(iter(days))) not in days
+            or selection.get('match_day', next(iter(days))) not in days):
+        raise ScenarioStoreError('La journée du scénario doit correspondre à toutes ses rencontres.')
     size = len(fixtures)
     if entry.get('size') != size or entry.get('id') != journal._group_key(fixtures):
         raise ScenarioStoreError('L’identité de la prévision ne correspond pas aux matchs.')
@@ -105,7 +111,7 @@ def _snapshot(entry):
     if method.get('source') != 'API-Football':
         raise ScenarioStoreError('La provenance Clubs doit être API-Football.')
     if method['distribution']['type'] == 'block_product':
-        journal._mixed_provenance(method, fixtures, fixtures[0]['timestamp'][:10], leagues)
+        journal._mixed_provenance(method, fixtures, method.get('training_before'), leagues)
     elif len(leagues) != 1 or str(method.get('league')) != leagues[0]:
         raise ScenarioStoreError('La compétition de la prévision Clubs est incohérente.')
     positions, details = _positions(method, size)
@@ -127,16 +133,19 @@ def forecast_digest(entry):
 def _check_time(fixtures, current, forecast_created):
     if current < forecast_created:
         raise ScenarioStoreError('Le scénario ne peut pas précéder la prévision enregistrée.')
-    day = current.astimezone(ZONE).date()
+    days = {journal._stamp(row['timestamp']).astimezone(ZONE).date() for row in fixtures}
     if any(journal._stamp(row['timestamp']) <= current for row in fixtures):
         raise ScenarioStoreError('Un coup d’envoi est passé : nouveau choix non enregistré.')
-    if any(journal._stamp(row['timestamp']).astimezone(ZONE).date() != day for row in fixtures):
-        raise ScenarioStoreError('Les nouveaux choix concernent uniquement les matchs du jour à Kinshasa.')
+    if len(days) != 1 or min(days) < current.astimezone(ZONE).date():
+        raise ScenarioStoreError('Les nouveaux choix doivent concerner une même journée à venir à Kinshasa.')
 
 
 def _make_selection(entry, selection, fixtures, positions, details):
     if not isinstance(selection, dict):
         raise ScenarioStoreError('Le scénario choisi est absent.')
+    day = journal._stamp(fixtures[0]['timestamp']).astimezone(ZONE).date().isoformat()
+    if selection.get('match_day', day) != day:
+        raise ScenarioStoreError('La journée choisie ne correspond pas aux rencontres de la prévision.')
     requested = selection.get('requested_scenario')
     sequence = requested.get('sequence') if isinstance(requested, dict) else None
     if (not isinstance(sequence, list) or len(sequence) != len(fixtures)
@@ -178,7 +187,7 @@ def _make_selection(entry, selection, fixtures, positions, details):
         if (isinstance(value, bool) or not isinstance(value, (int, float))
                 or not isfinite(value) or not 0 <= value <= 1):
             raise ScenarioStoreError('Le seuil de recherche doit être compris entre zéro et un.')
-    return dict(policy=POLICY, searched_outcome=outcome, ranking_metric='chosen_clubs_probability',
+    return dict(policy=POLICY, match_day=day, searched_outcome=outcome, ranking_metric='chosen_clubs_probability',
                 requested_scenario=dict(sequence=list(sequence), probability=models.probability_for_sequence(
                     entry['methods']['clubs'], sequence)), match_probabilities=rows, search=search,
                 minimum_match_probability=min(row['search_probability'] for row in rows),
@@ -241,7 +250,7 @@ def _read(row):
             raise ScenarioStoreError('La comparaison historique enregistrée est invalide.')
     p = selection['requested_scenario']['probability']
     if (isinstance(p, bool) or not isinstance(p, (int, float)) or not isfinite(p)
-            or not isclose(p, prod(value['search_probability'] for value in rows), rel_tol=1e-9, abs_tol=1e-12)):
+            or not isclose(p, prod(value['search_probability'] for value in rows), rel_tol=1e-9, abs_tol=0)):
         raise ScenarioStoreError('La probabilité du scénario enregistré est invalide.')
     stamp = datetime.fromisoformat(item['created_at'].replace('Z', '+00:00'))
     if stamp.tzinfo is None:

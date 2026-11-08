@@ -1,0 +1,7 @@
+# Preserve the Mac runtime used by the frozen protocol. Do not relax these
+# versions to work around Linux wheel/ABI failures: resolve compatibility first.
+streamlit==1.64.0
+pandas==2.3.3
+catboost==1.2.10
+numpy==2.5.3
+scipy==1.18.1

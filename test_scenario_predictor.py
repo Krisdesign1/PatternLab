@@ -1,7 +1,11 @@
 import unittest
+from copy import deepcopy
 from datetime import datetime, timedelta
+from itertools import product
+from math import fsum, prod
 from league_patterns import repeated_scenarios
-from scenario_predictor import distributions, predict_league
+from league_model import VALUES
+from scenario_predictor import distributions, fit_sequences, predict_league, probability
 
 
 def sample(n=140):
@@ -11,6 +15,43 @@ def sample(n=140):
 
 
 class PredictionTests(unittest.TestCase):
+    def test_scoring_requires_all_ordered_legs_and_rejects_extra_or_unknown_results(self):
+        fit = fit_sequences([('1st','2nd'), ('2nd','2nd')], 2)
+        before = deepcopy(fit)
+        for sequence in ([], ['1st'], ['1st','2nd','Égal'], ['1st','other'], '1st', None):
+            for baseline in (False, True):
+                with self.subTest(sequence=sequence, baseline=baseline), self.assertRaises(ValueError):
+                    probability(fit, sequence, baseline=baseline)
+        self.assertEqual(fit, before)
+
+    def test_probability_rejects_malformed_fit_and_invalid_position_weights(self):
+        fit = fit_sequences([('1st','2nd')], 2)
+        invalid = [None, (), [fit[0],fit[1]], (fit[0],True,fit[2]),
+                   (fit[0],-1,fit[2]), ([],fit[1],fit[2])]
+        for value in (float('nan'), float('inf'), True, -.1, 1.1):
+            changed = deepcopy(fit)
+            changed[2][0]['1st'] = value
+            invalid.append(changed)
+        changed = deepcopy(fit); changed[2][0]['1st'] += .1; invalid.append(changed)
+        changed = deepcopy(fit); del changed[2][0]['Égal']; invalid.append(changed)
+        for value in invalid:
+            with self.subTest(fit=value), self.assertRaises(ValueError):
+                probability(value, ['1st','2nd'])
+        for baseline in (0, 1, 'False', None):
+            with self.subTest(baseline=baseline), self.assertRaises(ValueError):
+                probability(fit, ['1st','2nd'], baseline=baseline)
+
+    def test_valid_absolute_probabilities_keep_original_formula_for_every_size(self):
+        for size in range(2, 21):
+            fit = fit_sequences([('1st',)*size]*2+[('2nd',)*size], size)
+            sequence = ('1st',)*size
+            base = prod(position[label] for position,label in zip(fit[2],sequence))
+            self.assertAlmostEqual(probability(fit, sequence, baseline=True), base)
+            self.assertAlmostEqual(probability(fit, sequence), (2+10*base)/13)
+        for size in range(2, 6):
+            fit = fit_sequences([('1st',)*size, ('2nd',)*size], size)
+            self.assertAlmostEqual(fsum(probability(fit, sequence) for sequence in product(VALUES,repeat=size)), 1)
+
     def test_normalized_all_scenarios_with_unseen_positive(self):
         for seqs in ([], [('1st',)*4]*25):
             for dist in distributions(seqs):

@@ -1,4 +1,5 @@
 """Lazy, read-only multi-day observations for the local automation screen."""
+import table_views
 from datetime import datetime
 import json
 from pathlib import Path
@@ -66,11 +67,11 @@ def render(root, *, days=7):
             st.warning('La lecture est tronquée : les comptes d’opérations et les intervalles ne couvrent pas toute la période.')
         operations, forecasts = _tables(report)
         st.markdown('**Opérations terminées observées**')
-        st.dataframe(operations,hide_index=True,width='stretch',key='automation_daily_operations')
+        table_views.dataframe(operations,hide_index=True,width='stretch',key='automation_daily_operations', table_id='automation_observation_panel:render:dataframe:1')
         st.caption('Chaque nombre décrit une opération terminée enregistrée, même lorsqu’elle n’a rien ajouté. '
                    'Un zéro peut correspondre à une absence d’observation. Les nouvelles dates de suivi ne reconstituent pas le passé.')
         st.markdown('**Prévisions et résultats par journée de match**')
-        st.dataframe(forecasts,hide_index=True,width='stretch',key='automation_daily_forecasts')
+        table_views.dataframe(forecasts,hide_index=True,width='stretch',key='automation_daily_forecasts', table_id='automation_observation_panel:render:dataframe:2')
         st.caption('Chaque match est compté une seule fois, selon sa première prévision conservée et son coup d’envoi enregistré. '
                    'Les groupes qui se recouvrent ne multiplient pas les observations. Une attente ou une exclusion n’est pas un échec.')
         evidence = report['predictive_evidence']

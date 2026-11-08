@@ -12,6 +12,33 @@ from test_saved_model_comparison import entry
 
 
 class FrozenGroupDiagnosticsTests(unittest.TestCase):
+    def test_adaptive_selection_keeps_original_three_reference_mass(self):
+        from adaptive_scenario_selection import select, VERSION
+        base=[{'1st':.5,'Égal':.3,'2nd':.2}, {'1st':.45,'Égal':.35,'2nd':.2}]
+        original=models._method('test-v1',models._distribution('independent',2,distributions=base),{})
+        expected=diagnostics.inspect(original)
+        for threshold in (.2, .15, .09):
+            method=deepcopy(original)
+            method.update(reference_ranking=deepcopy(original['ranking']), ranking=select(original,threshold),
+                          proposal_policy=dict(version=VERSION,threshold=threshold))
+            result=diagnostics.inspect(method)
+            self.assertAlmostEqual(result['top3_probability'],expected['top3_probability'])
+            self.assertEqual(result['proposed_count'],len(method['ranking']))
+            self.assertAlmostEqual(result['proposed_probability'],sum(row['probability'] for row in method['ranking']))
+            self.assertEqual(result['top1_match_probabilities'],expected['top1_match_probabilities'])
+
+    def test_extended_explicit_choices_do_not_expand_historical_top_three_mass(self):
+        from coupon_sizes import top_independent
+        base=[{'1st':.5,'Égal':.3,'2nd':.2}, {'1st':.45,'Égal':.35,'2nd':.2}]
+        method=models._method('test-v1',models._distribution('independent',2,distributions=base),{})
+        original=diagnostics.inspect(method)
+        method['ranking']=top_independent(base,6)
+        result=diagnostics.inspect(method)
+        self.assertEqual(result['proposed_count'],6)
+        self.assertAlmostEqual(result['top3_probability'], original['top3_probability'])
+        self.assertAlmostEqual(result['proposed_probability'],sum(row['probability'] for row in method['ranking']))
+        self.assertGreater(result['proposed_probability'],result['top3_probability'])
+
     def test_exact_scenario_mass_is_distinct_from_each_match_probability(self):
         method=entry()['methods']['clubs']; before=deepcopy(method)
         result=diagnostics.inspect(method)

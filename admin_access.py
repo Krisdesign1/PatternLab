@@ -12,6 +12,9 @@ import streamlit as st
 
 DENIED = ('Cette commande modifie les données partagées et nécessite un compte administrateur. '
           'La consultation et vos analyses restent disponibles.')
+FROZEN = ('Administrateur connecté. Les modifications des données et des modèles sont '
+          'verrouillées pendant la qualification du serveur. '
+          'La consultation, vos analyses et les tâches automatiques restent disponibles.')
 
 
 def _secrets():
@@ -89,39 +92,66 @@ def _claims():
         return {}
 
 
-def can_admin():
-    """Evaluate the current identity anew for every server action; never cached."""
+def _runtime_owner(config):
     try:
         address = st.get_option('server.address')
     except (KeyError, RuntimeError):
         address = ''
-    return authorized(_secrets(), _claims(), server_address=address)
+    return authorized(config, _claims(), server_address=address)
+
+
+def can_owner():
+    """Recognize the owner independently of the server's shared-write policy."""
+    return _runtime_owner(_secrets())
+
+
+def shared_writes_allowed(config):
+    """An explicit server lock also applies to authenticated owners.
+
+    Existing local installations retain their policy when the key is absent.
+    A present, malformed value never unlocks shared writes.
+    """
+    return _access(config).get('shared_writes', True) is True
+
+
+def can_admin():
+    """Re-evaluate identity and server write policy for every action; never cache."""
+    config = _secrets()
+    return shared_writes_allowed(config) and _runtime_owner(config)
+
+
+def _frozen_owner():
+    config = _secrets()
+    return not shared_writes_allowed(config) and _runtime_owner(config)
 
 
 def require_admin():
     """Re-check at the mutation boundary, even if a button was enabled earlier."""
     if not can_admin():
-        st.warning(DENIED)
+        st.warning(FROZEN if _frozen_owner() else DENIED)
         st.stop()
 
 
 def read_only_notice():
     if not can_admin():
-        st.caption('Administration en lecture seule. Connectez-vous avec un compte autorisé pour modifier les données partagées.')
+        st.caption(FROZEN if _frozen_owner() else 'Administration en lecture seule. Connectez-vous avec un compte autorisé pour modifier les données partagées.')
 
 
 def render_identity():
     """Optional sign-in; public consultation does not require an account."""
     config, claims = _secrets(), _claims()
     ready, provider = auth_provider(config)
-    if can_admin():
+    owner = _runtime_owner(config)
+    if owner and not shared_writes_allowed(config):
+        st.caption(FROZEN)
+    elif owner:
         st.caption('Administration autorisée.')
     else:
         st.caption('Consultation et analyses · administration en lecture seule.')
     if claims.get('is_logged_in') is True:
         if st.button('Se déconnecter', icon=':material/logout:', key='admin_logout'):
             st.logout()
-        if not can_admin():
+        if not owner:
             st.caption('Ce compte ne dispose pas de droits administrateur, ou sa session doit être renouvelée.')
     elif ready:
         if st.button('Connexion administrateur', icon=':material/login:', key='admin_login'):

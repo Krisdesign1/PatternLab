@@ -350,7 +350,7 @@ class FixtureStoreTests(unittest.TestCase):
         with patch.object(store, '_filters', side_effect=publish):
             selected = api.load_fixtures(self.path, ids=list(range(1, 501)) + [1000, 501, 1])
         self.assertEqual([row['fixture']['id'] for row in selected], [1, 1000])
-        self.assertEqual(len(calls), 2)
+        self.assertEqual([len(call['ids']) for call in calls[:2]], [500, 3])
         self.assertEqual(len(api.load_fixtures(self.path)), 3)
 
     def test_parallel_writers_keep_all_rows_and_increment_revision_once_per_batch(self):

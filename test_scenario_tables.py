@@ -1,3 +1,4 @@
+from test_table_view_support import html_nodes
 import copy
 from itertools import product
 import json
@@ -58,9 +59,40 @@ class ScenarioTableTests(unittest.TestCase):
         row = next(row for row in matrix['rows'] if row['sequence'] == ('1st', '1st'))
         self.assertIsNone(row['cells']['clubs']['probability'])
         html = tables.matrix_html(matrix)
-        self.assertIn('Non classé dans les 3', html)
+        self.assertIn('Non proposé par cette méthode', html)
         self.assertNotIn('>0,00 %<', html)
         self.assertNotIn('Non réalisé', html)
+
+    def test_ranking_only_cannot_show_impossible_total_mass_or_increasing_rank(self):
+        sequences = [['1st','1st'], ['2nd','2nd'], ['Égal','Égal']]
+        for chances in ([.9,.8,.7], [.1,.3,.2]):
+            payload = {'ranking':[{'sequence':sequence,'probability':chance}
+                                  for sequence,chance in zip(sequences,chances)]}
+            before = copy.deepcopy(payload)
+            with self.subTest(chances=chances), self.assertRaises(ValueError):
+                tables.build_matrix({'clubs':payload})
+            self.assertEqual(payload, before)
+
+    def test_ranking_only_validates_the_entire_saved_ranking(self):
+        for size in range(2, 21):
+            ranking = [dict(sequence=['1st']*size,probability=.12),
+                       dict(sequence=['2nd']*size,probability=.11),
+                       dict(sequence=['Égal']*size,probability=.10),
+                       dict(sequence=['invalid'],probability=999)]
+            with self.assertRaises(ValueError):
+                tables.build_matrix({'clubs':{'ranking':ranking}})
+            ranking[-1] = dict(sequence=['1st']*(size-1)+['2nd'], probability=.09)
+            matrix = tables.build_matrix({'clubs':{'ranking':ranking}}, actual=ranking[-1]['sequence'])
+            self.assertEqual(len(matrix['rows']), 4)
+            self.assertTrue(matrix['actual_in_choices'])
+            self.assertEqual(next(row for row in matrix['rows'] if row['actual'])['cells']['clubs']['rank'], 4)
+            self.assertAlmostEqual(sum(row['cells']['clubs']['probability'] for row in matrix['rows']), .42)
+
+    def test_roundoff_level_ties_do_not_invalidate_a_legacy_ranking(self):
+        payload = {'ranking':[{'sequence':['1st','1st'],'probability':.1},
+                              {'sequence':['2nd','2nd'],'probability':.1+1e-15}]}
+        matrix = tables.build_matrix({'clubs':payload})
+        self.assertEqual(len(matrix['rows']), 2)
 
     def test_rows_are_deterministic_independently_of_method_mapping_order(self):
         methods = {'combined': independent(positions(.5, .3)), 'frequency': independent(positions())}
@@ -138,11 +170,11 @@ class ScenarioMatrixUiTests(unittest.TestCase):
         with patch.object(prospective, 'build_methods', side_effect=AssertionError('No training')):
             at = AppTest.from_string(source, default_timeout=15).run()
         self.assertFalse(at.exception)
-        html = '\n'.join(node.proto.body for node in at.get('html'))
+        html = '\n'.join(node.proto.body for node in html_nodes(at))
         self.assertIn('pl-scenario-token-first', html)
         self.assertIn('Réalisé', html)
-        self.assertIn('Hors des 3 choix', html)
-        self.assertEqual(len(at.get('html')), 3)
+        self.assertIn('Hors des choix proposés', html)
+        self.assertEqual(len(html_nodes(at)), 3)
 
     def test_pagination_covers_union_and_resets_on_changed_payload(self):
         sequences = list(product(('1st', 'Égal', '2nd'), repeat=4))
@@ -154,21 +186,21 @@ class ScenarioMatrixUiTests(unittest.TestCase):
                   'tables.render_matrix(st.session_state["payload"], key="pages")\n')
         at = AppTest.from_string(source, default_timeout=15).run()
         self.assertFalse(at.exception)
-        self.assertIn('10 scénario(s)', at.caption[0].value)
+        self.assertTrue(any('10 scénario(s)' in item.value for item in at.caption))
         at.selectbox[0].select(1).run()
         self.assertFalse(at.exception)
-        self.assertIn('5 scénario(s)', at.caption[0].value)
+        self.assertTrue(any('5 scénario(s)' in item.value for item in at.caption))
         changed = copy.deepcopy(at.session_state['payload'])
         changed['frequency']['ranking'][0]['probability'] = .12
         at.session_state['payload'] = changed
         at.run()
         self.assertFalse(at.exception)
         self.assertEqual(at.selectbox[0].value, 0)
-        self.assertIn('10 scénario(s)', at.caption[0].value)
+        self.assertTrue(any('10 scénario(s)' in item.value for item in at.caption))
         at.button_group[0].set_value('Premiers choix').run()
         self.assertFalse(at.exception)
         self.assertFalse(at.selectbox)
-        self.assertIn('5 scénario(s)', at.caption[0].value)
+        self.assertTrue(any('5 scénario(s)' in item.value for item in at.caption))
 
 
 if __name__ == '__main__':

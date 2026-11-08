@@ -1,4 +1,5 @@
 """Exercise the journal list without APIs, predictions, or journal writes."""
+from test_table_view_support import html_nodes
 import copy
 from datetime import date
 import json
@@ -82,6 +83,37 @@ class JournalBrowserTests(unittest.TestCase):
         self.assertTrue(any('12,34 %' in value.value for value in at.markdown))
         self.assert_readonly()
 
+    def test_waiting_cause_names_the_responsible_match_before_opening(self):
+        value = row(1)
+        value['result_explanation'] = dict(label='Match reporté',
+            summary='Bayern München II — Vilzing : report signalé par API-Football.',
+            matches=[], blocking=[dict(match_id='100', label='Reporté', reason='Report signalé.',
+                                      state='postponed', raw_status='PST')])
+        original = copy.deepcopy(value)
+        at = self.open([value])
+        self.assertTrue(any('Bayern München II — Vilzing' in node.value for node in at.caption))
+        self.assertEqual(at.session_state['rows'], [original])
+        at.selectbox(key='list_state').select('pending').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(len(self.entries(at)), 1)
+        self.assert_readonly()
+
+    def test_group_filter_contains_all_sizes_and_absent_size_never_falls_back(self):
+        rows=[row(1,size=2),row(2,size=3),row(3,size=4),row(4,size=20)]
+        original=copy.deepcopy(rows)
+        at=self.open(rows)
+        for size,index in ((2,0),(3,1),(4,2),(20,3)):
+            at.selectbox(key='list_size').select(size).run()
+            self.assertFalse(at.exception)
+            self.assertEqual([button.key for button in self.entries(at)],['list_open_'+rows[index]['entry_id']])
+        at.selectbox(key='list_size').select(19).run()
+        self.assertEqual(at.selectbox(key='list_size').value,19)
+        self.assertFalse(self.entries(at))
+        at.selectbox(key='list_size').select(None).run()
+        self.assertEqual(len(self.entries(at)),4)
+        self.assertEqual(at.session_state['rows'],original)
+        self.assert_readonly()
+
     def test_optional_filters_and_search_combine_without_hiding_other_sizes_by_default(self):
         rows = [row(1),row(2,league='61',size=4,origin='automatic',status='in_progress'),
                 row(3,size=4,origin='automatic',status='settled')]
@@ -115,6 +147,15 @@ class JournalBrowserTests(unittest.TestCase):
         for label in ('Scénario réalisé','Aucun scénario proposé réalisé','Scénarios en attente'):
             self.assertIn(label,text)
         self.assertTrue(any(item.value=='Clubs · Choix 3' for item in at.caption))
+        html='\n'.join(node.proto.body for node in html_nodes(at))
+        self.assertIn('aria-label="2nd → 1st"',html)
+        self.assertIn('aria-label="Égal → Égal"',html)
+        self.assertTrue(any(item.value=='**Scénario réalisé :**' for item in at.markdown))
+        self.assertTrue(any(item.value=='**Scénario observé :**' for item in at.markdown))
+        self.assertTrue(any(item.value=='Cote cumulée indicative du scénario réalisé : '
+                            '**6,51** · Référence fixe manuelle' for item in at.caption))
+        self.assertTrue(any(item.value=='Cote cumulée indicative du scénario observé : '
+                            '**9,00** · Référence fixe manuelle' for item in at.caption))
         at.selectbox(key='list_verdict').set_value('hit').run()
         self.assertEqual([button.key for button in self.entries(at)],['list_open_'+hit['id']])
         self.assertIsNone(at.session_state['opened'])
@@ -186,7 +227,7 @@ class JournalBrowserTests(unittest.TestCase):
         self.assertTrue(any(f'Cote cumulée indicative : {expected}' in value.value for value in at.caption))
         self.assertTrue(any('Début du scénario · 20 résultats' in value.value for value in at.caption))
         self.assertTrue(any('+18 affiches' in value.value for value in at.caption))
-        html = '\n'.join(node.proto.body for node in at.get('html'))
+        html = '\n'.join(node.proto.body for node in html_nodes(at))
         self.assertIn('pl-scenario-token-first',html)
         self.assertIn('pl-scenario-token-second',html)
         self.assertIn('pl-scenario-token-equal',html)
@@ -214,7 +255,7 @@ class JournalBrowserTests(unittest.TestCase):
         self.assertFalse(at.exception)
         title = next(value.value for value in at.markdown if 'evil' in value.value)
         self.assertIn(r'\!\[x\]\(https://evil\.invalid/image\)',title)
-        html = '\n'.join(node.proto.body for node in at.get('html'))
+        html = '\n'.join(node.proto.body for node in html_nodes(at))
         self.assertNotIn('evil.invalid',html)
         self.assertNotIn('<img',html)
         self.assert_readonly()

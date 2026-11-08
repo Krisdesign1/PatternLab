@@ -5,6 +5,7 @@ from math import ceil
 import re
 
 import streamlit as st
+from group_size_filter import render as render_group_size_filter
 
 import journal_browser_data as data
 import scenario_tables
@@ -33,9 +34,7 @@ def _filters(rows, key):
                      key=lambda league: next((str(row['country']).casefold(), str(row['competition']).casefold(), league)
                                              for row in rows if str(row['league']) == league))
     league_names = {str(row['league']): f"{row['country']} · {row['competition']}" for row in rows}
-    sizes = sorted({row['size'] for row in rows})
     _reset_choice(f'{key}_league', [None] + leagues)
-    _reset_choice(f'{key}_size', [None] + sizes)
     _reset_choice(f'{key}_origin', list(ORIGINS), default='all')
     _reset_choice(f'{key}_state', list(STATES), default='all')
     _reset_choice(f'{key}_verdict', list(scenario_tables.OUTCOME_FILTERS), default='all')
@@ -43,9 +42,7 @@ def _filters(rows, key):
         league = st.selectbox('Compétition des analyses', [None] + leagues,
                               format_func=lambda value: 'Toutes les compétitions' if value is None else league_names[value],
                               key=f'{key}_league', persist_state='page')
-        size = st.selectbox('Taille des groupes', [None] + sizes,
-                            format_func=lambda value: 'Toutes les tailles' if value is None else f'{value} matchs',
-                            key=f'{key}_size', persist_state='page')
+        size = render_group_size_filter(f'{key}_size')
         origin = st.selectbox('Origine des analyses', list(ORIGINS), format_func=ORIGINS.get,
                               key=f'{key}_origin', persist_state='page')
         state = st.selectbox('État des analyses', list(STATES), format_func=STATES.get,
@@ -80,6 +77,8 @@ def _render_row(row, key):
             names = row.get('match_names') or []
             st.caption(_markdown(' · '.join(names[:2])) + (f" · +{len(names)-2} affiches" if len(names) > 2 else ''))
             st.caption(ORIGINS.get(row['origin'], str(row['origin'])))
+            if row.get('record_kind') == 'manual_calculation':
+                st.caption('Calcul sauvegardé automatiquement')
         with scenario:
             sequence = row.get('primary_sequence')
             if sequence:
@@ -96,7 +95,12 @@ def _render_row(row, key):
                 st.caption('Premier scénario indisponible dans les données enregistrées.')
         with following:
             st.badge(row['status_label'], color=STATE_COLORS.get(row['status'], 'gray'))
-            scenario_tables.render_outcome(row.get('scenario_outcome'))
+            explanation = row.get('result_explanation') or {}
+            if explanation.get('blocking'):
+                st.badge(explanation.get('label') or 'Résultat non évaluable', color='orange')
+                if explanation.get('summary'):
+                    st.caption(_markdown(explanation['summary']))
+            scenario_tables.render_outcome(row.get('scenario_outcome'), show_sequence=True, show_explanation=False)
             st.caption(f"{row['observed_matches']}/{row['expected_matches']} résultats connus")
             st.caption(f"Enregistré le {row['created_local']} · Kinshasa")
             if row.get('kickoff_range'):
@@ -107,7 +111,7 @@ def _render_row(row, key):
     return entry_id if clicked else None
 
 
-def render(rows, day, *, key='journal_browser', historical=False):
+def render(rows, day, *, key='journal_browser', historical=False, selected_date=False):
     """Return only the complete ID explicitly opened by a native row button.
 
     ``rows`` is the local projection returned by journal_browser_data.build_rows.
@@ -118,7 +122,9 @@ def render(rows, day, *, key='journal_browser', historical=False):
     if not isinstance(day, date):
         raise ValueError('La journée des analyses doit être une date locale.')
     _restore_preferences(key)
-    st.subheader('Analyses et évaluations passées' if historical else 'Toutes les analyses du jour', icon=':material/view_list:')
+    st.subheader('Analyses et évaluations passées' if historical else
+                 'Toutes les analyses de cette date' if selected_date else 'Toutes les analyses du jour',
+                 icon=':material/view_list:')
     st.caption(f"Matchs du {day.strftime('%d/%m/%Y')} · Toutes les compétitions et tailles sont visibles par défaut.")
     league, size, origin, state, verdict, query, per_page = _filters(rows, key)
     preferences = dict(league=league, size=size, origin=origin, state=state, verdict=verdict, query=query, page_size=per_page)

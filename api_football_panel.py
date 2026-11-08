@@ -1,4 +1,5 @@
 """Explicit API-Football connection, preview and local import controls."""
+import table_views
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import json
@@ -167,7 +168,7 @@ def render_api_football():
                 table, usable, excluded = fixture_preview(batch['fixtures'])
                 st.write(f"**{len(table)} matchs reçus**, dont **{usable} résultats HT/FT utilisables**.")
                 if table:
-                    st.dataframe(table[:50], hide_index=True, width='stretch')
+                    table_views.dataframe(table[:50], hide_index=True, width='stretch', table_id='api_football_panel:render_api_football:dataframe:1')
                     st.caption('Aperçu limité aux 50 premiers matchs ; l’import conserve tout le lot reçu, y compris le calendrier.')
                     if st.button('Enregistrer ce lot dans PatternLab', icon=':material/save:', key='api_import', disabled=not allowed):
                         admin_access.require_admin()
@@ -183,7 +184,7 @@ def render_api_football():
                             st.error(str(error))
                 if excluded:
                     st.warning(f'{len(excluded)} match(s) terminé(s) exclus des analyses : scores absents ou incohérents.')
-                    st.dataframe(excluded, hide_index=True, width='stretch')
+                    table_views.dataframe(excluded, hide_index=True, width='stretch', table_id='api_football_panel:render_api_football:dataframe:2')
 
     try:
         database = api.active_store(STORE_PATH)
@@ -209,9 +210,10 @@ def render_api_football():
                                     key='api_preview_day')
                 selected = calendar.local_day_matches(day, path=STORE_PATH)
                 table, _, _ = fixture_preview(selected)
-                st.dataframe(table, hide_index=True, width='stretch')
-                st.caption(f'{len(table)} matchs à cette date. La sauvegarde contient toute la base.')
-        st.download_button('Sauvegarder les matchs API-Football',
+                table_views.dataframe(table, hide_index=True, width='stretch', table_id='api_football_panel:render_api_football:dataframe:3')
+                st.caption(f'{len(table)} matchs à cette date. L’export contient tous les matchs enregistrés.')
+        st.caption('Cet export JSON contient les matchs API-Football. La sauvegarde complète inclut aussi les autres bases et le journal.')
+        st.download_button('Exporter les matchs API-Football (JSON)',
                            lambda: json.dumps(api.export_store(STORE_PATH), ensure_ascii=False,
                                               allow_nan=False).encode('utf-8'),
                            file_name='api_football_fixtures.json', mime='application/json', key='api_backup',

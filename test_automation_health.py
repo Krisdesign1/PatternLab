@@ -122,6 +122,35 @@ class AutomationHealthTests(unittest.TestCase):
         self.assertEqual(summary['service_observations'], 0)
         self.assertNotIn('uptime', summary)
 
+    def test_linux_waits_full_interval_after_a_long_cycle_without_false_gap(self):
+        self.record(end=NOW+timedelta(hours=1), duration=3600)
+        self.record(NOW+timedelta(minutes=75))
+        view = health.load(self.root, now=NOW+timedelta(minutes=76))
+        self.assertEqual(health.summarize(view, now=NOW+timedelta(minutes=76),
+                                         cadence='after_finish')['gaps'], [])
+
+    def test_linux_ongoing_gap_uses_finish_and_keeps_real_delay_visible(self):
+        self.record(end=NOW+timedelta(hours=1), duration=3600)
+        view = health.load(self.root, now=NOW+timedelta(minutes=80))
+        self.assertEqual(health.summarize(view, now=NOW+timedelta(minutes=80),
+            schedule_expected=True, cadence='after_finish')['gaps'], [])
+        gaps = health.summarize(view, now=NOW+timedelta(minutes=90),
+            schedule_expected=True, cadence='after_finish')['gaps']
+        self.assertEqual(len(gaps), 1)
+        self.assertEqual(gaps[0]['start'], (NOW+timedelta(minutes=75)).isoformat())
+        self.assertEqual(gaps[0]['minutes'], 15)
+        self.assertTrue(gaps[0]['ongoing'])
+
+    def test_linux_does_not_infer_next_start_without_a_confirmed_finish(self):
+        self.record(status='error')
+        with sqlite3.connect(health.path(self.root)) as con:
+            con.execute('UPDATE cycles SET finished_at=NULL')
+        view = health.load(self.root, now=NOW+timedelta(hours=2))
+        self.assertEqual(health.summarize(view, now=NOW+timedelta(hours=2),
+            schedule_expected=True, cadence='after_finish')['gaps'], [])
+        with self.assertRaises(health.HealthError):
+            health.summarize(view, cadence='invented')
+
     def test_window_is_bounded_and_reports_truncation_without_deleting_history(self):
         for minute in range(4):
             self.record(NOW+timedelta(minutes=minute))
@@ -152,6 +181,16 @@ class AutomationHealthTests(unittest.TestCase):
         row = health.load(self.root,now=current)['rows'][0]
         self.assertEqual(row['status'],'completed')
         self.assertEqual(row['counters'],{'requests':2})
+
+    def test_future_heartbeat_does_not_confirm_a_recent_service_presence(self):
+        report = dict(started_at=NOW.isoformat(),status='completed',issues=[])
+        current = NOW
+        with health.monitor(self.root,report,clock=lambda:current,interval_minutes=15,origin='service') as pulse:
+            current = NOW+timedelta(minutes=10)
+            pulse.beat()
+            view = health.load(self.root,now=NOW+timedelta(minutes=1))
+            self.assertEqual(view['rows'][0]['signal_state'],'future')
+            self.assertEqual(view['rows'][0]['status'],'running')
 
     def test_legacy_journal_remains_readable_without_migration_on_read(self):
         target = health.path(self.root)

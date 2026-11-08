@@ -79,6 +79,18 @@ class ProbabilityReliabilityPanelTests(unittest.TestCase):
         self.assertTrue(any('pas comme des échecs' in node.value for node in at.info))
         self.readonly()
 
+    def test_void_group_keeps_its_valid_individual_observation_in_reliability(self):
+        self.entries[0].update(status='void', actual=None, evaluations={},
+                               observed=self.entries[0]['observed'][:1])
+        original = deepcopy(self.entries)
+        at = self.open()
+        self.assertEqual(at.metric[0].value, '1')
+        self.assertEqual(at.metric[1].value, '0')
+        self.assertEqual(at.metric[2].value, '1')
+        self.assertTrue(any('reste évaluable individuellement' in node.value for node in at.caption))
+        self.assertEqual(self.entries, original)
+        self.readonly()
+
     def test_versions_switch_without_pooling(self):
         other = entry(identity='other', version='half-goals-v2', status='pending')
         other['observed'] = []

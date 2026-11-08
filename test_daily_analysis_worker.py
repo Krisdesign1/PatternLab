@@ -1,6 +1,6 @@
 """Isolated coordinator/worker checks: no real API, model or data writes."""
 import copy
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import fcntl
 import json
 from pathlib import Path
@@ -59,9 +59,9 @@ class DailyWorkerTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         return value
 
-    def _plan(self, raw, now=None, existing=()):
+    def _plan(self, raw, now=None, existing=(), *, day=None):
         prior = {row['id'] for row in existing}
-        return dict(version='test-plan-v1', day=now.astimezone(worker.ZONE).date().isoformat(),
+        return dict(version='test-plan-v1', day=(day or now.astimezone(worker.ZONE).date()).isoformat(),
                     candidates=[copy.deepcopy(row) for row in self.candidates if row['id'] not in prior], diagnostics=[])
 
     def _record(self, selected, methods, **kwargs):
@@ -79,8 +79,50 @@ class DailyWorkerTests(unittest.TestCase):
     def run_worker(self, **kwargs):
         return worker.run(self.root, lambda:self.current, self.fetch, **kwargs)
 
+    def tomorrow(self):
+        for group in self.candidates:
+            for row in group['fixtures']:
+                row['timestamp'] = (journal._stamp(row['timestamp']) + timedelta(days=1)).replace(tzinfo=None).isoformat()
+        self.raw = raw_fixtures(self.candidates[0]['fixtures'])
+        api.save_fixtures(self.raw, self.root/'fixtures.json')
+        return (NOW + timedelta(days=1)).astimezone(worker.ZONE).date()
+
+    def test_future_date_records_with_real_clock_and_keeps_its_own_frozen_plan(self):
+        tomorrow = self.tomorrow()
+        result = self.run_worker(day=tomorrow)
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(result['day'], tomorrow.isoformat())
+        self.assertEqual(result['started_at'], NOW.isoformat())
+        self.assertEqual(self.record.call_args.kwargs['metadata']['automation_day'], tomorrow.isoformat())
+        self.assertEqual(self.build.call_args.kwargs['decision_at'], NOW)
+        self.assertEqual(result['jobs'][0]['planned_at'], NOW.isoformat())
+        # It is still the same future plan when real time advances into its day.
+        self.current += timedelta(days=1)
+        self.find.return_value = dict(id='saved-9000', methods={'clubs':{}})
+        self.run_worker(day=tomorrow)
+        self.assertEqual(self.build.call_count, 1)
+        self.assertEqual(worker.load_selections(self.root)[0]['day'], tomorrow.isoformat())
+
+    def test_future_date_model_input_cannot_include_current_or_future_utc_day_results(self):
+        tomorrow = self.tomorrow()
+        history = [dict(timestamp='2025-03-19T22:00:00'), dict(timestamp='2025-03-20T08:00:00'),
+                   dict(timestamp='2025-03-21T08:00:00')]
+        self._patch(api, 'load_matches', return_value=(history, []))
+        self.run_worker(day=tomorrow)
+        self.assertEqual(self.build.call_args.args[0], history[:1])
+        self.assertEqual(self.build.call_args.kwargs['decision_at'], NOW)
+
+    def test_past_or_invalid_requested_day_fails_before_planning_or_computing(self):
+        for invalid in (NOW, '2025-03-21', date(2025, 3, 19)):
+            with self.subTest(day=invalid), self.assertRaises(worker.DailyAnalysisError):
+                self.run_worker(day=invalid)
+        self.build.assert_not_called()
+        self.record.assert_not_called()
+        self.assertEqual(self.fetch_calls, [])
+
     def test_anchor_precedes_calculation_preflight_follows_and_metadata_is_immutable(self):
-        def build(history, selected):
+        def build(history, selected, *, decision_at):
+            self.assertEqual(decision_at, self.current)
             state = json.loads((self.root/worker.STATE_NAME).read_text())
             self.assertEqual(state['days']['2025-03-20']['one']['fixtures'], selected)
             self.assertEqual(self.fetch_calls, [])
@@ -119,6 +161,24 @@ class DailyWorkerTests(unittest.TestCase):
         self.build.assert_not_called()
         self.record.assert_not_called()
         self.assertEqual(worker.load_selections(self.root)[0]['selection']['data_support_index'], 80)
+
+    def test_resumed_plan_reads_only_its_calendar_ids_and_competition_history(self):
+        worker.run(self.root, lambda: self.current)  # Freeze without inference.
+        with patch.object(api, 'load_fixtures', wraps=api.load_fixtures) as raw, \
+                patch.object(api, 'load_matches', wraps=api.load_matches) as history:
+            result = self.run_worker()
+        self.assertEqual(result['created'], 1)
+        ids = sorted({r['match_id'] for r in self.candidates[0]['fixtures']}, key=int)
+        self.assertTrue(raw.call_args_list)
+        for call in raw.call_args_list:
+            self.assertTrue(call.kwargs)  # No unfiltered all-history raw read.
+            if 'ids' in call.kwargs:
+                self.assertEqual(call.kwargs['ids'], ids)
+            else:
+                self.assertEqual(call.kwargs['leagues'], {'39', '61'})
+        self.assertEqual(history.call_args.kwargs['leagues'], {'39', '61'})
+        self.assertEqual(history.call_args.kwargs['end'], NOW.date().isoformat())
+        self.assertEqual(history.call_args.kwargs['statuses'], api.FINISHED_STATUSES)
 
     def test_started_matches_and_late_calendar_arrivals_never_reanchor_frozen_plan(self):
         worker.run(self.root,lambda:self.current)  # freeze without preflight
@@ -186,7 +246,8 @@ class DailyWorkerTests(unittest.TestCase):
                 self.root = self.root/stage
                 api.save_fixtures(self.raw,self.root/'fixtures.json')
                 self.current=NOW
-                def build(*args):
+                def build(*args, decision_at):
+                    self.assertEqual(decision_at, self.current)
                     self.current = NOW+timedelta(hours=4 if stage=='kickoff' else 14)
                     return {'methods':{'clubs':{}},'unavailable':{}}
                 self.build.side_effect=build
@@ -252,12 +313,13 @@ class DailyWorkerTests(unittest.TestCase):
         self.raw=[row for selected in self.candidates for row in raw_fixtures(selected['fixtures'])]
         api.save_fixtures(self.raw,self.root/'fixtures.json')
         events=[]
-        def build(history, selected):
+        def build(history, selected, *, decision_at):
+            self.assertEqual(decision_at, self.current)
             events.append('build')
             return {'methods':{'clubs':{'version':'synthetic'}},'unavailable':{}}
         self.build.side_effect=build
         self.run_worker(check_time=lambda:events.append('check'))
-        self.assertEqual(events,['check','check','check','build','check','check','build'])
+        self.assertEqual(events,['check','check','check','build','check','check','check','build','check'])
 
     def test_explicit_batch_accepts_any_positive_integer_and_rejects_invalid_inputs(self):
         for value in (0,-1,True,1.5,'2'):
@@ -282,7 +344,8 @@ class DailyWorkerTests(unittest.TestCase):
         self.raw=[row for selected in self.candidates for row in raw_fixtures(selected['fixtures'])]
         api.save_fixtures(self.raw,self.root/'fixtures.json')
         seen=[]
-        def build(rows,selected):
+        def build(rows,selected,*,decision_at):
+            self.assertEqual(decision_at, self.current)
             seen.append(selected[0]['match_id'])
             return {'methods':{},'unavailable':{'clubs':'insufficient'}}
         self.build.side_effect=build
@@ -323,8 +386,65 @@ class DailyWorkerTests(unittest.TestCase):
         self.assertEqual(len(state['minute_calls']),2)
         history.assert_not_called()
 
+    def test_run_now_requests_chosen_future_calendar_without_changing_real_time(self):
+        tomorrow = self.tomorrow()
+        self._patch(automation,'_time',side_effect=lambda now=None:self.current)
+        api.load_key.side_effect = None
+        api.load_key.return_value = 'synthetic-test-key'
+        calls = []
+        def response(**kwargs):
+            calls.append(kwargs)
+            return dict(errors=[],results=len(self.raw),response=copy.deepcopy(self.raw))
+        self._patch(api,'ApiFootballClient',return_value=SimpleNamespace(last_quota={},fixtures=response))
+        result = worker.run_now(self.root, day=tomorrow)
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(calls[0], dict(date=tomorrow.isoformat(), timezone=worker.ZONE.key))
+        self.assertEqual(result['started_at'], NOW.isoformat())
+        self.assertEqual(self.record.call_args.kwargs['clock'](), NOW)
+
 
 class DailyIntegrationTests(unittest.TestCase):
+    def test_future_real_engine_and_journal_keep_actual_creation_time_and_causal_history(self):
+        from test_catboost_scenarios import sample
+        import catboost_scenarios as ml
+        import prospective_models as models
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            past = []
+            for row in sample():
+                item = raw_fixtures([row],status='FT')[0]
+                item['score'] = {period:dict(zip(('home','away'),map(int,row[field].split('-'))))
+                                for period,field in (('halftime','ht'),('fulltime','ft'))}
+                past.append(item)
+            selected = copy.deepcopy(fixtures())
+            for row in selected:
+                row['timestamp'] = (journal._stamp(row['timestamp'])+timedelta(days=1)).replace(tzinfo=None).isoformat()
+            future = raw_fixtures(selected)
+            api.save_fixtures(past+future,root/'fixtures.json')
+            def fetch(**params):
+                ids = set(params['ids'].split('-'))
+                return copy.deepcopy([row for row in future if str(row['fixture']['id']) in ids])
+            with patch.object(ml,'load_report',return_value=None), patch.object(models,'_context_neighbors',
+                    side_effect=models.SnapshotError('Isolated missing configuration.')), \
+                    patch.object(api,'load_key',side_effect=AssertionError('No real credential reads')), \
+                    patch.object(api.ApiFootballClient,'get',side_effect=AssertionError('No network')):
+                report = worker.run(root,lambda:NOW,fetch,day=(NOW+timedelta(days=1)).date())
+            self.assertGreater(report['created'],0)
+            saved = journal.list_entries(root/'predictions.sqlite3')
+            self.assertEqual(len(saved),report['created'])
+            for entry in saved:
+                self.assertEqual(journal._stamp(entry['created_at']),NOW)
+                self.assertTrue(all(journal._stamp(row['timestamp']).date()==(NOW+timedelta(days=1)).date()
+                                    for row in entry['fixtures']))
+                self.assertEqual(entry['metadata']['selection']['before'],NOW.date().isoformat())
+                self.assertEqual(entry['group_contract']['history_cutoff_exclusive'], NOW.date().isoformat())
+                for method in entry['methods'].values():
+                    self.assertEqual(method['training_before'], NOW.date().isoformat())
+                    self.assertEqual(method['decision_at'], NOW.isoformat())
+                    for component in method['distribution']['components']:
+                        self.assertEqual(component['method']['training_before'], NOW.date().isoformat())
+                self.assertEqual(entry['status'],'pending')
+
     def test_real_engine_hook_retains_mono_ids_and_probabilities_and_records_variable_sizes(self):
         from test_catboost_scenarios import sample
         from test_automation_worker import Client
@@ -347,7 +467,7 @@ class DailyIntegrationTests(unittest.TestCase):
                 first=automation.run_cycle(root=root,config=config,client=client,now=NOW)
                 self.assertEqual(first['status'],'completed',first)
                 daily=first['daily_analyses']
-                self.assertEqual(daily['created'],4)
+                self.assertEqual(daily['created']+first['daily_analysis_priority']['created'],4)
                 self.assertEqual(first['created'],0)
                 self.assertEqual(first['already_recorded'],3)
                 self.assertEqual(first['requests'],5)  # one calendar + four daily preflights

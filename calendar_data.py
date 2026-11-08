@@ -2,6 +2,9 @@
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from fixture_import_policy import quality_error
+from halftime_domain import ContractError, FINISHED_STATUSES, regulation_result
+
 
 _STATUSES = {
     "NS": ("TIMED", "À venir", "upcoming"),
@@ -64,6 +67,34 @@ def _team(value):
     return team_id, name.strip() if known else "Club à confirmer", bool(known and team_id)
 
 
+def _final_verdict(raw, raw_status, group, confirmed, halftime, fulltime):
+    """Display the observed regulation outcome, never a forecast or live guess."""
+    conflict = quality_error(raw)
+    if conflict:
+        return "À vérifier", conflict
+    if raw.get("provider") not in (None, "api-football", "API-Football"):
+        return "À vérifier", "Source API-Football non confirmée"
+    if raw_status in FINISHED_STATUSES:
+        if not confirmed:
+            return "À vérifier", "Identité des clubs non confirmée"
+        if any(value is None for value in halftime):
+            return "Non évaluable", "Score à la pause absent ou invalide"
+        if any(value is None for value in fulltime):
+            return "Non évaluable", "Score à 90 minutes absent ou invalide"
+        try:
+            result = regulation_result(halftime, fulltime, status=raw_status)
+        except ContractError:
+            return "À vérifier", "Scores à la pause et à 90 minutes incohérents"
+        return result.label, "Buts des deux mi-temps comparés à 90 minutes"
+    if group == "live":
+        return "En cours", "Match non terminé"
+    if group == "upcoming":
+        return "En attente", "Match non terminé"
+    if raw_status in _STATUSES:
+        return "Non évaluable", _STATUSES[raw_status][1]
+    return "À vérifier", "Statut du match non confirmé"
+
+
 def from_raw(raw):
     """Return a display row, including live scores without treating them as results.
 
@@ -93,6 +124,8 @@ def from_raw(raw):
     scores = _dict(raw.get("score"))
     ht_home, ht_away = _pair(scores.get("halftime"))
     full_home, full_away = _pair(scores.get("fulltime")) if group == "finished" else (None, None)
+    verdict, verdict_reason = _final_verdict(raw, raw_status, group, confirmed,
+                                            (ht_home, ht_away), (full_home, full_away))
     phase = "regulation" if raw_status in ("NS", "TBD", "1H", "HT", "2H", "FT") else (
             "extra_time" if raw_status in ("ET", "BT", "AET") else
             "penalties" if raw_status in ("P", "PEN") else "unknown")
@@ -105,6 +138,7 @@ def from_raw(raw):
                 ht=_score(ht_home, ht_away), halftime_score=_score(ht_home, ht_away),
                 halftime_home=ht_home, halftime_away=ht_away,
                 regulation_score=_score(full_home, full_away), regulation_home=full_home, regulation_away=full_away,
+                final_verdict=verdict, final_verdict_reason=verdict_reason,
                 teams_confirmed=bool(confirmed), selectable=bool(confirmed and raw_status == "NS"))
 
 

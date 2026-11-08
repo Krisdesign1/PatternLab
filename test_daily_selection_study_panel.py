@@ -164,6 +164,35 @@ class DailySelectionStudyPanelTests(unittest.TestCase):
         self.assertTrue(any('Rapport figé invalide' in node.value for node in at.error))
         self.readonly()
 
+    def test_exact_size_filters_frozen_cohorts_without_retraining_or_fallback(self):
+        row=deepcopy(next(row for row in self.value['statistics']['by_size'] if row['cohort']=='mono'))
+        row['size']=20
+        self.value['statistics']['by_size'].append(row)
+        before=deepcopy(self.value)
+        at=self.open()
+        self.assertIsNone(at.selectbox(key='selection_study_group_size').value)
+        self.assertEqual(self.table(at,'Groupes communs au test')['Matchs par groupe'].tolist(),[2,20])
+        at.selectbox(key='selection_study_group_size').select(20).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.table(at,'Groupes communs au test')['Matchs par groupe'].tolist(),[20])
+        self.assertEqual(at.selectbox(key='selection_study_size').value,20)
+        self.assertEqual(next(node.value for node in at.metric if node.label=='CatBoost ajustés sur apprentissage'),'1')
+        self.assertTrue(any('comptes globaux' in node.value for node in at.caption))
+        at.selectbox(key='selection_study_group_size').select(3).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.table(at,'Groupes communs au test')['Matchs par groupe'].tolist(),[3])
+        self.assertEqual(at.segmented_control(key='selection_study_cohort').value,'mixed')
+        at.selectbox(key='selection_study_group_size').select(19).run()
+        self.assertFalse(at.exception)
+        self.assertFalse(any('Groupes communs au test' in node.value.columns for node in at.dataframe))
+        self.assertFalse(any(node.key=='selection_study_size' for node in at.selectbox))
+        self.assertTrue(any('Aucun groupe correspondant' in node.value for node in at.info))
+        at.selectbox(key='selection_study_group_size').select(None).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.table(at,'Groupes communs au test')['Matchs par groupe'].tolist(),[2,20])
+        self.assertEqual(self.value,before)
+        self.readonly()
+
 
 if __name__ == '__main__':
     unittest.main()

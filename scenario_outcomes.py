@@ -1,7 +1,8 @@
 """Pure verdicts for the exact ordered scenarios saved before a match group.
 
 The result state remains separate from the group's lifecycle: settled means
-evaluated, whereas a hit requires one of the saved top three to match exactly.
+evaluated, whereas a hit requires one of the explicitly saved proposals to
+match exactly, regardless of its rank.
 No current model, distribution, provider state or saved evaluation is read.
 """
 from collections.abc import Mapping
@@ -34,16 +35,30 @@ def _sequence(value, size):
 
 
 def summarize(entry):
-    """Compare all methods' frozen top three with a complete settled outcome.
+    """Compare every explicitly saved proposal with a complete settled outcome.
 
     Nonfinal groups never produce a success or failure, even if stale actuals
-    or evaluations are present. Legacy abbreviated rankings retain their one
-    or two saved proposals. Longer rankings are bounded to the displayed top
-    three. Damaged saved choices fail closed rather than yielding a false miss.
+    or evaluations are present. Abbreviated and longer rankings retain exactly
+    their saved proposals; the mathematical distribution never adds proposals.
+    Damaged saved choices, including the end of a ranking, fail closed rather
+    than yielding a false miss or success.
     Returned lists are independent copies; inputs are never changed.
     """
     if not isinstance(entry, Mapping):
         return _result('unavailable')
+    selected_methods = None
+    if 'proposal_selection' in entry:
+        try:
+            from adaptive_scenario_proposals import effective_methods
+            selected_methods = effective_methods(entry)
+            if not selected_methods:
+                actual = (_sequence(entry.get('actual'), validate_size(entry.get('size')))
+                          if entry.get('status') == 'settled' else None)
+                result = _result('unavailable', actual=list(actual) if actual else None)
+                result.update(label='Aucun scénario retenu par la sélection', reason='selection_abstained')
+                return result
+        except (ValueError, TypeError, KeyError):
+            return _result('unavailable')
     status = entry.get('status')
     if status in ('pending', 'void', 'unresolved'):
         return _result(status)
@@ -52,7 +67,7 @@ def summarize(entry):
     try:
         size = validate_size(entry.get('size'))
         actual = _sequence(entry.get('actual'), size)
-        methods = entry.get('methods')
+        methods = selected_methods if selected_methods is not None else entry.get('methods')
         if not isinstance(methods, Mapping) or not methods:
             raise ValueError('Les scénarios proposés doivent être conservés.')
         if any(not isinstance(name, str) or not name.strip() for name in methods):
@@ -66,7 +81,7 @@ def summarize(entry):
             if not isinstance(ranking, (list, tuple)) or not ranking:
                 raise ValueError('Les propositions enregistrées sont nécessaires au verdict.')
             seen = set()
-            for rank, item in enumerate(ranking[:3], 1):
+            for rank, item in enumerate(ranking, 1):
                 if not isinstance(item, Mapping):
                     raise ValueError('Une proposition enregistrée est invalide.')
                 sequence = _sequence(item.get('sequence'), size)

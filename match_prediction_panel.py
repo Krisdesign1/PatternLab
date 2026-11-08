@@ -1,4 +1,5 @@
 """User-selected fixtures and an honest league-specific evaluation."""
+import table_views
 from datetime import date, timedelta
 import streamlit as st
 from league_model import VALUES
@@ -79,7 +80,7 @@ def render_match_prediction(result, league):
                                               'Encaissés avant la pause / match': round(profile['conceded'][0]/count, 2),
                                               'Encaissés après la pause / match': round(profile['conceded'][1]/count, 2)})
                         if table:
-                            st.dataframe(table, hide_index=True, width='stretch')
+                            table_views.dataframe(table, hide_index=True, width='stretch', table_id='match_prediction_panel:render_match_prediction:dataframe:1')
                         else:
                             st.info('Aucun précédent dans ces rôles avant la date choisie.')
                     st.caption(f"{e['training']} matchs de la ligue utilisés, jusqu’au {e['last_training_day']}.")

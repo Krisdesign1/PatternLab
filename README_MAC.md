@@ -40,6 +40,25 @@ Pour les lancements suivants, une seule commande suffit :
 Si macOS bloque le lanceur, fais un clic droit sur le fichier puis **Ouvrir**.
 Streamlit 1.64 ou une version 1.x plus récente est nécessaire.
 
+### Retrouver son affichage des tableaux
+
+Au-dessus de chaque tableau, ouvrir **Affichage du tableau** pour choisir les
+colonnes visibles, leur ordre, leur largeur et le tri. Cliquer sur **Enregistrer
+ma vue** pour les retrouver lors des prochaines visites. **Tout afficher**, puis
+**Enregistrer ma vue**, permet de retrouver une colonne masquée ; **Réinitialiser
+la vue** rétablit la présentation d'origine de ce tableau.
+
+Ces préférences sont propres à chaque tableau et enregistrées dans le navigateur
+pour cette adresse du site. Elles ne sont pas partagées avec un autre téléphone,
+navigateur ou entre le Mac et AWS. Les gestes effectués directement dans le menu
+avec l'œil, sur les en-têtes ou les séparations du tableau natif restent
+temporaires : Streamlit ne fournit pas leur état à l'application. Utiliser le
+panneau **Affichage du tableau** pour une configuration durable. Le tri porte sur
+les lignes chargées dans le tableau ; il ne modifie pas la pagination, les
+analyses, les probabilités ou les données sauvegardées.
+
+Voir [le guide d'affichage des tableaux](docs/AFFICHAGE_TABLEAUX.md).
+
 ### Base locale autonome
 
 Le réglage privé `PATTERNLAB_STORAGE_MODE = "local"`, à la racine de
@@ -77,8 +96,27 @@ pendant les écritures. Les prévisions restent dans leur journal séparé.
 
 Le fichier `fixtures.json` d’origine est conservé. Après activation, les nouvelles
 collectes et corrections sont enregistrées dans SQLite : cet ancien JSON n’est
-donc plus une sauvegarde à jour. Le bouton de sauvegarde dans **Pilotage → Données
-et sauvegardes** exporte la base courante uniquement au clic.
+donc plus une sauvegarde à jour. Le bouton **Exporter les matchs API-Football
+(JSON)** dans **Pilotage → Données et sauvegardes** exporte les matchs de la
+base courante uniquement au clic ; il ne sauvegarde pas les autres journaux.
+
+### Suivi du serveur AWS
+
+Sur le site, **Pilotage → Données et sauvegardes** affiche le dernier point de
+sauvegarde contrôlé, les restaurations SQLite de vérification, la programmation
+réelle et les alertes d’espace ou d’échec. **Pilotage → Automatisation** distingue
+l’état du timer Linux et le résultat du dernier passage, avec les heures de Kinshasa.
+Le bouton de lancement manuel et les réglages d’entraînement sont désactivés sur
+le serveur pour respecter le fonctionnement du service protégé.
+
+Les archives quotidiennes sont privées, compressées et contrôlées avant rotation.
+Le point initial est conservé, ainsi que les deux dernières archives périodiques
+vérifiées. Les tentatives différées reprennent après une heure. Une erreur ne
+supprime pas le dernier point vérifié. Ces sauvegardes restent sur le même serveur
+et n’incluent pas les clés privées ou la configuration secrète. Elles ne constituent
+pas une copie indépendante en cas de perte du volume AWS.
+
+Voir [Sauvegardes et automatisation](docs/SAUVEGARDES_ET_AUTOMATISATION.md).
 
 Pour sauvegarder tout le dossier `data/` par copie de fichiers, arrêter d’abord
 le service et l’application. Pendant une exécution, utiliser l’API SQLite
@@ -86,6 +124,188 @@ le service et l’application. Pendant une exécution, utiliser l’API SQLite
 `.sqlite3` qui pourrait ignorer des écritures du journal WAL. Ne jamais revenir
 à l’ancien JSON seul après de nouvelles importations SQLite : conserver la base
 courante et exporter les données récentes avant toute restauration.
+
+### Mise en œuvre PatternLab 2.0
+
+Le premier lot du plan directeur ajoute un noyau commun de scores et de
+probabilités, ainsi qu'un outil de sauvegarde SQLite avec restauration de
+contrôle. Le deuxième ajoute une lecture historique explicite avant un instant
+donné et la fenêtre réelle de lecture aux nouvelles archives individuelles.
+Le troisième relie cette reconstruction à un générateur commun des 93 variables
+existantes, avec snapshots autonomes et labels ultérieurs séparés. La vue
+**Pilotage → Modèles et validation → Variables avant match** prépare un contrôle
+uniquement au clic et permet de télécharger les variables et leurs sources.
+La commande `scripts/prepare_causal_features.py` prépare et vérifie les paquets
+locaux de cohortes, sans entraîner ni activer de modèle.
+Le quatrième lot ajoute **Cohortes et candidats** dans la même page : quatre
+périodes UTC explicites, contrôle des labels reçus à temps et tableau des
+insuffisances. `scripts/prepare_causal_partitions.py` conserve ces partitions et
+permet un entraînement candidat explicite, isolé de la production, uniquement
+si les conditions sont satisfaites. Le réglage et la calibration utilisent des
+blocs séparés ; aucune activation n'est automatique.
+Le cinquième lot ajoute un recensement quotidien sans liste de matchs choisie
+manuellement, avec source SQLite figée et préparation reprenable. Son suivi se
+trouve dans **Cohortes et candidats → Préparation du vivier**. Le bouton
+**Lire la progression** présente les cibles et les labels par journée, sans
+lancer le traitement. Les commandes `scripts/prepare_causal_population.py`
+préparent puis vérifient ce vivier local ; aucun modèle actif n'est remplacé.
+La vue **Candidat conservé** permet aussi de lire les périodes et les comparaisons
+du candidat de recherche préparé sur ce vivier réel. Ces résultats de
+développement ne constituent pas une confirmation sur de nouveaux matchs.
+Le sixième lot ajoute **Cohortes et candidats → Confirmation avant match**.
+Le bouton **Relire le suivi du candidat** montre les prévisions conservées,
+les résultats, les versions et les heures d'enregistrement, sans lancer l'API
+ni entraîner le modèle. Le candidat du lot 05 est inscrit pour le 31 octobre :
+recensement à **09:00, heure de Kinshasa**, et captures jusqu'à **09:30**,
+avant les coups d'envoi. Les comparaisons utilisent les mêmes matchs pour le
+candidat, Clubs et les fréquences. Les captures manquées, tardives ou sans
+accusé restent distinctes des prédictions perdues. Le service local a été
+rechargé ; le Mac doit rester éveillé et connecté pour exécuter ce suivi.
+Le septième lot ajoute **Confirmation avant match → Qualité des probabilités**.
+Après **Relire le suivi du candidat**, cette vue compare les trois méthodes sur
+les mêmes rencontres évaluées, puis affiche les pourcentages annoncés et les
+fréquences observées par tranches fixes. `1st`, `Égal`, `2nd` et le résultat
+favori peuvent être examinés. Les tableaux par journée UTC et par compétition
+conservent les effectifs et les exclusions. Le bilan est exportable en JSON ;
+un protocole sans résultat évalué n'affiche aucune réussite inventée.
+Le huitième lot ajoute **Confirmation avant match → Suivi hebdomadaire**.
+Un nouveau protocole conserve le même candidat sur **huit semaines UTC entières**,
+du **2 novembre au 28 décembre 2026 exclu**. L'ancien suivi du 31 octobre reste
+séparé. Chaque matin, le recensement est prévu à **09:00 à Kinshasa**, puis les
+prévisions sont conservées avant **09:30** et avant le coup d'envoi. Le Mac doit
+être éveillé et connecté dès **08:30** pour préparer le calendrier UTC.
+Le tableau distingue les cibles recensées, les captures manquées, les résultats
+évalués et les motifs qui empêchent une semaine d'être complète. Les écarts
+observés restent consultables pendant le suivi. La lecture finale conserve les
+révisions de résultats enregistrées au plus tard le **4 janvier 2027 à 09:00 à
+Kinshasa** ; les corrections ultérieures restent dans le journal mais hors de
+cette lecture. Un intervalle approximatif ne sera calculé qu'à cette date et si
+les huit semaines respectent les conditions inscrites. Le service conserve un
+manifeste final immuable ; une lecture seule ne le crée pas. Ce délai ne garantit
+ni la disponibilité de l'intervalle ni un avantage du candidat. Le modèle servi
+n'est pas remplacé automatiquement.
+Le neuvième lot ajoute **Cohortes et candidats → Contrôle des scénarios**.
+Le bouton **Contrôler les groupes enregistrés** vérifie les dates communes,
+l'ordre des matchs et les probabilités absolues des groupes de **2 à 20 matchs**.
+Le filtre sélectionne les groupes contenant exactement le nombre choisi.
+Le contrôle figure aussi dans la fiche de chaque groupe de **Mes analyses**.
+Les anciens groupes restent conservés : une information absente est indiquée
+comme non vérifiée ; une date contradictoire est signalée sans réécriture du
+résultat sportif. Pour les nouveaux groupes manuels et les analyses proposées,
+la coupure historique ne dépasse plus la journée réelle de décision, y compris
+pour les matchs de demain. Une estimation CatBoost non liée aux affiches
+sélectionnées n'est plus réutilisée. Un moteur qui ne peut pas respecter la
+coupure commune reste explicitement indisponible.
+Le dixième lot ajoute **Pilotage → Automatisation → Délais, fraîcheur et reprises**.
+Le bouton **Contrôler les délais et les reprises** lit les deux journaux locaux
+sans requête API. Il distingue les fenêtres inscrites, les recensements absents,
+les captures attestées à temps et les cibles connues sans capture. Les tableaux
+montrent aussi l'ancienneté des opérations, les reprises observées et l'écart
+entre durée civile et durée mesurée. Le rapport JSON reste téléchargeable.
+Un processus présent ne garantit pas un calendrier récent. Les journées futures
+ne sont pas comptées comme manquées ; aucune capture passée n'est recréée.
+Le onzième lot corrige le calendrier ancien au retour d'une interruption :
+chaque point de reprise vérifie désormais une échéance civile UTC **et** une
+échéance monotone. Si l'une est dépassée, la relève peut reprendre. Les
+protections contre les appels récursifs et les demandes pour une journée
+devenue ancienne restent actives. Cette correction ne réveille pas le Mac.
+L'ancien protocole du 2 novembre conserve sa fenêtre manquée et ses règles.
+Il reste consultable avec son incompatibilité de code explicitement affichée.
+Un nouveau suivi séparé conserve le même candidat du **9 novembre 2026 au
+4 janvier 2027 exclu**, avec coupure des résultats le **11 janvier à 09:00
+à Kinshasa**. Les captures sont toujours prévues avant 09:30 ; il faut laisser
+le Mac éveillé et connecté dès 08:30. Les deux suivis ne sont pas fusionnés.
+Le douzième lot renforce les sauvegardes et ajoute un **exercice de restauration
+isolée**. Les bases SQLite sont sauvegardées avec leur WAL, y compris lorsque
+leur extension est en majuscules. Un point n'est publié complet qu'après les
+contrôles de restauration. Les manifestes invalides et les chemins privés
+connus sont traités explicitement ; ce filtre ne détecte pas tous les secrets
+qui pourraient être intégrés au contenu d'un fichier.
+
+```bash
+# Créer un nouveau point privé ; destination jamais réutilisée
+.venv/bin/python scripts/create_local_recovery_point.py --destination .local_backups/NOUVEAU_POINT
+# Vérifier le point puis ouvrir six magasins restaurés avec les lecteurs installés
+.venv/bin/python scripts/rehearse_local_recovery.py --point .local_backups/NOUVEAU_POINT --output audit/NOUVEAU_CONTROLE.json
+```
+
+Ces commandes ne restaurent rien sur la base active, ne lancent pas de collecte
+et n'entraînent aucun modèle. Elles peuvent demander plusieurs secondes et
+plusieurs gigaoctets temporaires. Les bases sont cohérentes séparément ; une
+copie hors machine, la configuration privée et la recréation de l'environnement
+Python restent à gérer séparément. L'exercice ne lance pas le service sauvegardé.
+Le treizième lot ajoute **Pilotage → État de réception**. Cliquer sur
+**Actualiser l'état de réception** vérifie les preuves archivées des lots 11
+et 12, les fichiers du candidat inscrit, la compatibilité et les dernières
+opérations enregistrées. Le tableau conserve une prochaine action pour chaque
+point restant à vérifier. Aucun journal n'est chargé à l'ouverture, aucun
+modèle n'est entraîné ou activé et aucune validation globale n'est automatique.
+Les tests archivés ne sont pas relancés ni additionnés entre lots. Le relevé est
+exportable en JSON. Voir le [guide d'exploitation locale](docs/EXPLOITATION_LOCALE.md)
+pour les contrôles quotidiens, les interruptions et les limites du retour arrière.
+Le quatorzième lot ajoute un **exercice de démarrage hors ligne sur le même Mac** :
+le code et les données du point vérifié sont copiés dans un nouveau dossier,
+avec un environnement Python indépendant et un profil local fictif. Le serveur,
+deux pages, six stockages et une prédiction conservée ont été contrôlés.
+Le cycle testé rejoue un calendrier sauvegardé puis s'arrête avant les nouvelles
+prévisions. Aucun identifiant réel n'est copié et le service actif n'est pas remplacé.
+Cela vérifie une récupération sur ce Mac ; la sauvegarde hors machine, les vrais
+accès privés et une restauration sur une autre machine restent à qualifier.
+Voir [le contrôle de restauration](audit/PATTERNLAB2_RESTAURATION_SERVICE_LOT14_2026-11-02.md).
+Les données sans preuve temporelle ne sont pas antidatées. Ces contrôles ne
+démontrent pas encore un gain prédictif. Le détail des
+éléments réalisés, de leurs limites et des prochains
+lots est dans [le suivi d'exécution](docs/PATTERNLAB_2_0_EXECUTION.md).
+Les modèles entraînés et les prévisions déjà enregistrées restent conservés.
+
+```bash
+# Nouveau point privé local, sans appel API, avec restauration en espace isolé
+.venv/bin/python scripts/create_local_recovery_point.py
+```
+
+## Révisions des imports et données contradictoires
+
+Les nouvelles observations distinctes sont conservées avec leur date d'enregistrement
+local, leur empreinte, la décision d'import et la version précédente lorsqu'elle
+est récupérée au début du suivi. Aucune ancienne date de publication fournisseur
+n'est inventée. Les réponses identiques consécutives ne multiplient pas les
+révisions. La migration et l'export SQLite/JSON conservent cet historique.
+
+Un ancien relevé live ne peut pas remplacer un résultat final. Une correction
+explicite d'annulation, de forfait, d'abandon ou de report est conservée et ne
+reste plus un exemple FT utilisable par erreur. Si un relevé final complet reçoit
+ensuite des scores incomplets, les anciens scores restent conservés et la
+rencontre est mise **en quarantaine** : elle ne peut servir ni de nouvel exemple
+ni de nouveau résultat évalué tant que le conflit n'est pas résolu. Une identité
+modifiée ou un FT reçu après une annulation/forfait suit aussi cette protection.
+Les prévisions déjà enregistrées restent immuables.
+
+Dans **Pilotage → Données et sauvegardes → Corrections de données à examiner**,
+les versions et leurs motifs sont consultables sans appel API. L'administrateur
+local peut retenir une version avec un motif ; une nouvelle observation survenue
+entre-temps bloque cette décision périmée. Aucun score manquant n'est rempli et
+aucun modèle n'est entraîné par cette revue. Une réponse complète cohérente reçue
+plus tard peut résoudre automatiquement une régression de qualité des scores.
+Le choix explicite de la version antérieure reste valable pour la réponse reçue
+strictement identique ; un nouveau contenu peut rouvrir le conflit.
+
+La même consultation existe dans le Terminal, en lecture seule par défaut :
+
+```bash
+.venv/bin/python scripts/review_fixture_imports.py
+.venv/bin/python scripts/review_fixture_imports.py --match IDENTIFIANT_DU_MATCH
+```
+
+Le suivi est créé au fil des imports, sans relire ou recopier automatiquement les
+256 000 anciennes rencontres. Les bases locales restent autonomes. Les révisions
+augmentent la taille des sauvegardes ; un éventuel transfert Cloud reste soumis
+aux limites du stockage distant et n'est pas requis en mode local.
+
+Dans les bilans **individuels**, un match terminé dont les observations figées sont
+valides reste évaluable même si une autre rencontre annule son groupe. Le groupe
+complet reste non évaluable ; le match annulé sans observation reste exclu. Les
+taux peuvent donc changer par correction de la population évaluée, sans que le
+modèle ait changé ses prédictions.
 
 ## Connexion API-Football
 
@@ -102,12 +322,13 @@ Les compétitions, saisons et limites d’accès dépendent du compte du fournis
 
 ## Les pages de l’application
 
-- **Aujourd’hui** : choisir ses matchs, rechercher les fortes probabilités ou
+- **Matchs** : choisir ses matchs, rechercher les fortes probabilités ou
   consulter les analyses proposées. Les trois vues se choisissent en haut de page.
 - **Mes analyses** : retrouver les groupes enregistrés, ouvrir leur fiche et
   comparer leurs prévisions figées aux résultats observés.
 - **Bilan et preuves** : comparer les méthodes sur les mêmes prévisions réelles,
-  puis consulter le suivi prospectif ou les simulations historiques séparément.
+  consulter le suivi prospectif, la simulation de paris par journée ou les
+  simulations historiques séparément.
 - **Explorer les scénarios** : retrouver les suites observées, leurs matchs et
   les précédents d’un scénario commencé, uniquement à partir d’API-Football.
 - **Pilotage** : données et sauvegardes, automatisation, modèles et validation.
@@ -116,12 +337,100 @@ Les compétitions, saisons et limites d’accès dépendent du compte du fournis
 Les anciennes adresses des dix pages restent accessibles ; le menu principal
 regroupe désormais les fonctions en cinq rubriques.
 
+### Afficher les groupes selon leur nombre de matchs
+
+Le filtre **Nombre de matchs par groupe** propose **Toutes les tailles** et
+chaque taille de **2 à 20**. Choisir **3 matchs** affiche uniquement les analyses
+contenant exactement trois matchs, avec leurs scénarios complets. Il est
+disponible dans les analyses proposées, Mes analyses et leurs historiques,
+les groupes enregistrés des fortes probabilités, la simulation de paris et les
+bilans comparatifs par groupe. Les vues qui examinent déjà une taille de groupe
+conservent leur choix de taille.
+
+Ce filtre est distinct des contrôles « Analyses par page » et « Scénarios par
+page ». Une taille absente donne une liste vide ; elle ne déclenche aucun calcul
+pour créer un groupe manquant. Les indicateurs et exports qui conservent un
+périmètre global l'indiquent explicitement. Les classements de matchs individuels
+ne sont pas des groupes et ne sont pas découpés par ce filtre.
+
 Il n’y a plus de choix de fournisseur, d’import de coupons manuels ou de
 navigation vers les anciens outils de données.
 
+### Simulation de paris : choix manuels en FC
+
+Ouvrir **Bilan et preuves → Simulation de paris**. La vue **Mes paris** commence
+vide : aucun scénario n'est transformé automatiquement en pari et les anciens
+cumuls automatiques ne sont pas importés dans tes choix.
+
+1. Choisir la **Date des matchs** commune à l'application.
+2. Ouvrir **Ajouter des scénarios** : le tableau réunit les propositions déjà
+   enregistrées avant match, avec leurs rencontres, séquences, méthodes, rangs,
+   probabilités et cotes cumulées.
+3. Choisir **Scénario à ajouter**, saisir **Mise de ce scénario (FC)**, puis
+   cliquer sur **Ajouter à mes paris**. Le formulaire propose 300 FC, réglables.
+   Pour tout choisir, activer **Sélectionner tous les scénarios de cette journée**,
+   régler la mise par scénario et cliquer sur **Ajouter les N scénarios à mes paris**.
+   Le nombre et le coût total sont affichés avant l'ajout. Cette sélection couvre
+   toutes les pages de la journée ; la recherche ne limite que le tableau affiché.
+   Les paris déjà enregistrés ne sont pas ajoutés à nouveau et gardent leur mise.
+4. Revenir dans **Mes paris** pour consulter le résultat, modifier la mise de ce
+   pari ou le retirer. Chaque pari conserve sa propre mise ; modifier l'un ne
+   change pas les autres. Aucun choix n'est précoché.
+
+Les cotes restent les références fixes manuelles : **1st : 3,10 · Égal : 3,00 ·
+2nd : 2,10**. Elles sont figées lors de l'ajout du pari et multipliées sur tous
+ses matchs. Un retour gagnant inclut la mise ; le bénéfice soustrait celle-ci.
+L'arrondi au centième intervient après le calcul du retour complet. Les montants
+sont affichés et exportés en **francs congolais (FC)**, sans conversion monétaire.
+
+Le résumé suit uniquement tes paris pour la date sélectionnée à Kinshasa.
+L'historique par journée et les exports CSV couvrent uniquement tes choix
+sauvegardés. Les filtres du tableau ne changent pas ce bilan. Les mises en attente
+ou non évaluables restent séparées, sans gain ni perte attribué. Le rendement
+réalisé est calculé sur les mises des paris gagnés ou perdus ; les remboursements
+sont neutres. Convention de simulation : un groupe annulé est intégralement
+remboursé ; un report seul ne devient ni remboursement ni perte.
+
+Tu peux aussi ajouter un scénario d'une journée passée : il est clairement
+marqué **Rétrospectif : choix ou mise après début**. Modifier la mise après le
+premier coup d'envoi entraîne aussi ce marquage. Un choix effectivement enregistré
+avant les matchs est identifié séparément. Les propositions initiales du journal
+restent inchangées et ne deviennent pas des paris réels.
+
+Tes choix et mises sont conservés dans la base locale séparée
+`data/api_football/manual_bets.sqlite3`, créée seulement au premier ajout explicite.
+Ils restent disponibles après fermeture et réouverture de l'application.
+Si un résultat ou la proposition source n'est plus vérifiable, le pari reste
+non évaluable ; un ancien gain n'est pas repris aveuglément. Seul le compte
+propriétaire peut ajouter, modifier ou retirer ces paris. Sur AWS, utiliser
+**Se connecter pour gérer mes paris** avec le compte Google autorisé. Une session
+expirée doit être renouvelée. Le verrou des imports et des modèles ne bloque
+plus ce portefeuille séparé ; les visiteurs restent en consultation.
+
+La simulation ne place aucun pari réel, ne reconstitue aucun ancien pronostic
+absent, ne modifie aucun historique de prévisions et ne lance ni appel API ni
+entraînement. Ses cotes fixes ne représentent pas des prix réellement disponibles
+avant match ; le bilan fictif ne constitue pas une preuve de rentabilité réelle.
+
+### Choisir la journée : aujourd’hui, demain ou une autre date
+
+Le sélecteur **Date des matchs**, commun aux pages, permet de préparer la journée
+de demain et de consulter les journées passées. Les boutons **Aujourd’hui** et
+**Demain** changent ensemble le calendrier, les fortes probabilités, les analyses
+proposées et la journée consultée dans le journal. **Actualiser** récupère le
+calendrier choisi si les matchs ne sont pas encore présents localement.
+
+La date choisie ne remplace jamais l’heure réelle : seules les rencontres non
+commencées peuvent produire une prévision enregistrée, avec les résultats
+historiques déjà disponibles. Les prévisions de demain apparaissent en attente
+dans le journal. Le choix explicite reste sélectionné après minuit ; le bouton
+**Aujourd’hui** rétablit le suivi automatique de la date de Kinshasa.
+Le service autonome continue à traiter la journée en cours par défaut ; ouvrir
+demain ne change pas sa planification et ne lance pas de collecte supplémentaire.
+
 ## Fortes probabilités, toutes compétitions
 
-Cet onglet parcourt les rencontres confirmées **à venir aujourd’hui à Kinshasa**
+Cet onglet parcourt les rencontres confirmées **à venir à la date sélectionnée à Kinshasa**
 dans le calendrier API-Football local. Il calcule les trois probabilités
 **1st / Égal / 2nd** avec le même moteur **Clubs**, puis propose **trois classements
 indépendants**. Choisir `1st` classe tous les matchs selon leur probabilité `1st`,
@@ -166,8 +475,9 @@ choix du moteur, qui restent présentés séparément. Les scénarios conservent
 complètes, sous l’hypothèse d’indépendance des matchs ; leur somme n’est pas
 ramenée à 100 %. Un seuil de 50 % par match ne signifie pas 50 % pour le groupe.
 
-L’ouverture et les filtres font des calculs locaux, sans appel API, entraînement
-ni écriture dans le journal. **Actualiser les matchs du jour** demande explicitement
+L’ouverture calcule localement les probabilités et archive automatiquement tous
+les matchs calculables avant leur coup d’envoi, sans appel API ni entraînement.
+Les filtres de consultation ne limitent pas cet archivage. **Actualiser les matchs du jour** demande explicitement
 le calendrier à l’API. **Enregistrer avant match** vérifie toutes les affiches dans
 l’API, puis conserve les pourcentages affichés et les scénarios dans le journal
 immuable. Un groupe déjà enregistré réutilise sa première prévision et l’affiche
@@ -213,7 +523,107 @@ corrections de résultats réévaluent ces verdicts à partir de la prévision d
 L’export des analyses conserve aussi le scénario lié lorsque cette information
 est présente.
 
+### Historique automatique des fortes probabilités
+
+**Historique des probabilités**, en haut de la page, conserve le classement
+match par match. Il ne nécessite ni création de groupe ni clic sur
+**Enregistrer avant match**. L’ouverture du classement et les passages du
+service local archivent toutes les rencontres calculables à venir du jour dans
+`data/api_football/high_probability_archive.sqlite3`. Les trois probabilités
+`1st / Égal / 2nd` sont conservées ensemble, indépendamment de la catégorie
+consultée, de son seuil, de la recherche et du filtre prudent d’affichage.
+
+Choisis une journée passée puis une catégorie pour retrouver ses plus hauts
+pourcentages, les scores à la pause et à 90 minutes et le résultat réalisé.
+La journée passée la plus récente s’ouvre par défaut lorsqu’elle existe. Le
+dernier calcul conservé avant chaque match est choisi avant d’appliquer les
+filtres de consultation ; les calculs antérieurs restent consultables dans la
+colonne **Calculs conservés**. Les pourcentages ne sont jamais recalculés après le résultat. Les profils
+insuffisants pour le moteur ne reçoivent pas de probabilités inventées.
+
+L’historique s’affiche en tableau : match, compétition et horaire, catégorie
+consultée avec sa probabilité, **tendance historique**, **écart en points** et
+verdict. Les trois probabilités, les scores à la pause et à 90 minutes, le motif
+du suivi, l’heure de calcul, la provenance et les corrections figurent directement
+dans les colonnes du même tableau. Le match reste épinglé à gauche pendant le
+défilement horizontal. Aucune fiche séparée ni bouton Détails n’est nécessaire.
+
+La tendance est la fréquence historique lissée de la catégorie dans cette
+compétition, conservée avant match. Par exemple, 58 % contre une tendance de
+46 % donne **+12 points**, pas +12 %. Cet écart ne démontre pas une meilleure
+précision. Si la référence n’a pas été enregistrée, la mention **Non conservée**
+remplace le chiffre ; aucune référence actuelle ne réécrit une ancienne analyse.
+Un ancien match sans score final exploitable apparaît **Non évalué**, avec le
+motif disponible dans le tableau. Son résultat absent ne devient pas une défaite.
+
+L’archivage identique est idempotent. Un changement de probabilités ou de
+contexte crée un nouveau snapshot immuable ; les résultats et leurs corrections
+possèdent des révisions séparées. Le service récupère aussi les résultats des
+matchs de cette archive, même s’ils n’appartiennent à aucun groupe. Le calendrier
+et les résultats réutilisent les mêmes lots API de 20 identifiants et les
+mêmes contrôles de quota fournisseur. Aucun plafond de matchs archivés.
+
+L’ouverture de l’historique est en lecture seule, sans appel API ni entraînement.
+Une actualisation explicite des résultats reste disponible. Les matchs dont les
+résultats manquent, sont reportés ou annulés ne sont pas comptés comme des échecs.
+Le service doit fonctionner et le calendrier doit être chargé avant le coup
+d’envoi pour que l’archive existe. Les anciens pourcentages jamais conservés
+ne peuvent pas être récupérés après coup. Les probabilités réellement figées
+dans les anciens groupes restent consultables avec la provenance
+**Prévision déjà enregistrée**, sans faire passer ces seules prévisions pour
+le classement complet de leur journée.
+
+**Mes groupes enregistrés** conserve séparément les scénarios des groupes et
+leurs verdicts. **Voir le suivi de cette analyse** ouvre cette fiche sur place.
+Plusieurs choix ou groupes peuvent contenir les mêmes matchs ; ils ne deviennent
+pas des observations indépendantes du modèle.
+
+### Exporter une ou plusieurs journées des fortes probabilités
+
+Dans **Matchs → Fortes probabilités → Historique des probabilités**, le bloc
+**Exporter une ou plusieurs journées** permet de choisir les dates archivées,
+puis **1st**, **Égal**, **2nd** ou **Tout ensemble**. **Toutes les journées**
+sélectionne les dates disponibles ; **Effacer les journées** vide le choix.
+
+Un seuil d'export séparé est facultatif. À 0 %, **Tout ensemble** conserve les
+trois catégories pour chaque match ; avec un seuil, chaque catégorie est filtrée
+sur sa propre probabilité non arrondie. Les recherches, filtres et pages du
+tableau de consultation ne changent pas cette sélection d'export.
+
+Cliquer sur **Préparer l'export**, puis **Télécharger le CSV (Excel)** ou
+**Télécharger le JSON**. Une ligne représente un match et une catégorie. Elle
+contient la probabilité sauvegardée, la cote de référence, la tendance et l'écart
+lorsqu'ils sont conservés, les trois probabilités, les scores et verdicts
+disponibles, la compétition, les horaires de Kinshasa et la provenance.
+
+Les cotes sont les références fixes manuelles existantes : **1st = 3,10**,
+**Égal = 3,00**, **2nd = 2,10**. Leur origine est indiquée dans les deux formats ;
+aucune cote historique de bookmaker n'est attribuée à un match. Il s'agit des
+probabilités individuelles, sans création de pari ni cote cumulée de scénario.
+
+Le CSV utilise UTF-8 avec BOM, séparateur point-virgule et virgule décimale ;
+le JSON conserve les nombres et valeurs manquantes. Seules les prévisions déjà
+enregistrées sont exportées. Une sélection vide ou sans résultat au seuil choisi
+ne déclenche aucun téléchargement ; changer le choix ou recevoir de nouveaux
+résultats invalide l'ancien fichier préparé. Aucun appel API ni entraînement
+n'est déclenché par cette fonction.
+
 ### Vérifier les pourcentages annoncés
+
+Dans les listes et fiches du journal, les analyses proposées et les historiques
+des fortes probabilités, le suivi affiche la cause d'un résultat non évaluable
+avec la rencontre concernée : **reporté, annulé, forfait, décision administrative,
+abandonné, suspendu, interrompu, score à la pause ou à 90 minutes manquant**.
+Un ancien statut non final après l'horaire annoncé est signalé comme un résultat
+final non reçu ; il ne prouve pas que le match se joue encore. Les motifs sont
+lus dans les observations conservées et le dernier relevé local, sans appel API
+à l'ouverture. S'il existe des scores locaux non encore rapprochés, l'affichage
+indique **Résultat à rapprocher** et conserve le verdict enregistré.
+
+Les bilans et le suivi des candidats permettent aussi d'ouvrir ces explications.
+Elles ne réécrivent pas les prévisions, ne recalculent pas les probabilités et
+n'ajoutent aucune défaite. Les rapports historiques figés conservent leur
+périmètre d'origine ; l'explication du journal courant est présentée séparément.
 
 Le panneau **Les pourcentages annoncés se réalisent-ils ?** utilise uniquement
 les probabilités Clubs réellement enregistrées avant match. Il présente trois
@@ -233,11 +643,56 @@ faire passer le groupe entier à l’état réalisé. Les valeurs sans résultat
 fragiles avec de petits effectifs. Ouvrir le panneau ne fait aucun appel API,
 rapprochement, entraînement ni écriture dans le journal.
 
+### Comparer les probabilités sur les mêmes matchs
+
+Dans **Bilan et preuves → Probabilités par match**, deux lectures sont séparées :
+
+- **Historique descriptif** : première prévision Clubs et tendance du championnat
+  enregistrées au même instant, une observation par match. Ces journées déjà
+  examinées ne constituent pas une nouvelle confirmation indépendante.
+- **Confirmation future** : règles figées dans
+  `data/api_football/individual_validation/protocol.json`, à partir du
+  **29 octobre 2026 à 00 h 00, heure de Kinshasa**. Une capture antérieure au début
+  reste exclue même si le même match est recalculé ensuite. La version et les
+  empreintes du moteur doivent correspondre à celles du protocole.
+
+Le tableau compare taux de favoris corrects, erreur probabiliste et Brier. Les
+seuils 50/60/70 % affichent les effectifs, la couverture, la confiance annoncée et
+la réussite de la référence sur les mêmes matchs sélectionnés. Les trois classes
+ont leurs tableaux de calibration. Les journées restent visibles avec attentes,
+annulations et résultats non résolus ; ils ne sont pas comptés comme des erreurs.
+Les semaines UTC frontières et celles attendant encore des résultats restent
+hors du compteur des semaines closes. Les révisions ultérieures des résultats
+restent rattachées à la première prévision ; aucune probabilité n'est recalculée.
+
+Les nouvelles captures de l'archive incluent les empreintes SHA256 de la formule
+Clubs, du moteur de recherche, des identités et du calcul des scores. Les anciennes
+captures sont conservées sans leur inventer une attestation rétroactive. Cette
+traçabilité porte sur les fichiers sources présents lors de l'archivage, pas sur
+une certification indépendante du processus Python ou de l'heure fournisseur.
+
+Le service local existant alimente l'archive et rapproche les résultats. La vue
+est en lecture seule, avec un cache borné à une minute ; aucune collecte API,
+simulation, formation ou écriture n'est déclenchée par sa consultation.
+
+Le candidat tirs/xG apparaît **non retenu sur la validation historique 2025**.
+Il n'est ni relancé ni activé en choisissant après coup ses résultats 2026.
+Le bilan n'autorise aucune promotion automatique et ne démontre pas de rendement.
+
+```bash
+# Rapport local, sans réseau ni entraînement ; destination nouvelle uniquement
+.venv/bin/python scripts/validate_individual_probabilities.py report --output /tmp/validation_individuelle.json
+# Création explicite initiale seulement ; refuse de remplacer le protocole existant
+.venv/bin/python scripts/validate_individual_probabilities.py prepare
+```
+
+Voir [le bilan de cette mise en place](audit/VALIDATION_INDIVIDUELLE_2026-10-28.md).
+
 ## Analyser les matchs
 
-1. La date est fixée à **aujourd’hui, à Kinshasa (Africa/Kinshasa, UTC+1)**.
+1. Choisis la **Date des matchs, à Kinshasa (Africa/Kinshasa, UTC+1)**.
    Le calendrier et les groupes à analyser contiennent uniquement les matchs
-   de cette journée. La date bascule automatiquement après minuit.
+   de cette journée. Le mode **Aujourd’hui** suit automatiquement le passage à minuit.
 2. Clique sur **Actualiser** pour demander le calendrier à API-Football.
 3. Le calendrier ouvre sur **Toutes les compétitions**. Utilise les filtres
    **Tous**, **En cours**, **À venir**, **Terminés** ou **Autres**, et la recherche
@@ -251,7 +706,7 @@ rapprochement, entraînement ni écriture dans le journal.
    20 matchs. Leur ordre suit
    l’heure de début, puis l’identifiant du match ; l’ordre des clics ne le change pas.
 6. Choisis le moteur puis clique sur **Classer mes scénarios**. Pour un groupe
-   encore à venir aujourd’hui, la première prévision est enregistrée automatiquement dans le journal
+   encore à venir à la date choisie, la première prévision est enregistrée automatiquement dans le journal
    après une vérification API des affiches, tant qu’aucun coup d’envoi n’est passé.
 7. Consulte les propositions regroupées par scénario et leurs précédents, puis sauvegarde l’analyse
    en JSON si nécessaire.
@@ -311,18 +766,88 @@ filtre Compétition : quatre cartes Premier League signifient quatre matchs de
 ce championnat à cette date, pas une limite de l’API ou du nombre de cartes.
 Le calendrier affiche le score actuel, la minute, le statut et le score à la pause
 quand API-Football les renseigne. Les scores à 90 minutes restent distincts des
-prolongations et tirs au but. Les rencontres dont les clubs ne sont pas confirmés
+prolongations et tirs au but. La colonne **Verdict final** affiche en couleur
+**1st**, **Égal** ou **2nd** pour les rencontres terminées dont les deux scores
+sont exploitables. Les matchs en cours, les résultats incomplets et les données
+à vérifier conservent un état explicite ; le motif figure dans **Statut**.
+Les rencontres dont les clubs ne sont pas confirmés
 restent visibles et ne sont pas sélectionnables pour une prédiction.
+
+Dans **Matchs → Tendances des compétitions**, choisissez une période et,
+facultativement, des saisons API-Football, puis **Afficher et actualiser**.
+Le tableau présente les fréquences **1st**, **Égal**, **2nd**, les effectifs,
+la tendance récente et les résultats exclus. Les filtres de pays, recherche,
+effectif minimum et tri s'appliquent au tableau déjà calculé.
+
+**Évolution récente** compare les 10, 20, 30, 50 ou 100 derniers résultats
+exploitables d'une compétition aux résultats plus anciens de la période choisie,
+sans recouvrement. Un écart indisponible reste vide s'il n'existe aucun groupe
+antérieur. **Voir les rencontres utilisées et les exclusions** permet de
+consulter les scores HT/90 minutes et leur motif d'inclusion ou d'exclusion.
+Ces tendances décrivent l'historique corrigé actuellement enregistré ; elles
+ne reconstituent pas les données connues avant les anciens matchs et ne sont
+pas des probabilités futures. Cet écran lit SQLite sans requête API ni calcul
+de prédiction ; il ne lance aucune migration depuis un ancien fichier JSON.
+
+Dans **Matchs → Tendances des clubs**, retrouvez les mêmes fréquences par
+**identifiant de club et compétition**, avec un filtre **Tous les matchs / À
+domicile / À l'extérieur**. Choisissez la période et les saisons, puis cliquez
+sur **Afficher et actualiser**. Les 5, 10, 20 ou 30 derniers résultats sont
+comparés aux précédents de la période : les écarts sont exprimés en points de
+pourcentage. Recherche, pays, compétition, effectif minimum et tri permettent
+de sélectionner les profils, qui sont exportables en CSV avec les dates.
+
+Le verdict compare les buts des **deux équipes réunies**, avant et après la
+pause. Les scores justificatifs et les buts marqués/encaissés par le club
+sont consultables dans le tableau **Voir les rencontres utilisées et les
+exclusions**. Les petits effectifs et les résultats manquants restent explicites.
+
+Sous le calendrier, ouvrez **Exporter le calendrier : une ou plusieurs journées**.
+Choisissez les **dates de début et de fin**, incluses, ou un **nombre de journées**
+se terminant à la date souhaitée. Les dates exactes et le nombre de jours sont
+affichés avant la préparation. Laissez les compétitions vides pour les exporter
+toutes, ou sélectionnez-en plusieurs ; les filtres de statut et de recherche de
+ce bloc sont indépendants des filtres du calendrier.
+
+Cliquez sur **Préparer l’export du calendrier**, puis téléchargez **Excel** ou
+**CSV**. Le fichier contient les dates ISO complètes, les heures de Kinshasa,
+les coups d'envoi UTC, les équipes, compétitions, scores, statuts et verdicts
+finaux. Excel comprend **Matchs**, **Journées** et **Paramètres** ; en CSV, le
+suivi des journées se télécharge séparément avec sa période, son fuseau et
+l'heure d'extraction. Les journées sans données locales sont signalées sans
+prétendre qu'aucun match n'a eu lieu. Un relevé de calendrier daté est distingué
+de la simple présence de résultats historiques.
+
+L'export est préparé seulement à votre demande, sur les données déjà présentes,
+sans requête API. Le fichier reste figé à son extraction ; préparez-le de nouveau
+pour intégrer les scores reçus ensuite. Un changement de réglages retire l'ancien
+téléchargement. L'aperçu de 50 lignes ne limite pas le contenu exporté.
 
 **Actualiser** récupère les derniers scores de la journée en une requête. Le
 suivi automatique est facultatif : active **Suivre les scores automatiquement**
 pour une mise à jour toutes les 60 secondes tant que cette page est ouverte sur
-aujourd’hui. Filtrer, rechercher ou sélectionner des matchs ne déclenche pas
+la journée sélectionnée, aujourd’hui ou à venir. Filtrer, rechercher ou sélectionner des matchs ne déclenche pas
 de requête supplémentaire pendant cet intervalle. Une erreur met le suivi en
 pause jusqu’à un nouvel essai avec **Actualiser**. Aucun calcul de prédiction
 n’est lancé par ce suivi des scores. Le service décrit ci-dessous automatise un
 cycle distinct. La date du relevé est propre au jour et au fuseau
 consultés ; un import de saisons ne fait pas paraître le calendrier plus récent.
+
+La sélection de compétition, le groupe coché et les scénarios déjà calculés
+restent en place pendant les actualisations des scores et les changements de
+filtres. Les matchs masqués par une recherche restent sélectionnés. Si une
+rencontre ou une compétition disparaît temporairement du relevé, le brouillon
+est conservé ; une nouvelle prévision est désactivée jusqu'à sa revérification.
+Le classement existant conserve ses pourcentages, sa version et son ordre
+d'origine, même si les horaires changent. Modifier réellement le groupe ou le
+moteur demande un nouveau calcul. Le suivi désactivé ne relance plus ce panneau
+toutes les minutes. L'historique de préparation est chargé pour la compétition
+choisie uniquement.
+
+Cette continuité concerne la session de navigation ouverte. Après une fermeture
+du navigateur, une nouvelle session ou un redémarrage du serveur, les analyses
+déjà sauvegardées se retrouvent dans **Mes analyses** ; les cases d'un brouillon
+non calculé ne constituent pas une archive persistante.
 
 Les matchs commencés restent consultables. Les matchs commencés, reportés et annulés ne
 peuvent pas être ajoutés à une prédiction avant match. Les matchs terminés d’une
@@ -388,6 +913,138 @@ Pour consulter puis préparer les premières campagnes des compétitions locales
 ```bash
 .venv/bin/python scripts/prepare_model_campaign.py --dry-run
 .venv/bin/python scripts/prepare_model_campaign.py --all-ready
+```
+
+## Réévaluation contrôlée des modèles locaux
+
+Dans **Modèles et validation → Réévaluation contrôlée**, choisissez une compétition,
+puis lancez **Entraîner et évaluer un candidat à part**. Le calcul conserve d’abord
+l’instantané des résultats API-Football et les règles de comparaison, puis entraîne
+un candidat dans un répertoire distinct du modèle en service.
+
+- La validation choisit les réglages ; le test ne les choisit jamais.
+- Trois comparaisons chronologiques par saison sont tentées, selon l’historique
+  disponible, pour les tailles choisies (2, 4, 6 et 8 par défaut).
+- Chaque taille possède ses résultats : répétitions, Clubs, combinaison,
+  CatBoost seul et CatBoost avec correction des répétitions. Les erreurs de
+  tailles différentes ne sont pas fusionnées.
+- Les diagnostics par match présentent les probabilités brutes de Clubs et de
+  CatBoost, le Brier, la perte logarithmique et les fréquences observées dans dix
+  intervalles fixes. Ils n’appliquent aucune correction de calibration et ne
+  mesurent pas les marginales d’une distribution corrigée par les répétitions.
+- Les probabilités moyennes du premier scénario et des trois premiers sont
+  comparées à leurs fréquences de réalisation, avec leurs effectifs.
+- Les anciens candidats restent consultables. Un lancement avec le même
+  historique, les mêmes règles et le même modèle de référence rouvre le rapport
+  existant. Une interruption conserve son entrée pour une reprise identique.
+
+Les expériences sont stockées sous `data/api_football/model_reassessments/`.
+Leur modèle natif, leur rapport et leurs identités sont contrôlés par empreinte.
+Ouvrir cette vue ne déclenche aucun calcul d’apprentissage ni requête API.
+Un calcul explicite peut prendre plusieurs minutes ; il reste séparé des
+actualisations du calendrier et ne modifie ni la première campagne, ni le journal,
+ni le protocole prospectif existant.
+
+Les nouvelles réévaluations utilisent la **procédure native alignée** : choix conjoint
+paramètres CatBoost/force des répétitions sur la validation de quatre matchs,
+blocs chronologiques ancrés au premier match d’apprentissage même entre saisons,
+et fréquences calculées sur tout l’apprentissage. Les mêmes paramètres et la même
+force sont ensuite conservés pour les autres tailles. Aucun test ne choisit ces
+réglages. Les frontières temporelles des évaluations restent saisonnières ; elles
+mesurent cette procédure, pas les performances futures du candidat final réajusté
+sur tout l’historique. Les anciens rapports restent lisibles avec leur procédure
+saisonnière distincte, sans réécriture.
+
+### Suivi des candidats sur les nouveaux matchs
+
+Depuis une réévaluation alignée, **Activer le suivi avant match de ce candidat**
+conserve les versions exactes du candidat et du CatBoost courant, les versions de
+Clubs et des répétitions, l’empreinte du code et les règles d’évaluation. Ce suivi
+possède sa propre base `data/api_football/candidate_tracking.sqlite3` et ses copies
+de modèles sous `data/api_football/candidate_studies/`. Le modèle courant, la
+première campagne et le protocole prospectif historique restent inchangés.
+
+Le planificateur local existant traite automatiquement les groupes du jour à
+Kinshasa, dans leur ordre chronologique, pour les tailles enregistrées. Les
+ancres sont conservées à la première lecture du calendrier de la compétition
+pour cette journée : une nouvelle lecture ne recompose pas les groupes selon
+les résultats ou les probabilités. Les rencontres ajoutées après cette ancre ne
+sont pas insérées rétroactivement dans les groupes. Aucun seuil de probabilité
+ne choisit les groupes de cette comparaison.
+
+Pour chaque groupe admissible, les **quatre distributions complètes** sont
+conservées ensemble : candidat, CatBoost courant figé, Clubs et répétitions
+seules. Après tous les calculs, l’API doit encore confirmer les identifiants,
+les clubs, l’horaire et le statut à venir. L’heure est vérifiée de nouveau dans
+la transaction d’enregistrement. Aucun groupe commencé ou d’une autre journée
+ne reçoit de prévision rétrospective. Un résultat absent, reporté ou d’identité
+modifiée n’est pas compté comme un échec. Les corrections ajoutent des révisions
+sans modifier les prévisions initiales.
+
+L’écran conserve les états **En attente / Évalué / À vérifier / Annulé**, les
+scénarios proposés, leurs probabilités et leur réalisation. Les métriques par
+groupe sont séparées par taille. Le diagnostic des pourcentages futurs utilise
+les marginales exactes des distributions enregistrées et la première prévision
+commune de chaque rencontre, avant de filtrer les résultats.
+
+Les écarts candidat/Clubs et candidat/CatBoost courant sont évalués sur les mêmes
+groupes, avec dépendances entre rencontres partagées et semaines UTC. Les semaines
+ouvertes et les blocs contenant des résultats non résolus ne contribuent pas aux
+comparaisons closes. Le minimum de 20 blocs clos sert à afficher des intervalles
+descriptifs ; il ne garantit ni puissance statistique, ni avantage prédictif. Les
+consultations répétées et comparaisons multiples ne sont pas corrigées. **Aucune
+promotion automatique n’est activée.**
+
+Les modèles ne sont jamais réentraînés par le suivi. Un changement de code des
+moteurs suspend les nouvelles prévisions de l’ancien suivi jusqu’à une nouvelle
+activation explicite ; ses résultats restent consultables. Le planificateur doit
+être actif, le Mac éveillé et le réseau disponible pour enregistrer à temps. Une
+coupure ne provoque aucun rattrapage après coup d’envoi. Les requêtes partagent le
+même contrôle de quota fournisseur que les actualisations habituelles.
+
+### Bilans datés et stabilité des règles
+
+Dans **Comparaison sur les nouveaux matchs → Bilans datés du suivi**, les journées
+de match sont présentées à l’heure de Kinshasa et les semaines statistiques en
+UTC. Chaque taille conserve ses propres groupes, résultats observés et effectifs
+admissibles. Le nombre de rencontres distinctes reste séparé du nombre de groupes
+qui les partagent. Les semaines calendaires closes peuvent encore contenir des
+résultats non résolus : leur admissibilité provient du bilan global, avant tout
+filtre de période. Les tableaux hebdomadaires n’introduisent pas de nouveaux tests
+ni d’intervalles calculés sur une sélection de semaines.
+
+Le planificateur conserve des observations dans
+`data/api_football/candidate_followup.sqlite3`, après les prévisions et les
+rapprochements. Chaque relevé porte sa date réelle de lecture, l’identité du suivi,
+l’empreinte de ses règles et les révisions sources. Le premier passage d’un jour
+UTC ou une évolution des prévisions/résultats donne un nouveau relevé. Une lecture
+répétée avec les mêmes entrées dans la même journée réutilise le relevé existant.
+Une correction conserve donc l’état antérieur et ajoute un nouvel état observé.
+Les relevés antérieurs à la mise en place de cet observateur ne sont pas recréés.
+
+L’observateur est séparé des moteurs figés : il ne modifie aucun modèle, seuil,
+protocole, prévision ou résultat. Son affichage est chargé uniquement quand le
+volet est ouvert, avec un cache de 60 secondes. La consultation et les filtres ne
+créent aucun relevé. Une lecture indisponible est signalée explicitement ; aucun
+compteur nul n’est inventé. Le nombre de relevés n’augmente pas le nombre
+d’observations prédictives indépendantes. Une journée sans passage du service ne
+constitue pas une journée de stabilité vérifiée.
+
+Pour consulter les observations locales, ou archiver explicitement l’état actuel :
+
+```bash
+.venv/bin/python scripts/observe_candidate_followup.py
+.venv/bin/python scripts/observe_candidate_followup.py --capture
+```
+
+L’option `--output chemin.json` crée un nouveau fichier sans écraser un fichier
+existant. Ces commandes ne font aucun appel API et ne lancent pas d’entraînement.
+
+Pour inspecter le plan en lecture seule, puis lancer une compétition localement :
+
+```bash
+.venv/bin/python scripts/reassess_models.py --league 39
+.venv/bin/python scripts/reassess_models.py --league 39 --run --track
 ```
 
 ## Évaluation historique par saison
@@ -590,7 +1247,12 @@ enregistrement avant le premier coup d’envoi.
 **Réalisé** signifie que l’analyse a été évaluée ; cela ne signifie pas que sa
 première proposition est correcte. Dès la liste, un verdict distinct indique
 **Scénario réalisé**, **Aucun scénario proposé réalisé** ou **Scénarios en attente**.
-Une réussite précise la méthode et le rang du choix enregistré avant match.
+Une réussite affiche directement la séquence complète en couleurs, la méthode
+et le rang du choix enregistré avant match, sans ouvrir la fiche. L’ordre des
+pastilles numérotées correspond à l’ordre des rencontres dans l’analyse.
+Si aucun choix n’a réussi, la séquence réelle est affichée comme **Scénario observé**.
+Sa cote cumulée indicative figure sous la séquence : produit des références fixes
+manuelles (1st : 3,10 · Égal : 3,00 · 2nd : 2,10) sur tous les matchs du groupe.
 Le filtre **Réalisation des scénarios** permet de retrouver directement ces analyses.
 La fiche affiche le scénario observé dans l’ordre des rencontres et ses rangs
 dans les méthodes qui l’avaient proposé. Une concordance partielle ne suffit pas.
@@ -768,8 +1430,8 @@ Les filtres facultatifs par compétition, taille, origine et état, ainsi que la
 recherche par club, pays ou compétition, servent uniquement à parcourir la liste.
 La pagination propose 10, 20 ou 50 analyses par page.
 
-Le verdict **Scénario réalisé** est visible sans ouvrir la fiche, avec les méthodes
-et les rangs concernés. Il vérifie tous les choix enregistrés de toutes les méthodes,
+Le verdict **Scénario réalisé** est visible sans ouvrir la fiche, avec la séquence
+complète en couleurs, les méthodes et les rangs concernés. Il vérifie tous les choix enregistrés de toutes les méthodes,
 pas seulement le premier scénario affiché. **Aucun scénario proposé réalisé** n’est
 affiché qu’une fois le groupe entièrement évalué. Les résultats partiels restent
 en attente ; les groupes annulés, à vérifier ou incomplets gardent un verdict distinct.
@@ -796,6 +1458,14 @@ Les états distinguent les groupes en attente, les résultats attendus après
 l’heure de début et les résultats partiels. Un coup d’envoi passé ne suffit pas
 à affirmer qu’un match est en direct ou terminé. Les groupes évalués, annulés
 ou à vérifier conservent leur état issu du rapprochement API.
+
+Des scores finaux complets ne lèvent pas tous les blocages d'une prévision.
+Les historiques nomment **Horaire à examiner**, **Identité à vérifier** ou
+**Prévision hors période avant match** lorsqu'une correction empêche son
+évaluation selon les règles enregistrées. Ces cas ne sont plus présentés comme
+un simple résultat à rapprocher. Les scores déjà évalués à l'intérieur d'un
+groupe incomplet restent conservés ; le scénario complet exige tous ses matchs.
+Un score à la pause absent reste distinct d'un vrai `0-0`.
 
 Lors du premier classement d’un groupe futur, l’application fige les trois
 scénarios et la distribution complète pour les répétitions seules, les clubs
@@ -936,6 +1606,39 @@ de consultation ; voir [Howard et al.](https://arxiv.org/abs/1810.08240).
 Le regroupement hebdomadaire, le minimum de 20 blocs et la règle d’affichage
 ci-dessus sont les choix de cette application, pas des garanties tirées de ces références.
 
+## Expérience isolée sur les trajectoires des clubs
+
+`trajectory_research.py` compare trois représentations des mêmes dix précédents
+par profil de club : résumés symétriques, vecteurs complets triés sans chronologie,
+puis les mêmes vecteurs dans leur ordre chronologique. Les rôles domicile et
+extérieur et les identifiants des compétitions restent distincts. Toutes les
+caractéristiques d'une journée UTC sont émises avant l'ajout de ses résultats.
+
+```bash
+# Enregistrer un plan dans un dossier nouveau, sans entraînement
+.venv/bin/python trajectory_research.py --directory data/research/club_trajectories/mon_essai
+# Exécuter exactement ce plan
+.venv/bin/python trajectory_research.py --directory data/research/club_trajectories/mon_essai --run
+```
+
+Le protocole v1 fixe l'apprentissage avant 2025, le contrôle en 2025 et
+l'évaluation exploratoire en 2026, jusqu'au 24 octobre inclus en UTC par défaut.
+Les trois variantes ont les mêmes réglages CatBoost, sans optimisation de seuil
+ni calibration dans cet essai. Les caractéristiques peuvent intégrer les
+résultats des journées précédentes pendant l'évaluation ; les paramètres du
+modèle restent figés. La comparaison principale oppose les vecteurs sans ordre
+aux vecteurs chronologiques, qui contiennent les mêmes informations passées.
+
+La lecture SQLite est seule autorisée sur la source. Le dossier de recherche
+conserve le plan, l'instantané normalisé compressé, la cohorte commune, les
+probabilités et les modèles expérimentaux. Les grandes matrices temporaires sont
+supprimées après succès. Ces modèles ne sont pas publiés dans l'application et
+aucune prévision historique n'est ajoutée au journal. Les résultats déjà examinés
+restent exploratoires ; ils ne constituent pas une confirmation prospective.
+
+Le bilan de la première exécution se trouve dans
+`audit/EXPERIENCE_TRAJECTOIRES_CLUBS_2026-10-25.md`.
+
 ## Automatisation sur Mac
 
 Le service exécute le cycle API-Football toutes les **15 minutes**, indépendamment
@@ -1067,6 +1770,17 @@ ouverte. Le service ne réveille pas le Mac et ne fonctionne pas lorsqu’il est
 l’agent. Un service chargé peut être en attente entre deux cycles ; son statut
 reste actif pendant cette attente.
 
+Pendant les longues préparations, les points de reprise des résultats
+actualisent aussi le calendrier complet du jour lorsque l'échéance civile UTC
+ou l'échéance monotone est atteinte. Le défaut observé le 1er novembre était une
+reprise des résultats sans relève calendaire après un grand écart de durée
+civile. Le lot 11 corrige cette condition de déclenchement. Le contrôle reste
+coopératif : un traitement indivisible doit rendre la main et aucun réveil du
+Mac n'est garanti. La cause de l'ancien écart n'est pas attribuée à la veille.
+Le rapport de service publie alors ses effectifs et sa dernière heure de mise
+à jour, même si le cycle complet n'est pas terminé. La file des autres journées
+reste conservée et le quota fournisseur continue de s'appliquer.
+
 Dans **Pilotage → Automatisation**, le suivi des passages locaux conserve les
 durées, l’origine du lancement, les requêtes et les prévisions ajoutées, les
 pauses, les erreurs et les fins non confirmées. Il signale les écarts au rythme
@@ -1085,6 +1799,16 @@ données avancent ; un signal ancien ne suffit pas à déclarer le cycle arrêt�
 Les anciennes exécutions sans signal restent de fin inconnue. L’intervalle du
 service règle la fréquence de lancement : un cycle long peut dépasser cet
 intervalle, sans qu’un second cycle parallèle soit lancé.
+
+**Contrôler les délais et les reprises**, dans la même page, rapproche les
+échéances de capture déjà inscrites et les opérations terminées des sept
+derniers jours. Le repère de fraîcheur est deux fois l'intervalle configuré ;
+il sert à signaler une ancienneté, pas à promettre un délai. Les heures du
+tableau sont celles de Kinshasa, les journées du protocole restent en UTC.
+Une journée sans recensement garde un nombre de cibles inconnu. Un ancien
+accusé absent n'est pas fabriqué. Chaque base est lue dans sa propre transaction
+en lecture seule, sans reconstruire les variables ni lire les modèles ou scores.
+Ce contrôle conserve le candidat et les règles des huit semaines inscrites.
 
 ### Alterner l’historique et les besoins du jour
 
@@ -1240,3 +1964,347 @@ Le workflow **Vérifications PatternLab** lance les tests sur les propositions d
 modification et les envois vers `main`, avec une base PostgreSQL jetable et sans
 secret de production. Sa présence ne configure pas à elle seule les règles de
 protection de branche ou une attente du déploiement Streamlit.
+
+## Collecte locale des statistiques par mi-temps
+
+Les nouvelles réponses passent un contrôle xG supplémentaire : lorsque les trois
+valeurs équipe FT/H1/H2 sont présentes, leur additivité doit respecter la tolérance
+de 0,015 due à trois arrondis au centième. Une incohérence masque uniquement les
+xG des trois périodes ; les tirs valides et les réponses brutes restent conservés.
+La même protection s'applique aux lectures du sidecar courant, y compris aux trois
+observations anciennes signalées dans l'audit. Les instantanés de recherche figés
+et leur parser historique restent inchangés et reproductibles.
+
+La lecture avec une date d'information retrouve désormais la dernière réponse
+terminée strictement avant cette date, même si une correction a été collectée
+ensuite. Une réponse vide ou invalide déjà connue ne fait pas réapparaître des
+mesures anciennes. Un changement d'identité invalide les projections antérieures.
+Cela améliore les contrôles des futurs usages ; les modèles servis n'utilisent
+pas encore ces xG et ne sont pas réentraînés par cette correction.
+
+Le collecteur indépendant enregistre les statistiques API-Football dans
+`data/api_football/halftime_statistics.sqlite3`. Il ne charge ni le stockage Cloud,
+ni les modèles. Les prévisions existantes restent figées. Les réponses brutes,
+les dates de récupération et les mesures par équipe et période sont conservées.
+Les valeurs manquantes ne deviennent jamais des zéros ; les tirs incohérents
+sont écartés des mesures utilisables, tout en gardant la réponse d'origine.
+
+```bash
+# État local, sans clé ni appel API (ne crée pas de base absente)
+.venv/bin/python scripts/collect_halftime_statistics.py status
+# Réutiliser les réponses du pilote déjà téléchargées, sans appel API
+.venv/bin/python scripts/collect_halftime_statistics.py import-audit
+# Préparer la file depuis les matchs déjà présents localement
+.venv/bin/python scripts/collect_halftime_statistics.py plan
+# Compléter les saisons depuis l'API, y compris les matchs absents localement
+.venv/bin/python scripts/collect_halftime_statistics.py discover
+# Un passage de 25 matchs, puis arrêt ; relancer continue la file
+.venv/bin/python scripts/collect_halftime_statistics.py run --batch-size 25
+# Enchaîner les lots sans pause fixe ; Ctrl+C conserve la progression
+.venv/bin/python scripts/collect_halftime_statistics.py run --watch --batch-size 25 --interval-seconds 0
+```
+
+Le pilote complet couvre par défaut les saisons API 2024–2026 de Premier League,
+Championship, Ligue 1, Bundesliga, Liga, Serie A italienne et brésilienne.
+`--leagues 39,61` change les compétitions ; `--leagues all` découvre toutes les
+compétitions déclarées couvertes, sans garantir leurs statistiques réelles.
+`--seasons 2024,2025,2026` sélectionne les saisons API, qui peuvent chevaucher deux
+années civiles. Une taille de lot est une tranche de travail, pas un plafond total.
+
+Le mode `--watch` complète la découverte des saisons une fois par jour. Il
+reprend les erreurs temporaires avec délai, respecte les compteurs transmis
+par le fournisseur et attend leur remise à zéro si nécessaire. L'allocation
+API reste partagée avec l'automatisation habituelle : ces appels ne disposent
+pas d'un quota distinct. Une ancienne réponse vide est conservée sans nouvel
+appel automatique ; les réponses vides des matchs récents sont revérifiées
+après 24 heures. Une structure invalide est mise à l'écart pour examen.
+
+Par défaut, les lots actifs s'enchaînent sans attente fixe, avec une seule requête
+à la fois. La pause d'une minute ne s'applique plus entre deux lots qui avancent ;
+elle reste utilisée lorsque la file est inactive ou que le fournisseur impose
+une temporisation. `--interval-seconds` permet d'ajouter volontairement une pause
+active ; `--idle-interval-seconds` règle l'attente inactive (60 secondes par défaut).
+
+Le processus doit rester ouvert sur un Mac éveillé et connecté ; cette commande
+n'installe pas de nouveau service au démarrage. La file persistante reprend au
+prochain lancement après arrêt ou coupure. Les appels réseau n'occupent aucune
+transaction SQLite et aucun verrou de la base principale.
+
+Cette collecte ne branche pas encore les statistiques aux prédictions : il faut
+comparer une version enrichie sur les mêmes rencontres avant toute adoption.
+Pour les variables historiques, seuls les matchs strictement antérieurs et les
+informations disponibles avant la prévision peuvent être utilisés ; récupérer
+une statistique ancienne aujourd'hui ne prouve pas sa disponibilité à l'époque.
+
+Le suivi est disponible dans **Pilotage → Collecte des statistiques**, et via
+**Voir la progression** dans la barre latérale. Il affiche les réponses reçues,
+les matchs restants, les tirs complets et l'avancement par année. Il distingue
+la fin de la collecte de la préparation puis de l'évaluation des modèles.
+L'affichage s'actualise toutes les 15 secondes tant que la page est ouverte,
+sans appel API ni entraînement. Une estimation de fin apparaît uniquement
+pendant une activité récente et lorsque le quota restant permet de terminer.
+Ce suivi porte sur les sept championnats du comparatif, pour les matchs de
+2024 au 25 octobre 2026 inclus en UTC ; les autres matchs de l'audit restent
+conservés dans la base de collecte.
+
+### Comparaison expérimentale des profils enrichis
+
+La chaîne de recherche est séparée de l'application. Elle compare les fréquences,
+la formule actuelle Clubs et deux corrections utilisant les mêmes paramètres :
+l'une avec les scores seuls, l'autre avec les statistiques de mi-temps des
+rencontres précédentes. La comparaison entre ces deux corrections permet de
+mesurer l'apport des nouvelles informations.
+
+Les journées cibles n'alimentent pas leurs propres profils. Les valeurs manquantes
+conservent leurs effectifs et masques. Les périodes sont définies par date réelle
+UTC : entraînement 2024, validation 2025, évaluation historique exploratoire
+2026 avant le 26 octobre. Ces années déjà étudiées ne constituent pas une
+confirmation indépendante ; de nouvelles prévisions figées seront nécessaires.
+
+```bash
+# État du premier instantané vérifié, sans réseau ni entraînement
+.venv/bin/python scripts/halftime_research.py status --directory data/research/halftime_enrichment/2026-10-26-v2
+# Nouvel instantané après la collecte ; dossier nouveau obligatoire
+.venv/bin/python scripts/halftime_research.py prepare --directory data/research/halftime_enrichment/2026-10-26-complet-v1 --protocol data/research/halftime_enrichment/2026-10-26-v2/plan.json
+# Comparaison isolée, uniquement si les conditions de collecte sont satisfaites
+.venv/bin/python scripts/halftime_research.py evaluate --directory data/research/halftime_enrichment/2026-10-26-complet-v1
+```
+
+Une collecte encore incomplète ou des précédents enrichis trop peu nombreux font
+refuser l'évaluation. Aucun apprentissage ou déploiement n'est lancé par
+`prepare`. Les matrices, réponses de référence, profils et empreintes sont
+conservés dans chaque instantané. Les résultats éventuels restent dans
+`data/research/` et ne remplacent aucun modèle ni aucune ancienne prévision.
+Le protocole détaillé local est dans
+`audit/PROTOCOLE_PROFILS_MI_TEMPS_2026-10-26.md`.
+
+Le premier comparatif complet a été exécuté après les 6 234 réponses du pilote.
+La correction enrichie ne dépasse pas Clubs sur la validation 2025 ; elle n'est
+donc pas activée. Les résultats 2026 restent exploratoires. Le détail des données,
+mesures et vérifications est dans
+[le bilan des profils par mi-temps](audit/RESULTATS_PROFILS_MI_TEMPS_2026-10-26.md).
+
+La recherche suivante compare aussi huit variantes de comptage des buts, avec
+deux validations successives sur 2025 et une sensibilité aux profils de clubs
+sans historique. Aucune ne satisfait le critère d'adoption. Les modèles servis
+restent inchangés ; les forts pourcentages de ces essais ne sont pas exposés
+comme prévisions de l'application. Voir
+[le bilan de recherche sur le comptage](audit/RECHERCHE_COMPTAGE_MI_TEMPS_2026-10-27.md).
+
+Le [diagnostic d'apprentissage](audit/DIAGNOSTIC_APPRENTISSAGE_MI_TEMPS_2026-10-27.md)
+mesure ensuite l'effet du nombre d'exemples sur les mêmes validations 2025,
+sépare le total de buts de leur répartition entre mi-temps et teste l'ajout des
+anciens scores. Ses 88 ajustements et leur vérification indépendante ne
+réévaluent pas 2026 et ne changent aucun modèle servi. Le volume aide dans les
+essais observés, mais les profils enrichis restent moins bons que les scores
+seuls ; les graphiques et limites sont conservés dans le rapport.
+
+Le [test du correcteur xG à un coefficient](audit/CORRECTEUR_XG_UNIQUE_2026-10-27.md)
+conserve ensuite Clubs comme base et compare un seul signal de répartition sur
+les deux validations 2025. Il échoue au critère fixé : huit bonnes catégories
+perdues au premier semestre, égalité au second. La piste actuelle des profils
+xG agrégés est clôturée et Clubs reste sélectionné. Aucune prévision 2026 ni
+activation prospective de ce candidat n'est effectuée par cet essai.
+
+La [remise en question des hypothèses](audit/REMISE_EN_QUESTION_HYPOTHESES_2026-10-27.md)
+vérifie ensuite la cible, les populations et la disponibilité réelle des données.
+Un sondage API-Football confirme le marché exact « Highest Scoring Half », ID 11 :
+12 cotations archivées avant match sur trois affiches, avec vérification
+indépendante. Ce sondage ne mesure pas encore leur précision et n'installe pas
+de collecte permanente. La comparaison prospective à heure fixe est décrite dans
+[l'étape préparée pour la référence de marché](audit/PROTOCOLE_REPERE_MARCHE_2026-10-27.md).
+
+### Apprentissage quotidien local et comparaison réelle
+
+Dans **Bilan et preuves → Apprentissage quotidien**, les tableaux présentent les
+entraînements, les probabilités conservées avant match et leur comparaison avec
+Clubs, la tendance du championnat et, lorsqu'il est disponible, le CatBoost courant.
+La consultation est en lecture seule : elle ne lance aucun apprentissage ni appel API.
+
+Le service local existant prépare progressivement un candidat par passage. Il
+conserve sa file entre les journées et alterne les compétitions proches du coup
+d'envoi avec celles qui attendent depuis le plus longtemps. Un changement des
+données historiques, y compris une correction dans la journée, déclenche une
+nouvelle vérification ; un historique identique réutilise le candidat déjà préparé.
+Toutes les compétitions disposant des données nécessaires restent dans la file.
+
+La recette CatBoost est fixée une fois par compétition. Les paramètres appris sont
+réajustés avec les résultats exploitables strictement antérieurs au jour UTC
+courant. Les instantanés, recettes, modèles et prévisions sont conservés sous
+`data/api_football/daily_learning/`. Une interruption reprend l'artefact entraîné
+déjà vérifié. Aucune recherche quotidienne de réglages ni promotion automatique
+n'est effectuée. Les modèles courants et leurs anciennes prévisions restent conservés.
+
+```bash
+# État local, sans réseau ni entraînement
+.venv/bin/python scripts/daily_learning.py
+# Activation explicite de la boucle dans le service local existant
+.venv/bin/python scripts/daily_learning.py --enable
+# Examiner l'inventaire sans entraîner
+.venv/bin/python scripts/daily_learning.py --dry-run
+# Préparer un candidat supplémentaire sans appel API
+.venv/bin/python scripts/daily_learning.py --train
+# Exporter les comparaisons réellement enregistrées
+.venv/bin/python scripts/daily_learning.py --report
+# Suspendre les nouveaux entraînements et captures, conserver les résultats
+.venv/bin/python scripts/daily_learning.py --disable
+```
+
+Chaque match compte une seule fois dans cette procédure, avec le premier candidat
+disponible avant son coup d'envoi et une confirmation API récente de son identité,
+horaire et statut non commencé. Les nouvelles versions ne remplacent pas les
+anciennes probabilités. Les résultats manquants, reports et annulations ne sont
+pas des échecs prédictifs ; les bilans de réussite utilisent les mêmes matchs
+évalués pour chaque comparateur. Les semaines incomplètes sont identifiées.
+Réentraîner chaque jour ne démontre pas une amélioration : ce suivi sert à la
+mesurer sur de nouvelles rencontres, sans annoncer de taux de réussite garanti.
+Sur le Mac, le service progresse lorsque la machine est allumée et éveillée.
+
+### Sélection argumentée
+
+Dans **Matchs → Sélection argumentée**, le nouvel onglet applique automatiquement
+la règle exploratoire utilisée pour les propositions personnelles :
+
+- historique API-Football limité à la même compétition et aux rôles domicile et
+  extérieur, strictement avant le jour UTC du match et le jour UTC actuel ;
+- au moins dix précédents pour chaque club dans son rôle ;
+- même catégorie favorite pour le modèle Clubs et la tendance du championnat ;
+- cette catégorie apparaît au moins cinq fois dans chacun des dix derniers
+  précédents disponibles et figure parmi leurs catégories les plus fréquentes.
+
+Toutes les rencontres admissibles sont classées par leur probabilité Clubs,
+sans imposer `2nd`, sans seuil minimal de 50 % et sans plafond de sélection.
+Les filtres du tableau permettent de consulter `1st`, `Égal`, `2nd` ou l'ensemble.
+La pagination est réglable jusqu'à « Tous » et ne limite pas la conservation.
+
+Chaque ligne affiche les probabilités, la tendance du championnat, l'écart en
+points, les effectifs domicile/extérieur, les comptes sur dix précédents, leurs
+périodes et les raisons du choix. Les jeunes et réserves gardent leurs noms de
+compétition. Les dix précédents disponibles peuvent remonter loin ; ils ne sont
+pas présentés comme une période récente uniforme.
+
+Le bouton **Confirmer et conserver les sélections** actualise la journée choisie,
+confirme les identités, horaires et statuts non commencés auprès de l'API, puis
+enregistre les choix avant coup d'envoi. Le service local réalise aussi cette
+conservation pour les matchs du jour quand il est actif. La consultation simple
+ne déclenche ni appel API, ni entraînement, ni écriture. Les données normalisées
+sont chargées depuis les index locaux et les calculs sont mis en cache.
+
+Dans **Historique et résultats**, les choix d'origine restent figés avec les
+scores à la pause et à 90 minutes, le verdict et les raisons d'un résultat
+manquant. Un report, une annulation ou un score inexploitable reste distinct d'un
+choix perdu. Le taux de réussite compte chaque rencontre à sa première
+conservation, avant les filtres et même entre versions de la règle. Les exports
+JSON conservent les motifs et les preuves des dix précédents. Le stockage local
+est `data/api_football/argumented_selection.sqlite3`.
+
+Cette règle ne constitue pas une méthode de sélection validée. Un filtre sur
+l'accord modèle/championnat garantit leur accord sur la catégorie, pas leur
+justesse. Les réussites observées et la qualité des pourcentages doivent être
+mesurées sur de nouvelles rencontres. Les sélections personnelles historiques
+restent dans leurs rapports horodatés ; elles ne sont pas réintroduites après
+match dans ce nouvel historique automatique.
+
+Un test chronologique de cette règle est maintenant disponible dans
+**Sélection argumentée → Test sur l'historique**. Sur 19 203 matchs retenus entre
+2024 et le 29 octobre 2026, la règle obtient 45,86 % de choix corrects contre
+47,05 % pour les plus fortes probabilités Clubs et 46,89 % pour les plus fortes
+fréquences du championnat, à effectifs égaux chaque journée. Les variantes
+7/10 et ancienneté maximale d'un an ne dépassent pas leurs contrôles respectifs.
+
+Ce rejeu est exploratoire : l'historique était déjà étudié, les corrections
+actuelles ne prouvent pas la disponibilité réelle des données à l'époque et
+le vivier couvre les matchs terminés exploitables présents dans la base.
+Aucune règle active ni ancienne prévision n'a été remplacée par le test.
+Le [rapport historique complet](audit/REJEU_SELECTION_ARGUMENTEE_2026-10-30.md)
+décrit les dénominateurs, variantes, limites et la vérification indépendante.
+
+```bash
+# Lire le bilan conservé, sans API, entraînement ni nouveau rejeu
+.venv/bin/python scripts/evaluate_argumented_selection.py --report
+```
+
+### Sauvegarde des calculs manuels
+
+Dans **Matchs → Choisir mes matchs**, cliquer sur **Classer mes scénarios**
+sauvegarde automatiquement **toutes les propositions de la comparaison affichée**,
+avec leurs méthodes, classements, distributions disponibles et probabilités, lorsque
+le calcul est admissible et que les rencontres n'ont pas commencé. Cette
+sauvegarde fonctionne aussi pour les visiteurs du site en ligne.
+
+Le message de succès propose un lien direct. Les calculs sont consultables dans
+**Mes analyses**, filtre **Origine des analyses → Sélection manuelle**, avec la date, les matchs, le moteur utilisé,
+les probabilités conservées et les résultats API déjà importés localement.
+Cet historique est partagé entre les visiteurs du site. Un calcul identique
+n'ajoute pas de doublon ; une nouvelle estimation conserve sa propre version.
+
+La fiche réutilise le même tableau de comparaison que l'analyse initiale : les
+scénarios distincts sont regroupés, avec une colonne par méthode. Les trois
+premiers choix de chaque méthode sont conservés, même s'ils ne figurent pas parmi
+les trois choix du moteur sélectionné. Un scénario proposé par une autre méthode
+peut donc être reconnu comme réalisé. Les indicateurs « Exact en premier / dans
+les 3 (moteur choisi) » gardent leur portée distincte du verdict sur toutes les
+propositions.
+
+Les anciennes archives statistiques qui ne conservent que le moteur sélectionné
+portent la mention **Comparaison initiale incomplète**. Si aucun choix conservé
+ne se réalise, le verdict global reste inconnu ; il n'est plus présenté comme
+un échec de toutes les propositions initiales. Une réussite conservée reste
+prouvée, mais toutes ces archives incomplètes, gagnantes ou non, restent exclues
+d'un taux portant sur l'ensemble des propositions. Les anciens enregistrements
+et leurs dates ne sont pas réécrits. Aucune proposition manquante n'est inventée
+à partir d'un recalcul après match.
+
+Les calculs manuels sont enregistrés dans
+`data/api_football/manual_analyses.sqlite3`. Ils restent distincts des
+prévisions confirmées auprès de l'API avant match dans le stockage, mais les
+deux figurent dans la même liste. Les calculs manuels sans confirmation ne sont
+pas ajoutés aux cohortes de validation du modèle. Leur consultation n'effectue
+aucun appel API. Un score manquant n'est pas compté comme un échec.
+
+Les calculs autrefois perdus à la fermeture du navigateur ne peuvent pas être
+reconstitués après coup. La sauvegarde complète du serveur inclut le nouveau
+fichier SQLite dès qu'il existe.
+
+La fiche présente les résultats confirmés sous la forme `4/5`, les statuts et
+motifs de chaque match, ainsi que le suivi de chaque scénario. « Déjà contredit »
+signale une incompatibilité avec un résultat connu ; le groupe reste incomplet
+jusqu'à son évaluation complète. Les couleurs et l'arrondi visuel ne changent
+aucune probabilité archivée. [Détail de la correction](audit/CORRECTION_TABLEAUX_MANUELS_2026-11-06.md).
+
+### Optimisation des écrans — 6 novembre 2026
+
+Le tableau des compétitions utilise un résumé léger, les exports JSON sont préparés au téléchargement, et la carte de collecte terminée évite la relecture des tentatives. Ces changements sont aussi déployés sur AWS. Mesures, tests et limite mémoire du collecteur : [rapport de performances](audit/OPTIMISATION_PERFORMANCES_2026-11-06.md).
+
+Le collecteur AWS dispose désormais d'une exécution versionnée avec lectures SQLite en flux et ciblées. La reprise, les prévisions et les résultats ont été comparés à la référence : [correction mémoire et contrôles](audit/CORRECTION_MEMOIRE_COLLECTEUR_2026-11-06.md).
+
+
+### Ensemble des propositions conservées — 7 novembre 2026
+
+Les tableaux de scénarios, leurs verdicts et le catalogue de simulation lisent tous les choix explicitement archivés, même si un classement en contient plus de trois. Le tableau indique leur nombre distinct et le nombre de choix par méthode. Les nouvelles prévisions confirmées possèdent un manifeste d'intégrité de cet ensemble, exporté avec le JSON.
+
+La génération automatique actuelle propose trois choix par méthode disponible. Un groupe utilisant uniquement Clubs possède donc trois choix ; plusieurs méthodes peuvent proposer davantage de suites distinctes au total. Les méthodes absentes et cette politique sont indiquées dans la fiche. Les métriques « trois premiers » et « ensemble proposé » restent distinctes. Aucune possibilité supplémentaire n'est inventée après le résultat.
+
+Détails et preuves : [correction de tout le système](audit/CORRECTION_PROPOSITIONS_TOUT_SYSTEME_2026-11-07.md).
+
+
+### Matchs de la journée dans les tendances des clubs
+
+Dans **Matchs → Tendances des clubs**, choisissez **Matchs de la journée**. La date des matchs, en haut de l'application, s'applique aussi à cette vue (aujourd'hui par défaut, autre journée possible). Le tableau réunit les horaires de Kinshasa, les équipes, la compétition, les scores et statuts, ainsi que leurs fréquences historiques 1st / Égal / 2nd et les effectifs correspondants. La période historique et le rôle restent réglables dans le formulaire.
+
+Les rencontres sans profil historique sont conservées, avec des fréquences manquantes. Pays, compétition, état du match et recherche filtrent l'affichage. L'export CSV contient toutes les rencontres filtrées, leurs dates et le contexte historique, indépendamment de la pagination. **Actualiser le relevé local** relit les rencontres déjà importées ; les scores suivent le dernier relevé API horodaté. La vue **Tous les clubs** conserve le tableau historique complet.
+
+
+### Conservation des propositions — correction du 7 novembre 2026
+
+Les nouvelles captures conservent tous les classements effectivement fournis par les méthodes, pour les groupes de **2 à 20 matchs**. La présence ou l'absence d'un seuil qualifié ne filtre plus les propositions. Le niveau de preuve historique figure séparément ; les anciens résultats d'une politique à seuil ne valident pas la nouvelle politique de conservation.
+
+L'affichage initial, la sauvegarde, le verdict, l'export et la simulation utilisent le même ensemble conservé, sans troncature supplémentaire. Les premières lignes canoniques restent une référence pour les mesures Top1/Top3 existantes. Les producteurs actuels produisent encore trois premiers choix par méthode : leur union peut dépasser trois scénarios distincts. Si une méthode fournit davantage de choix, ils sont conservés intégralement. Cette correction ne prétend pas générer ni proposer les `3**N` possibilités d'un groupe.
+
+Les captures antérieures gardent leur politique et leur horodatage ; aucun choix n'est inventé après un résultat. Une ancienne capture restrictive sans proposition ne devient pas un échec ni une réussite. La calibration `data/api_football/scenario_policy/calibration.json` reste une preuve de recherche ; elle ne conditionne plus le fonctionnement des nouvelles captures. L'ouverture d'une page ne réentraîne rien et ne régénère pas les choix.
+
+### Filtrer les tendances sur les clubs de la journée
+
+Dans **Matchs → Tendances des clubs → Tous les clubs**, activez **« Uniquement les clubs avec un match le … »** au-dessus du tableau. La date commune de l'application correspond à aujourd'hui par défaut ; le bouton **Aujourd'hui** du sélecteur de date permet d'y revenir. Le filtre garde les deux équipes des rencontres enregistrées à cette date, tous statuts confondus, dans leur compétition exacte. La période, les saisons et le rôle de leur historique restent ceux du formulaire.
+
+Pays, compétition, recherche, tri, pagination et export s'appliquent ensuite à ces profils. L'export inclut la journée filtrée. Les rencontres sans profil historique restent consultables dans **Matchs de la journée**, avec les horaires et adversaires.

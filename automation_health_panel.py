@@ -1,4 +1,5 @@
 """Read-only operational evidence for the local worker, separate from ML scores."""
+import table_views
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -23,7 +24,7 @@ def _local(value):
 def render(config, *, scheduler=None):
     if cloud_storage.configured():
         return
-    st.subheader('Suivi des passages locaux', icon=':material/monitor_heart:')
+    st.subheader('Suivi des passages enregistrés', icon=':material/monitor_heart:')
     st.caption('Ce journal conserve les exécutions du cycle de données et de prévisions depuis son activation. '
                'La préparation séparée des modèles n’est pas comprise dans ces durées. '
                'Un service chargé ou un test réussi ne prouve pas plusieurs jours de fonctionnement.')
@@ -35,7 +36,8 @@ def render(config, *, scheduler=None):
         view = health.load(api.STORE_PATH.parent, now=now, days=days)
         expected = bool(config.get('enabled') and (scheduler or {}).get('running')
                         and not (scheduler or {}).get('process_running'))
-        summary = health.summarize(view, now=now, schedule_expected=expected)
+        cadence = 'after_finish' if (scheduler or {}).get('backend') == 'systemd' else 'start_to_start'
+        summary = health.summarize(view, now=now, schedule_expected=expected, cadence=cadence)
     except health.HealthError as error:
         st.warning(str(error))
         return
@@ -59,6 +61,10 @@ def render(config, *, scheduler=None):
         active = [row for row in view['rows'] if row['status']=='running']
         recent = sum(row.get('signal_state')=='recent' for row in active)
         stale = sum(row.get('signal_state')=='stale' for row in active)
+        future = sum(row.get('signal_state')=='future' for row in active)
+        if future:
+            st.warning(f'{future} signal(s) portent une heure future : vérifier l’horloge. '
+                       'Ils ne confirment pas une présence récente du service.')
         if recent:
             st.info(f'{recent} passage(s) en cours avec un signal récent. Leur fin reste à confirmer.')
         if len(active)>recent:
@@ -69,12 +75,12 @@ def render(config, *, scheduler=None):
                    'Les anciens cycles sans signal restent de fin inconnue.')
     if summary['gaps']:
         st.warning(f"{len(summary['gaps'])} écart(s) au rythme configuré entre les passages du service. "
-                   'Un Mac en veille, un cycle long ou un arrêt peuvent expliquer une absence ; ce journal seul ne permet pas d’en attribuer la cause.')
+                   'Une machine en veille, un cycle long ou un arrêt peuvent expliquer une absence ; ce journal seul ne permet pas d’en attribuer la cause.')
     if view['truncated']:
         st.caption('La fenêtre contient plus de 300 passages : les compteurs et écarts portent sur les 300 plus récents.')
     with st.expander('Durées, états et écarts observés', icon=':material/history:'):
         rows = view['rows'][:50]
-        st.dataframe([{'Début · Kinshasa': _local(row['started_at']),
+        table_views.dataframe([{'Début · Kinshasa': _local(row['started_at']),
                        'Fin · Kinshasa': _local(row['finished_at']),
                        'Durée (s)': row.get('elapsed_seconds', row['duration_seconds']),
                        'État': ('En cours · signal récent' if row['status']=='running' and row.get('signal_state')=='recent'
@@ -86,17 +92,19 @@ def render(config, *, scheduler=None):
                        'Requêtes API': row['counters'].get('requests'),
                        'Prévisions ajoutées': row['counters'].get('created'),
                        'Motif': ' '.join(health.REASONS[code] for code in row['reasons'])}
-                      for row in rows], hide_index=True, width='stretch', key='automation_health_cycles')
+                      for row in rows], hide_index=True, width='stretch', key='automation_health_cycles', table_id='automation_health_panel:render:dataframe:1')
         st.caption(f"{len(rows)} passage(s) affiché(s), les plus récents d’abord. "
                    'Les pauses liées à API-Football restent distinctes des erreurs.')
         if summary['gaps']:
-            st.dataframe([{'Passage attendu après · Kinshasa': _local(gap['start']),
+            table_views.dataframe([{'Passage attendu après · Kinshasa': _local(gap['start']),
                            'Passage suivant / constat · Kinshasa': _local(gap['end']),
                            'Écart (minutes)': round(gap['minutes'], 1),
                            'Toujours sans nouveau passage': gap['ongoing']}
                           for gap in summary['gaps']], hide_index=True, width='stretch',
-                         key='automation_health_gaps')
+                         key='automation_health_gaps', table_id='automation_health_panel:render:dataframe:2')
         st.caption('Les écarts comparent le rythme enregistré lors de chaque cycle du service. '
+                   + ('Sur Linux, l’intervalle commence après la fin du passage précédent. '
+                      if cadence == 'after_finish' else '') +
                    'Aucune disponibilité n’est supposée avant le premier passage observé. '
                    'La lecture de ce suivi ne lance ni requête API ni cycle.')
     automation_observation_panel.render(api.STORE_PATH.parent,days=days)

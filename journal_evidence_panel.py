@@ -1,4 +1,5 @@
 """Read-only, protocol-scoped uncertainty beside descriptive journal results."""
+import table_views
 from datetime import datetime, timezone
 from math import isfinite
 
@@ -91,7 +92,7 @@ def render(entries, methods, *, protocol=None):
                          'Intervalle à 95 % · erreur': _interval(loss),
                          'Écart dans les 3 (points de %)': _estimate(top3,100),
                          'Intervalle à 95 % · dans les 3 (points)': _interval(top3,100)})
-        st.dataframe(rows, hide_index=True, width='stretch', key='journal_evidence_comparisons')
+        table_views.dataframe(rows, hide_index=True, width='stretch', key='journal_evidence_comparisons', table_id='journal_evidence_panel:render:dataframe:1')
         for comparison in comparisons:
             excluded = comparison.get('excluded') or {}
             if comparison.get('reason'):

@@ -7,7 +7,7 @@ reads ``load_status``/``load_selections``; ``run_now`` is an explicit action.
 
 import cloud_storage
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import fcntl
 import json
 import os
@@ -109,8 +109,8 @@ def _clock(clock):
 
 def _current(day, fixtures, raw, current):
     """Validate frozen identities and the whole local day, never labels/scores."""
-    if current.astimezone(ZONE).date().isoformat() != day:
-        return False, 'La journée de Kinshasa a changé ; reprise sur les matchs du jour.'
+    if current.astimezone(ZONE).date().isoformat() > day:
+        return False, 'La journée de ces matchs est passée ; aucune prévision rétrospective n’est ajoutée.'
     by_id = {str(item.get('fixture', {}).get('id')): item for item in raw}
     for fixture in fixtures:
         try:
@@ -159,7 +159,7 @@ def _report(root, state, day, report, clock):
 
 
 @cloud_storage.persisted
-def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
+def run(root, clock, fetch=None, *, max_jobs=None, check_time=None, day=None):
     """Prepare the finite frozen queue using provider-checked fetches.
 
     ``fetch(**params)`` returns raw fixture dictionaries, e.g. a worker Gate's
@@ -176,7 +176,11 @@ def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
         raise DailyAnalysisError('Horloge ou actualisation quotidienne invalide.')
     root = _root(root)
     current = _clock(clock)
-    day = current.astimezone(ZONE).date().isoformat()
+    today = current.astimezone(ZONE).date()
+    if day is not None and (type(day) is not date or day < today):
+        raise DailyAnalysisError('Choisissez aujourd’hui ou une date à venir pour préparer une analyse.')
+    requested_day = day
+    day = (day or today).isoformat()
     report = dict(version=VERSION, source='API-Football', day=day, status='completed',
                   started_at=current.isoformat(), created=0, already_recorded=0, attempted=0,
                   diagnostics=[], jobs=[])
@@ -184,13 +188,19 @@ def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
         state = _state(root)
         jobs = state['days'].setdefault(day, {})
         try:
-            raw = api.load_fixtures(root/'fixtures.json')
+            # A frozen plan only needs its own calendar identities. Loading
+            # every historical raw fixture on each resume defeats SQLite's
+            # indexed reads and delays every future preflight.
+            target_ids = {row['match_id'] for job in jobs.values() for row in job['fixtures']}
+            raw = api.load_fixtures(root/'fixtures.json',
+                **({'ids': sorted(target_ids, key=int)} if jobs else {}))
             commits = state.setdefault('plan_commits', {})
             if day not in commits and not jobs:
                 import daily_analysis_engine as engine
                 if check_time is not None:
                     check_time()
-                planned = engine.plan(raw, now=current, existing=())
+                planned = engine.plan(raw, now=current, existing=(),
+                                      **({'day': requested_day} if requested_day is not None else {}))
                 if planned.get('day') != day or not isinstance(planned.get('candidates'), list):
                     raise DailyAnalysisError('Le plan ne correspond pas à la journée de Kinshasa.')
                 report['diagnostics'] = planned.get('diagnostics', [])
@@ -206,6 +216,9 @@ def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
                 report['engine_version'] = commit.get('engine_version')
                 report['diagnostics'] = commit.get('diagnostics', [])
             report['plan_frozen'] = bool(jobs)
+            target_ids = {row['match_id'] for job in jobs.values() for row in job['fixtures']}
+            raw = [row for row in raw if str(row.get('fixture', {}).get('id')) in target_ids]
+            target_leagues = {row['league'] for job in jobs.values() for row in job['fixtures']}
             _write(root/STATE_NAME, state)  # durable BEFORE build or provider preflight
             history = None
             # Round-robin by last attempt: an insufficient first group cannot
@@ -241,14 +254,22 @@ def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
                     current_candidate_id=identity, remaining=sum(value['state'] not in
                         ('recorded', 'expired', 'changed') for value in jobs.values())))
                 if history is None:
-                    history = api.load_matches(root/'fixtures.json')[0]
+                    # A future calendar date must not turn into a future data
+                    # cutoff. Keep the same complete UTC-day boundary as the
+                    # planner, with the real run time as an upper bound.
+                    history = [row for row in api.load_matches(root/'fixtures.json',
+                               leagues=target_leagues, end=current.date().isoformat(),
+                               statuses=api.FINISHED_STATUSES)[0]
+                               if journal._stamp(row['timestamp']).date() < current.date()]
                 if check_time is not None:
                     check_time()
                 try:
-                    frozen = models.build_mixed_methods(history, fixtures)
+                    frozen = models.build_mixed_methods(history, fixtures, decision_at=current)
                 except (ValueError, KeyError, TypeError, OSError):
                     job.update(state='insufficient', reason='L’historique ou les moteurs sont indisponibles pour ce groupe.')
                     continue
+                if check_time is not None:
+                    check_time()
                 if not frozen.get('methods'):
                     job.update(state='insufficient', reason='Aucune méthode commune disponible pour ce groupe.',
                                unavailable=frozen.get('unavailable', {}))
@@ -272,7 +293,7 @@ def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
                     job.update(state='awaiting_preflight', reason='La réponse API ne confirme pas exactement toutes les affiches.')
                     continue
                 api.save_fixtures(fresh, root/'fixtures.json')
-                raw = api.load_fixtures(root/'fixtures.json')
+                raw = api.load_fixtures(root/'fixtures.json', ids=sorted(target_ids, key=int))
                 eligible, reason = _current(day, fixtures, fresh, _clock(clock))
                 if not eligible:
                     job.update(state='changed', reason=reason)
@@ -309,31 +330,36 @@ def run(root, clock, fetch=None, *, max_jobs=None, check_time=None):
 
 
 @cloud_storage.persisted
-def run_now(root=None, *, max_jobs=None):
+def run_now(root=None, *, max_jobs=None, day=None):
     """Explicit UI action sharing the worker's lock and provider quota checks.
 
-    Refresh only today's calendar and ID-scoped preflights. No training or
+    Refresh the explicitly chosen date (today by default) and ID preflights. No training or
     multi-season import is invoked by this action.
     """
     import automation_worker as automation
     root = _root(root)
     config = automation.load_config(root)
     clock = automation._time
+    today = _clock(clock).astimezone(ZONE).date()
+    if day is not None and (type(day) is not date or day < today):
+        raise DailyAnalysisError('Choisissez aujourd’hui ou une date à venir pour préparer une analyse.')
+    requested_day = day
+    day = day or today
     report = dict(requests=0, issues=[])
     with automation._lock(root):
         state = automation._read(root/'automation_state.json', {})
         gate = automation._Gate(root, state, config, None, clock, report)
         try:
             gate.client = api.ApiFootballClient(api.load_key())
-            day = _clock(clock).astimezone(ZONE).date()
             raw = gate.call(date=day.isoformat(), timezone=ZONE.key)
             if any(workspace._stamp(row).astimezone(ZONE).date() != day for row in raw):
                 raise DailyAnalysisError('Le calendrier reçu contient un match hors journée.')
-            if _clock(clock).astimezone(ZONE).date() != day:
+            if _clock(clock).astimezone(ZONE).date() > day:
                 raise DailyAnalysisError('La journée a changé pendant l’actualisation ; relancez la préparation.')
             api.save_fixtures(raw, root/'fixtures.json')
             workspace._mark_calendar_refresh(root/'fixtures.json', day, ZONE.key)
-            result = run(root, clock, gate.call, max_jobs=max_jobs, check_time=gate.check_time)
+            result = run(root, clock, gate.call, max_jobs=max_jobs, check_time=gate.check_time,
+                         **({'day': requested_day} if requested_day is not None else {}))
             result['requests'] = report['requests']
             _write(root/STATUS_NAME, result)
             return result

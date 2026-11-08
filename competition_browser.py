@@ -1,4 +1,5 @@
 """Native, paginated browsing of every competition on the selected day."""
+import table_views
 from datetime import datetime, timezone
 from html import escape
 from math import ceil
@@ -90,7 +91,7 @@ def sorted_options(snapshot, rows, day, *, size=4, sort='matches', now=None):
     return [item['league'] for item in overview.select(values, sort=sort)]
 
 
-def render(snapshot, rows, day, *, selected_league=ALL, key='competition_browser'):
+def render(snapshot, rows, day, *, selected_league=ALL, key='competition_browser', overview_loader=None):
     """Return a league ID only when its explicit analysis button is pressed."""
     st.subheader('Choisir une compétition', icon=':material/trophy:')
     st.caption(f"Compétitions du {day.strftime('%d/%m/%Y')} · Horaires Africa/Kinshasa. "
@@ -102,7 +103,8 @@ def render(snapshot, rows, day, *, selected_league=ALL, key='competition_browser
         per_page = st.selectbox('Compétitions par page', [10,20,50], key=f'{key}_page_size')
     current = datetime.now(timezone.utc)
     try:
-        items = _overview(snapshot, rows, day, size, current.strftime('%Y-%m-%dT%H:%M'), current)
+        items = (overview_loader(size, current) if overview_loader is not None else
+                 _overview(snapshot, rows, day, size, current.strftime('%Y-%m-%dT%H:%M'), current))
     except (ValueError, OSError) as error:
         st.warning('La préparation locale des compétitions est indisponible : '+str(error))
         return None
@@ -129,7 +131,7 @@ def render(snapshot, rows, day, *, selected_league=ALL, key='competition_browser
     if not visible:
         st.info('Aucune compétition ne correspond à ces filtres pour la journée choisie.')
         return None
-    st.html(table_html(visible, size=size, theme='dark' if st.context.theme.type == 'dark' else 'light'))
+    table_views.html_table(table_html(visible, size=size, theme='dark' if st.context.theme.type == 'dark' else 'light'), table_id='competition_browser:overview', key=key)
     st.caption('La préparation historique concerne Clubs + répétitions, pas la précision du modèle. '
                'Elle reste distincte du nombre d’affiches disponibles. CatBoost et contexte sont vérifiés au calcul. '
                'Les résultats du jour UTC actuel sont exclus de l’historique, même pour une date future.')

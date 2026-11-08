@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import api_football as api
 import api_match_workspace as workspace
 import prospective_models as models
+import scenario_proposal_archive as proposal_archive
 
 DB_PATH = Path(__file__).resolve().parent / 'data' / 'api_football' / 'predictions.sqlite3'
 VERSION = 'prediction-journal-v1'
@@ -60,8 +61,9 @@ def _fixtures(fixtures, *, allow_mixed=False):
                 raise JournalError('Les matchs et leurs deux clubs doivent être distincts.')
             if not all(isinstance(row[k], str) and row[k].strip() for k in ('home', 'away')):
                 raise JournalError('Les noms des clubs sont nécessaires.')
+            row['home'], row['away'] = row['home'].strip(), row['away'].strip()
             row['timestamp'] = _stamp(row['timestamp']).replace(tzinfo=None).isoformat(timespec='seconds')
-            if 'season' in fixture:
+            if fixture.get('season') is not None:
                 row['season'] = fixture['season']
             if fixture.get('status', 'TIMED') != 'TIMED' or fixture.get('raw_status', 'NS') != 'NS' or fixture.get('is_upcoming') is False:
                 raise JournalError('Seuls les matchs confirmés et non commencés peuvent être enregistrés.')
@@ -116,6 +118,35 @@ def _connect(path, create=False):
     return con
 
 
+def _has_predictions(con):
+    # A first concurrent writer may have created the file before its schema.
+    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'predictions' not in tables and tables:
+        raise JournalError('Le schéma du journal local est invalide.')
+    return 'predictions' in tables
+
+
+def _entry_from_row(con, row):
+    if sha256(row['payload'].encode()).hexdigest() != row['digest']:
+        raise JournalError('Une prévision enregistrée a été modifiée : journal invalide.')
+    item = json.loads(row['payload'])
+    if 'proposal_manifest' in item:
+        try:
+            proposal_archive.validate_manifest(item['methods'], item['proposal_manifest'])
+        except (ValueError, TypeError, KeyError) as error:
+            raise JournalError('Les propositions enregistrées sont incohérentes : '+str(error)) from None
+    if 'proposal_selection' in item:
+        from adaptive_scenario_proposals import validate
+        try:
+            validate(item['proposal_selection'], item['methods'], item['fixtures'], row['created_at'])
+        except (ValueError, TypeError, KeyError) as error:
+            raise JournalError('La sélection de scénarios enregistrée est incohérente : '+str(error)) from None
+    events = [dict(revision=r['revision'], checked_at=r['checked_at'], **json.loads(r['payload']))
+              for r in con.execute('SELECT * FROM results WHERE prediction_id=? ORDER BY revision', (row['id'],))]
+    latest = events[-1] if events else dict(status='pending', evaluations={}, actual=None, issues=[])
+    return dict(item, id=row['id'], created_at=row['created_at'], **latest, result_history=events)
+
+
 def list_entries(path=None):
     try:
         con = _connect(path)
@@ -127,20 +158,34 @@ def list_entries(path=None):
             # not committed its first schema statement yet. No forecast can
             # exist at that point; do not turn this brief empty state into a
             # spurious error or create storage from a read path.
-            tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if 'predictions' not in tables:
-                if tables:
-                    raise JournalError('Le schéma du journal local est invalide.')
+            if not _has_predictions(con):
                 return []
             for row in con.execute('SELECT * FROM predictions ORDER BY created_at, id'):
-                if sha256(row['payload'].encode()).hexdigest() != row['digest']:
-                    raise JournalError('Une prévision enregistrée a été modifiée : journal invalide.')
-                item = json.loads(row['payload'])
-                events = [dict(revision=r['revision'], checked_at=r['checked_at'], **json.loads(r['payload']))
-                          for r in con.execute('SELECT * FROM results WHERE prediction_id=? ORDER BY revision', (row['id'],))]
-                latest = events[-1] if events else dict(status='pending', evaluations={}, actual=None, issues=[])
-                output.append(dict(item, id=row['id'], created_at=row['created_at'], **latest, result_history=events))
+                output.append(_entry_from_row(con, row))
             return output
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, ValueError, TypeError) as error:
+        if isinstance(error, JournalError):
+            raise
+        raise JournalError('Impossible de lire le journal local des prévisions.') from None
+
+
+def _find_key(key, path=None):
+    """Read one indexed group and its revisions, without decoding the journal.
+
+    Forecast integrity is checked for the requested row just as on a full
+    listing. No cache can hide a concurrent first forecast or result revision.
+    """
+    try:
+        con = _connect(path)
+        if con is None:
+            return None
+        try:
+            if not _has_predictions(con):
+                return None
+            row = con.execute('SELECT * FROM predictions WHERE id=?', (key,)).fetchone()
+            return _entry_from_row(con, row) if row is not None else None
         finally:
             con.close()
     except (sqlite3.Error, OSError, ValueError, TypeError) as error:
@@ -151,13 +196,13 @@ def list_entries(path=None):
 
 def find(fixtures, path=None):
     key = _group_key(_fixtures(fixtures))
-    return next((entry for entry in list_entries(path) if entry['id'] == key), None)
+    return _find_key(key, path)
 
 
 def find_mixed(fixtures, path=None):
     fixtures = _fixtures(fixtures,allow_mixed=True)
     key = _group_key(fixtures)
-    return next((entry for entry in list_entries(path) if entry['id']==key),None)
+    return _find_key(key, path)
 
 
 @cloud_storage.persisted
@@ -202,9 +247,9 @@ def _check_time(fixtures,current,allow_mixed):
     if any(_stamp(row['timestamp'])<=current for row in fixtures):
         raise JournalError('Un coup d’envoi est passé : prévision non enregistrée.')
     if allow_mixed:
-        day=current.astimezone(ZoneInfo('Africa/Kinshasa')).date()
-        if any(_stamp(row['timestamp']).astimezone(ZoneInfo('Africa/Kinshasa')).date()!=day for row in fixtures):
-            raise JournalError('Les nouvelles analyses mixtes doivent contenir uniquement les matchs du jour à Kinshasa.')
+        days = {_stamp(row['timestamp']).astimezone(ZoneInfo('Africa/Kinshasa')).date() for row in fixtures}
+        if len(days) != 1:
+            raise JournalError('Les nouvelles analyses mixtes doivent contenir uniquement les matchs d’une même journée à Kinshasa.')
 
 
 @cloud_storage.persisted
@@ -223,7 +268,12 @@ def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata
     _check_time(fixtures,now_value,allow_mixed)
     if not isinstance(methods, dict) or not methods or set(methods) - set(models.METHODS):
         raise JournalError('Aucune méthode valide à enregistrer.')
-    before = fixtures[0]['timestamp'][:10]
+    from scenario_group_contract import require_recordable
+    try:
+        contract = require_recordable(fixtures, methods, now_value.isoformat())
+    except ValueError as error:
+        raise JournalError('Contrat du groupe invalide : '+str(error)) from None
+    before = contract['common_cutoff']
     for payload in methods.values():
         models.validate_method(payload, len(fixtures))
         if payload.get('source') != source or str(payload.get('league')) != ('mixed' if allow_mixed else fixtures[0]['league']) or payload.get('training_before', '') != before:
@@ -231,7 +281,15 @@ def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata
         if allow_mixed:_mixed_provenance(payload,fixtures,before,leagues)
     raw_fixtures = (api.load_fixtures(api.STORE_PATH, ids=[row['match_id'] for row in fixtures])
                     if raw_fixtures is None else raw_fixtures)
-    raw = {str(r.get('fixture', {}).get('id')): r for r in raw_fixtures}
+    raw = {}
+    for item in raw_fixtures:
+        try:
+            mid = api._numeric_id(item['fixture']['id'], 'match_id')
+        except (ValueError, KeyError, TypeError):
+            raise JournalError('La confirmation API contient une affiche invalide.') from None
+        if mid in raw:
+            raise JournalError('La confirmation API contient plusieurs observations du même match.')
+        raw[mid] = item
     for row in fixtures:
         item = raw.get(row['match_id'])
         try:
@@ -250,9 +308,20 @@ def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata
                 or any(name in safe_meta and not isinstance(safe_meta[name],dict) for name in ('selection','competitions'))):
             raise JournalError('Les métadonnées de sélection du groupe mixte sont invalides.')
     payload = dict(version=VERSION, source=source, league=fixtures[0]['league'], size=len(fixtures),
-                   fixtures=fixtures, methods=methods, metadata=safe_meta)
+                   fixtures=fixtures, methods=methods, metadata=safe_meta,
+                   proposal_manifest=proposal_archive.manifest(methods,
+                       unavailable=safe_meta.get('unavailable'), policy='top3_per_method'),
+                   group_contract=dict(version=contract['version'], status=contract['status'],
+                       validated_at=now_value.isoformat(), history_cutoff_exclusive=before,
+                       decision_at=contract['decision_at'],
+                       ordered_match_ids=[fixture['match_id'] for fixture in fixtures]))
     if allow_mixed:
         payload.update(version=MIXED_VERSION,league='mixed',leagues=leagues,group_kind='mixed')
+    from adaptive_scenario_proposals import is_enabled, capture
+    policy_directory = Path(path or DB_PATH).parent/'scenario_policy'
+    if is_enabled(policy_directory.parent):
+        payload['proposal_selection'] = capture(methods, fixtures, now=now_value,
+                                                artifact_path=policy_directory/'calibration.json')
     encoded = _json(payload)
     key = _group_key(fixtures)
     con = None
@@ -262,6 +331,10 @@ def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata
         if not con.execute('SELECT 1 FROM predictions WHERE id=?', (key,)).fetchone():
             commit_time = current()
             _check_time(fixtures,commit_time,allow_mixed)
+            if (before > commit_time.date().isoformat()
+                    or any(method.get('decision_at') is not None
+                           and _stamp(method['decision_at']) > commit_time for method in methods.values())):
+                raise JournalError('L’horloge précède la décision ou la coupure historique du groupe.')
             con.execute('INSERT INTO predictions VALUES(?,?,?,?)',
                         (key, commit_time.isoformat(timespec='microseconds'), encoded, sha256(encoded.encode()).hexdigest()))
             created = True
@@ -274,7 +347,10 @@ def _record(fixtures,methods,*,source='API-Football',now=None,path=None,metadata
     finally:
         if con:
             con.close()
-    return dict(next(e for e in list_entries(path) if e['id'] == key), created=created)
+    saved = _find_key(key, path)
+    if saved is None:
+        raise JournalError('La prévision enregistrée ne peut pas être relue dans le journal local.')
+    return dict(saved, created=created)
 
 
 def _settle(entry, raw, now):
@@ -291,7 +367,11 @@ def _settle(entry, raw, now):
                 raise ValueError('Les clubs, la compétition ou l’horaire ont changé.')
             short = api._status_short(item)
             schedule = None
-            if check['timestamp'] != fixture['timestamp']:
+            # Terminal administrative states and explicit postponements do not
+            # need a final score to explain a changed schedule. Requiring the
+            # FT-only schedule resolver first hid cancellations as unresolved.
+            if (short not in ('CANC', 'ABD', 'AWD', 'WO', 'PST', 'SUSP', 'INT')
+                    and check['timestamp'] != fixture['timestamp']):
                 from fixture_schedule_resolution import resolve
                 schedule = resolve(entry, fixture, check, status=short, checked_at=now.isoformat())
             if short in ('CANC', 'ABD', 'AWD', 'WO'):
@@ -324,17 +404,26 @@ def _settle(entry, raw, now):
             ranking = [row['sequence'] for row in payload['ranking']]
             evaluations[name] = dict(top1=actual == ranking[0], top3=actual in ranking,
                                       probability=probability, loss=-log(probability))
+        if 'proposal_selection' in entry:
+            from adaptive_scenario_proposals import effective_methods
+            retained = effective_methods(entry)
+            for name, evaluation in evaluations.items():
+                ranking = [item['sequence'] for item in retained.get(name, {}).get('ranking', [])]
+                evaluation['selected_proposals'] = dict(count=len(ranking),
+                    hit=actual in ranking if ranking else None,
+                    rank=ranking.index(actual)+1 if actual in ranking else None,
+                    policy=entry['proposal_selection']['policy']['version'])
     return dict(status=status, actual=actual if status == 'settled' else None,
                 observed=observed, evaluations=evaluations, issues=issues)
 
 
 @cloud_storage.persisted
-def reconcile(raw_fixtures=None, *, now=None, path=None):
+def reconcile(raw_fixtures=None, *, now=None, path=None, fixtures_path=None):
     entries = list_entries(path)
     if not entries:
         return dict(entries=0, changed=0, pending=0, settled=0, void=0, unresolved=0)
     now_value = _now(now)
-    raw_fixtures = (api.load_fixtures(api.STORE_PATH,
+    raw_fixtures = (api.load_fixtures(api.STORE_PATH if fixtures_path is None else fixtures_path,
                     ids=sorted({row['match_id'] for entry in entries for row in entry['fixtures']}, key=int))
                     if raw_fixtures is None else raw_fixtures)
     raw = {str(r.get('fixture', {}).get('id')): r for r in raw_fixtures}

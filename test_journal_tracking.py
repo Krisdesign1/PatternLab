@@ -27,7 +27,7 @@ class TrackingTests(unittest.TestCase):
         self.root=Path(folder.name)
         with patch.object(ml,'load_report',return_value=None), patch.object(models,'_context_neighbors',
                 side_effect=models.SnapshotError('Configuration par contexte absente.')):
-            self.frozen=models.build_methods(sample(),fixtures())
+            self.frozen=models.build_methods(sample(),fixtures(),decision_at=BEFORE)
         self.client=MagicMock()
         self.client.fixtures.return_value=dict(errors=[],results=4,response=raw_fixtures())
         for patcher in (patch.object(tracking,'datetime',FixedTime),patch.object(journal,'_now',return_value=BEFORE),
@@ -160,12 +160,13 @@ class TrackingTests(unittest.TestCase):
         self.assertFalse(api.STORE_PATH.exists())
         estimate = dict(eligible=True, generation='selected-context')
         self.frozen['methods']['context_neighbors'] = context_method()
+        self.frozen['methods']['context_neighbors']['training_before'] = BEFORE.date().isoformat()
         result = tracking.register(sample(),fixtures(),estimate,'context_neighbors')
         self.assertTrue(result['created'])
         self.assertIn('context_neighbors',result['methods'])
         entry=journal.list_entries()[0]
         self.assertEqual(entry['metadata']['selected_engine'],'context_neighbors')
-        self.build.assert_called_with(sample(),fixtures(),estimate=estimate,engine='context_neighbors')
+        self.build.assert_called_with(sample(),fixtures(),estimate=estimate,engine='context_neighbors',decision_at=BEFORE)
         self.client.fixtures.assert_called_once()
 
 

@@ -1,7 +1,8 @@
 """League-specific joint scenario estimates, evaluated on strictly earlier days."""
 from collections import Counter
+from collections.abc import Mapping
 from itertools import product
-from math import log
+from math import fsum, isclose, isfinite, log
 from league_model import VALUES
 from coupon_sizes import validate_size, top_independent
 
@@ -24,11 +25,32 @@ def fit_sequences(sequences, size):
 
 
 def probability(fit, sequence, baseline=False):
+    # A product over zip alone silently scores prefixes or ignores extra legs.
+    # Validate the complete ordered sequence before computing either model.
+    if not isinstance(fit, (list, tuple)) or len(fit) != 3:
+        raise ValueError('Le modèle doit conserver effectifs, nombre de groupes et distributions par position.')
     counts, n, prior = fit
+    if (not isinstance(counts, Mapping) or type(n) is not int or n < 0
+            or not isinstance(prior, (list, tuple))):
+        raise ValueError('Les effectifs ou distributions historiques sont invalides.')
+    validate_size(len(prior))
+    if (not isinstance(sequence, (list, tuple)) or len(sequence) != len(prior)
+            or any(value not in VALUES for value in sequence)):
+        raise ValueError('Le scénario doit conserver un résultat reconnu pour chaque match, dans son ordre.')
+    if type(baseline) is not bool:
+        raise ValueError('Le choix de la référence doit être booléen.')
     p = 1.0
     for dist, v in zip(prior, sequence):
+        if (not isinstance(dist, Mapping) or set(dist) != set(VALUES)
+                or any(isinstance(weight, bool) or not isinstance(weight, (int, float))
+                       or not isfinite(weight) or not 0 <= weight <= 1 for weight in dist.values())
+                or not isclose(fsum(dist.values()), 1, rel_tol=1e-10, abs_tol=1e-12)):
+            raise ValueError('Chaque distribution par position doit contenir trois probabilités finies totalisant un.')
         p *= dist[v]
-    return p if baseline else (counts[tuple(sequence)] + PRIOR_WEIGHT*p)/(n+PRIOR_WEIGHT)
+    count = counts.get(tuple(sequence), 0)
+    if type(count) is not int or not 0 <= count <= n:
+        raise ValueError('L’effectif du scénario est invalide.')
+    return p if baseline else (count + PRIOR_WEIGHT*p)/(n+PRIOR_WEIGHT)
 
 
 def best_sequences(fit, limit=3, baseline=False):

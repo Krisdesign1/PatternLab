@@ -1,4 +1,5 @@
 """Plain-language presentation of experimental scenario forecasts."""
+import table_views
 import streamlit as st
 from scenario_predictor import predict_league, MIN_TRAIN, MIN_TEST
 
@@ -22,10 +23,11 @@ def render_prediction(result):
                 f'Il en faut au moins {MIN_TRAIN} pour proposer une prédiction expérimentale.')
         return
     with st.container(border=True):
-        st.write('**Les trois scénarios proposés**')
-        for i, row in enumerate(forecast['ranking'][:3], 1):
+        st.write('**Les trois premiers du classement de référence**')
+        for i, row in enumerate(forecast['ranking'], 1):
             st.write(f"**{i}. {' → '.join(row['sequence'])}** — estimation : {100*row['probability']:.3g} %")
-        st.caption('Seuls les trois premiers scénarios sont affichés ; leurs probabilités ne sont pas renormalisées. '
+        st.caption('Cette référence historique conserve ses trois premiers rangs ; elle ne définit pas la sélection des nouvelles analyses de matchs. '
+                   'Leurs probabilités ne sont pas renormalisées. '
                    'Les pourcentages sont des estimations du modèle, pas des taux de réussite vérifiés. '
                    'En cas d’égalité, l’ordre d’affichage est conventionnel.')
     st.write(f'Ces propositions concernent un **nouveau groupe de {size} matchs futurs**, '
@@ -62,8 +64,8 @@ def render_prediction(result):
                    'Les horaires identiques suivent l’ordre des identifiants de la source choisie. '
                    'Ce modèle n’utilise ni les équipes ni les compositions ni les cotes.')
         if n:
-            st.dataframe([{'Groupe testé': t['group'], 'Date': t['day'],
+            table_views.dataframe([{'Groupe testé': t['group'], 'Date': t['day'],
                            'Groupes appris': t['training'], 'Premier choix exact': t['top1'],
                            'Dans les trois choix': t['top3'],
                            'Comparaison dans les trois choix': t['baseline_top3']} for t in trials],
-                         hide_index=True, width='stretch')
+                         hide_index=True, width='stretch', table_id='prediction_panel:render_prediction:dataframe:1')

@@ -50,3 +50,5 @@ jobs:
         run: python -m pip check
       - name: Tester sans données ni secrets de production
         run: python -m unittest discover -q
+      - name: Vérifier les préférences des tableaux dans le navigateur
+        run: node --test test_table_view_editor.mjs

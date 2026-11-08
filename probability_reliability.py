@@ -12,7 +12,7 @@ from math import fsum, isclose, isfinite
 from league_model import VALUES, outcome, score
 
 
-VERSION = 'saved-clubs-reliability-v1'
+VERSION = 'saved-clubs-reliability-v2'
 SCHEMA = 'prospective-distribution-v1'
 
 
@@ -109,10 +109,14 @@ def _positions(method, fixtures, *, before=None):
 
 
 def _result(entry, fixture):
-    """Only the selected forecast's current imported observation is used."""
-    if entry.get('status') == 'void':
-        return dict(state='excluded', reason='void')
-    if entry.get('status') not in ('settled', 'pending', 'unresolved'):
+    """Judge the selected forecast's observation for this fixture alone.
+
+    A void group may still contain complete, saved observations of its other
+    fixtures. Those results remain admissible individually; the group itself
+    remains void. The cancelled fixture has no final observation and stays
+    excluded. No later forecast or current provider score fills that absence.
+    """
+    if entry.get('status') not in ('settled', 'pending', 'unresolved', 'void'):
         return dict(state='excluded', reason='unknown_result_status')
     observed = entry.get('observed') or []
     if not isinstance(observed, list):
@@ -125,6 +129,8 @@ def _result(entry, fixture):
         except ValueError:
             continue
     if not matching:
+        if entry.get('status') == 'void':
+            return dict(state='excluded', reason='void')
         return dict(state='excluded' if entry.get('status') in ('settled', 'unresolved') else 'pending',
                     reason='missing_or_unresolved_result' if entry.get('status') != 'pending' else None)
     try:

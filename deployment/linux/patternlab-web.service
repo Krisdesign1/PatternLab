@@ -1,0 +1,42 @@
+[Unit]
+Description=PatternLab Streamlit web application
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=patternlab
+Group=patternlab
+WorkingDirectory=/opt/patternlab
+Environment=HOME=/var/lib/patternlab
+Environment=XDG_CACHE_HOME=/var/lib/patternlab/cache
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PATTERNLAB_STORAGE_MODE=local
+EnvironmentFile=/etc/patternlab/web.env
+UMask=0077
+StateDirectory=patternlab
+StateDirectoryMode=0700
+ExecStartPre=/opt/patternlab/.venv/bin/python /opt/patternlab/deployment/linux/preflight.py --root /opt/patternlab
+ExecStart=/opt/patternlab/.venv/bin/python -m streamlit run /opt/patternlab/app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true --server.enableCORS=true --server.enableXsrfProtection=true --server.fileWatcherType=none --browser.gatherUsageStats=false --client.showErrorDetails=none --browser.serverAddress=${PATTERNLAB_DOMAIN} --browser.serverPort=443 --server.allowedHosts=${PATTERNLAB_DOMAIN} --server.corsAllowedOrigins=https://${PATTERNLAB_DOMAIN}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadWritePaths=/opt/patternlab/data
+
+[Install]
+WantedBy=multi-user.target

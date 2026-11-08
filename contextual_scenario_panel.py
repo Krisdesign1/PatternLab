@@ -1,4 +1,5 @@
 """Joint scenario forecasts for an ordered group of clubs in one competition."""
+import table_views
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -31,14 +32,14 @@ def _fixture_table(fixtures):
 
 
 def _show_forecast(estimate, fixtures):
-    st.dataframe(_fixture_table(fixtures), hide_index=True, width='stretch')
+    table_views.dataframe(_fixture_table(fixtures), hide_index=True, width='stretch', table_id='contextual_scenario_panel:_show_forecast:dataframe:1')
     if not estimate['eligible']:
         st.info(f"Historique insuffisant avant le {estimate['before']} : "
                 f"{estimate['training_groups']} groupes complets et {estimate['training_matches']} matchs. "
                 'Il faut au moins 20 groupes et 30 matchs de cette compétition sur 3 jours.')
         return
     st.markdown('#### Scénarios adaptés à ce groupe de clubs')
-    st.dataframe([
+    table_views.dataframe([
         {'Rang': i + 1, 'Scénario': ' → '.join(row['sequence']),
          'Estimation combinée (%)': 100 * row['probability'],
          'Clubs seuls (%)': 100 * row['club_probability'],
@@ -47,7 +48,7 @@ def _show_forecast(estimate, fixtures):
         for i, row in enumerate(estimate['ranking'])
     ], hide_index=True, width='stretch', column_config={
         name: st.column_config.NumberColumn(name, format='%.3g')
-        for name in ('Estimation combinée (%)', 'Clubs seuls (%)', 'Répétitions seules (%)')})
+        for name in ('Estimation combinée (%)', 'Clubs seuls (%)', 'Répétitions seules (%)')}, table_id='contextual_scenario_panel:_show_forecast:dataframe:2')
     st.caption('Les scénarios suivent l’ordre des matchs affichés. Les trois estimations ne sont pas '
                'renormalisées pour totaliser 100 %. Ce sont des probabilités expérimentales du scénario '
                'entier, pas des taux de réussite mesurés.')
@@ -58,13 +59,13 @@ def _show_forecast(estimate, fixtures):
         st.info('Pour certaines affiches, les précédents des clubs à domicile ou à l’extérieur sont '
                 'insuffisants. Ces affiches utilisent la tendance de la compétition.')
     with st.expander('Historique des clubs utilisé pour ce groupe'):
-        st.dataframe([
+        table_views.dataframe([
             {'Place': i + 1, 'Match': f"{fixture['home']} — {fixture['away']}",
              'Précédents domicile': item['home_profile']['matches'],
              'Précédents extérieur': item['away_profile']['matches'],
              'Deux profils utilisés': item['personalized']}
             for i, (fixture, item) in enumerate(zip(fixtures, estimate['club_estimates']))
-        ], hide_index=True, width='stretch')
+        ], hide_index=True, width='stretch', table_id='contextual_scenario_panel:_show_forecast:dataframe:3')
     with st.expander('Pourquoi ces scénarios sont-ils proposés ?'):
         for row in estimate['ranking']:
             st.write('**' + ' → '.join(row['sequence']) + '**')
@@ -163,12 +164,12 @@ def render_contextual_scenarios(result, league, source):
         else:
             names = {'frequency': 'Répétitions seules', 'clubs': 'Clubs seuls',
                      'combined': 'Clubs + répétitions'}
-            st.dataframe([
+            table_views.dataframe([
                 {'Méthode': names[name], 'Groupes testés': metrics['tested'],
                  'Premier scénario exact': metrics['top1'], 'Dans les trois scénarios': metrics['top3'],
                  'Erreur probabiliste moyenne': metrics['loss']}
                 for name, metrics in evaluation['summary']['models'].items()
-            ], hide_index=True, width='stretch')
+            ], hide_index=True, width='stretch', table_id='contextual_scenario_panel:render_contextual_scenarios:dataframe:1')
             st.caption('Une réussite exige le scénario entier dans le bon ordre. '
                        'L’erreur probabiliste moyenne est meilleure quand elle est plus petite. '
                        'Les trois méthodes sont évaluées sur les mêmes groupes et les mêmes dates.')

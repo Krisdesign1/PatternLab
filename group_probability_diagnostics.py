@@ -8,6 +8,7 @@ from math import fsum
 
 import prospective_models as models
 from saved_model_comparison import marginals
+import scenario_proposal_archive as proposal_archive
 
 
 VERSION = 'frozen-group-probability-diagnostics-v1'
@@ -37,19 +38,23 @@ def inspect(method):
     if not isinstance(method,dict) or not isinstance(method.get('distribution'),dict):
         raise ValueError('La distribution figée complète est nécessaire.')
     size=method['distribution'].get('size')
-    models.validate_method(method,size)
+    proposal_archive.validate_method(method,size)
     ranking=[dict(sequence=list(row['sequence']),probability=float(row['probability']))
              for row in method['ranking']]
-    top3=fsum(row['probability'] for row in ranking)
+    reference=method.get('reference_ranking', method['ranking'][:3])
+    top3=fsum(row['probability'] for row in reference)
     if not 0 <= top3 <= 1+1e-9:
         raise ValueError('La masse du top 3 est invalide.')
     top3=min(top3,1.0)
-    positions=marginals(method)
+    # Marginal diagnostics keep the original frozen model contract. Extra
+    # explicitly proposed choices never change the historical Top3 metric.
+    positions=marginals(dict(method, ranking=reference))
     top1=ranking[0]
     return dict(version=VERSION,size=size,possible_scenarios=3**size,
         distribution_type=method['distribution']['type'],
         top1_sequence=top1['sequence'],top1_probability=top1['probability'],
         ranking=ranking,top3_probability=top3,remaining_probability=1-top3,
+        proposed_count=len(ranking),proposed_probability=fsum(row['probability'] for row in ranking),
         top1_match_probabilities=[dict(position=index+1,result=label,probability=positions[index][label])
                                   for index,label in enumerate(top1['sequence'])],
         assumptions=_assumptions(method['distribution']),

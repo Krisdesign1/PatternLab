@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the separate context archive current after fixture imports
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+AccuracySec=15s
+Unit=patternlab-context-archive.service
+
+[Install]
+WantedBy=timers.target

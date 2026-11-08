@@ -30,7 +30,7 @@ class JournalTests(unittest.TestCase):
     def setUpClass(cls):
         with patch.object(ml, 'load_report', return_value=None), patch.object(models, '_context_neighbors',
                 side_effect=models.SnapshotError('Configuration par contexte absente.')):
-            cls.methods = models.build_methods(sample(), fixtures())['methods']
+            cls.methods = models.build_methods(sample(), fixtures(), decision_at=BEFORE)['methods']
 
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -45,6 +45,102 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(journal.list_entries(self.path), [])
         self.assertEqual(journal.reconcile(path=self.path)['entries'], 0)
         self.assertFalse(self.path.exists())
+
+    def test_new_archive_attests_all_available_methods_and_exact_proposal_union(self):
+        import scenario_proposal_archive as proposals
+        saved = self.record(metadata={'unavailable': {'catboost': 'Modèle absent.'}})
+        info = proposals.validate_manifest(saved['methods'], saved['proposal_manifest'])
+        expected = {tuple(row['sequence']) for method in self.methods.values() for row in method['ranking']}
+        self.assertEqual(info['distinct_proposal_count'], len(expected))
+        self.assertEqual(info['proposal_counts'], {name: len(value['ranking']) for name,value in self.methods.items()})
+        self.assertEqual(info['policy'], 'top3_per_method')
+        self.assertEqual(info['unavailable'], {'catboost': 'Modèle absent.'})
+        self.assertEqual(journal.list_entries(self.path)[0]['proposal_manifest'], info)
+
+    def test_first_forecast_reuse_preserves_its_original_proposal_manifest(self):
+        first = self.record()
+        again = self.record()
+        self.assertFalse(again['created'])
+        self.assertEqual(first['methods'], again['methods'])
+        self.assertEqual(first['proposal_manifest'], again['proposal_manifest'])
+
+    def test_automatic_multi_method_union_survives_archive_export_verdict_table_and_simulation(self):
+        import scenario_tables
+        import scenario_outcomes
+        import bet_simulation
+        saved = self.record()
+        choices = {tuple(row['sequence']) for method in self.methods.values() for row in method['ranking']}
+        club_choices = {tuple(row['sequence']) for row in self.methods['clubs']['ranking']}
+        self.assertGreater(len(choices), 3)
+        actual = next(iter(sorted(choices-club_choices)))
+        raw = raw_fixtures(status='FT')
+        for item,label in zip(raw,actual):
+            ht,ft = {'1st': ((1,0),(1,0)), '2nd': ((0,0),(1,0)), 'Égal': ((0,0),(0,0))}[label]
+            item['score'] = dict(halftime=dict(home=ht[0],away=ht[1]),fulltime=dict(home=ft[0],away=ft[1]))
+        journal.reconcile(raw,now=AFTER,path=self.path)
+        exported = json.loads(json.dumps(journal.list_entries(self.path)[0]))
+        verdict = scenario_outcomes.summarize(exported)
+        self.assertEqual(verdict['state'],'hit')
+        self.assertNotIn('clubs',{item['method'] for item in verdict['matches']})
+        self.assertFalse(exported['evaluations']['clubs']['top3'])
+        matrix = scenario_tables.build_matrix(exported['methods'],actual=exported['actual'])
+        self.assertEqual({row['sequence'] for row in matrix['rows']},choices)
+        self.assertTrue(matrix['actual_in_choices'])
+        simulation = bet_simulation.build([exported],now=AFTER)
+        self.assertEqual({tuple(row['sequence']) for row in simulation['tickets']},choices)
+        self.assertEqual(simulation['summary']['won'],1)
+        self.assertEqual(exported['proposal_manifest'],saved['proposal_manifest'])
+
+    def test_group_lookup_reads_only_its_indexed_forecast_and_latest_revisions(self):
+        first = self.record()
+        journal.reconcile(raw_fixtures(status='FT'), now=AFTER, path=self.path)
+        expected = journal.list_entries(self.path)[0]
+        with patch.object(journal, 'list_entries', side_effect=AssertionError('No full journal scan')):
+            self.assertEqual(journal.find(fixtures(), self.path), expected)
+            self.assertEqual(journal.find_mixed(fixtures(), self.path), expected)
+            # An existing first forecast must also be reused through the index.
+            reused = self.record(metadata={'selected_engine': 'catboost'})
+            self.assertFalse(reused['created'])
+            self.assertEqual(reused['id'], first['id'])
+            self.assertEqual(reused['result_history'], expected['result_history'])
+
+    def test_new_forecast_commit_does_not_reread_the_whole_journal(self):
+        with patch.object(journal, 'list_entries', side_effect=AssertionError('No full journal scan')):
+            first = self.record()
+            self.assertTrue(first['created'])
+            self.assertEqual(journal.find(fixtures(), self.path)['methods'], first['methods'])
+
+    def test_group_lookup_does_not_cache_missing_or_old_result_states(self):
+        self.assertIsNone(journal.find(fixtures(), self.path))
+        self.assertFalse(self.path.exists())
+        first = self.record()
+        self.assertEqual(journal.find(fixtures(), self.path)['status'], 'pending')
+        journal.reconcile(raw_fixtures(status='FT'), now=AFTER, path=self.path)
+        settled = journal.find(fixtures(), self.path)
+        self.assertEqual(settled['id'], first['id'])
+        self.assertEqual(settled['status'], 'settled')
+        self.assertEqual(len(settled['result_history']), 1)
+
+    def test_group_lookup_still_rejects_a_tampered_forecast(self):
+        self.record()
+        with sqlite3.connect(self.path) as con:
+            con.execute('DROP TRIGGER predictions_no_update')
+            con.execute("UPDATE predictions SET payload='{}'")
+        with self.assertRaises(journal.JournalError):
+            journal.find(fixtures(), self.path)
+        with self.assertRaises(journal.JournalError):
+            journal.find_mixed(fixtures(), self.path)
+
+    def test_reconciliation_uses_only_tracked_ids_in_explicit_fixture_store(self):
+        self.record()
+        source = self.path.parent / 'fixtures.json'
+        raw = raw_fixtures(status='FT')
+        journal.api.save_fixtures(raw, source)
+        with patch.object(journal.api, 'load_fixtures', wraps=journal.api.load_fixtures) as load:
+            result = journal.reconcile(now=AFTER, path=self.path, fixtures_path=source)
+        load.assert_called_once_with(source, ids=sorted({r['match_id'] for r in fixtures()}, key=int))
+        self.assertEqual(result['settled'], 1)
+        self.assertEqual(journal.find(fixtures(), self.path)['status'], 'settled')
 
     def test_first_forecast_locked_across_reruns_models_and_generations(self):
         first = self.record()
@@ -137,12 +233,17 @@ class JournalTests(unittest.TestCase):
     def test_context_settles_from_frozen_json_without_backfilling_older_forecasts(self):
         older = self.record()
         methods = dict(copy.deepcopy(self.methods), context_neighbors=context_method())
+        methods['context_neighbors']['training_before'] = BEFORE.date().isoformat()
         existing = journal.record(fixtures(), methods, now=BEFORE, path=self.path,
                                   raw_fixtures=raw_fixtures())
         self.assertFalse(existing['created'])
         self.assertNotIn('context_neighbors', existing['methods'])
         chosen = fixtures()
         for row in chosen: row['match_id'] = str(int(row['match_id'])+100)
+        with patch.object(ml, 'load_report', return_value=None), patch.object(models, '_context_neighbors',
+                side_effect=models.SnapshotError('Configuration par contexte absente.')):
+            methods = dict(models.build_methods(sample(), chosen, decision_at=BEFORE)['methods'],
+                           context_neighbors=copy.deepcopy(methods['context_neighbors']))
         newer = journal.record(chosen, methods, now=BEFORE, path=self.path,
                                raw_fixtures=raw_fixtures(chosen))
         frozen = copy.deepcopy(newer['methods']['context_neighbors'])

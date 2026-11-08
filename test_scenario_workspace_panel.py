@@ -1,7 +1,9 @@
 """Exercise the date-first UI with isolated data and a real small forecast model."""
+from test_table_view_support import static_frames, badge_text
 import copy
 from datetime import date, datetime, timedelta, timezone
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +17,9 @@ import database
 import football_data
 import football_data_panel
 import scenario_workspace_panel as panel
+import analysis_date
+import manual_analysis_panel
+import adaptive_scenario_proposals as adaptive_proposals
 
 
 DAY = date(2026, 10, 18)
@@ -23,6 +28,8 @@ APP_PATH = Path(__file__).resolve().parent / 'app.py'
 CACHED_SNAPSHOT = panel._snapshot
 CACHED_HISTORY = panel._history
 CACHED_READINESS_HISTORY = panel._readiness_history
+REAL_MANUAL_RECORD = panel.manual_archive.record
+REAL_ESTIMATE = panel._estimate.__wrapped__
 
 
 class FrozenDateTime(datetime):
@@ -118,14 +125,18 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self._patch(FrozenDateTime, 'now', side_effect=lambda tz=None:
                     self.now.astimezone(tz) if tz else self.now.replace(tzinfo=None))
         self._patch(panel, 'datetime', FrozenDateTime)
+        self._patch(analysis_date, 'datetime', FrozenDateTime)
         self.ml_report = self._patch(panel.ml, 'load_report', return_value=None)
         self.context_report = self._patch(panel.contextual_validation, 'load_report', return_value=None)
         self.journal_register = self._patch(panel.tracking, 'register', return_value={
             'state':'recorded','id':'synthetic','created':True,'message':'Prévision enregistrée avant match.'})
+        self.manual_save = self._patch(panel.manual_archive, 'record', return_value={
+            'id':'a'*64, 'created':True, 'created_at':NOW.isoformat()})
+        self.selection_policy = self._patch(adaptive_proposals, 'is_enabled', return_value=False)
         self.snapshot = self._patch(panel, '_snapshot', side_effect=self._snapshot)
         self.history = self._patch(panel, '_history', return_value=(self.rows, self.audit))
         self.estimate = self._patch(panel, '_estimate',
-                                    side_effect=lambda result, fixtures, source: panel.forecast(result, fixtures))
+                                    side_effect=lambda result, fixtures, source, **kwargs: panel.forecast(result, fixtures, **kwargs))
         self.evaluation = self._patch(panel, '_evaluate', side_effect=lambda result, source: panel.evaluate(result))
         self.refresh = self._patch(panel.sources, 'refresh_day')
         self.ensure = self._patch(panel.sources, 'ensure_history')
@@ -201,8 +212,8 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
 
     def test_three_pages_render_without_automatic_api_requests(self):
         self.assertEqual(self.at.title[0].value, 'Préparer mes scénarios')
-        self.assertEqual(self.at.date_input(key='workspace_day').value, DAY)
-        self.assertTrue(self.at.date_input(key='workspace_day').disabled)
+        self.assertEqual(self.at.date_input(key='analysis_day_widget').value, DAY)
+        self.assertFalse(self.at.date_input(key='analysis_day_widget').disabled)
         self.at.switch_page('ui_pages/explore.py').run()
         self.assertFalse(self.at.exception)
         self.assertEqual(self.at.title[0].value, 'Explorer les scénarios')
@@ -210,7 +221,7 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.assertFalse(any(item.key == 'show_contextual_scenarios' for item in self.at.checkbox))
         self.at.switch_page('ui_pages/settings.py').run()
         self.assertFalse(self.at.exception)
-        self.assertEqual(self.at.title[0].value, 'Données et réglages')
+        self.assertEqual(self.at.title[0].value, 'Données et sauvegardes')
         self.at.switch_page('ui_pages/analyze.py').run()
         self.assertFalse(self.at.exception)
         self.assertEqual(self.at.title[0].value, 'Préparer mes scénarios')
@@ -257,7 +268,8 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self._assert_idle_network()
 
     def test_open_competition_comparison_loads_history_without_analyzing(self):
-        with patch.object(panel, '_readiness_history', return_value=self.rows) as read:
+        with patch.object(panel, '_competition_overview', wraps=panel._competition_overview) as read, \
+                patch.object(panel, '_readiness_history', side_effect=AssertionError('Unscoped history read')):
             self.at.session_state['workspace_comparison_open'] = True
             self.at.run()
         self.assertFalse(self.at.exception)
@@ -300,6 +312,175 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.assertEqual(self.at.session_state['workspace_forecast']['journal']['state'],'failed')
         self._assert_idle_network()
 
+    def test_anonymous_manual_analysis_is_saved_without_provider_or_admin_calls(self):
+        with patch('admin_access.can_admin', return_value=False):
+            self._select(101,102)
+            self._predict()
+            self.manual_save.assert_called_once()
+            saved = self.manual_save.call_args.args[0]
+            self.assertEqual(saved['forecast'], self.at.session_state['workspace_forecast']['forecast'])
+            self.assertTrue(self.manual_save.call_args.kwargs['require_complete'])
+            self.assertEqual(saved['comparison_methods'], self.at.session_state['workspace_forecast']['comparison_methods'])
+            self.assertEqual(set(saved['comparison_methods']), {'frequency', 'clubs', 'combined'})
+            self.assertEqual([row['match_id'] for row in saved['fixtures']], ['101','102'])
+            self.assertEqual(self.at.session_state['workspace_forecast']['manual_archive']['state'], 'recorded')
+            self.assertTrue(any('sauvegardé automatiquement' in item.value for item in self.at.success))
+            self.journal_register.assert_not_called()
+            self.ensure.assert_not_called()
+            self._assert_idle_network()
+            self.at.run()
+            self.manual_save.assert_called_once()
+
+    def test_anonymous_archive_failure_does_not_claim_a_saved_analysis(self):
+        self.manual_save.side_effect = panel.manual_archive.ManualAnalysisError('Unwritable test archive')
+        with patch('admin_access.can_admin', return_value=False):
+            self._select(101,102)
+            self._predict()
+            self.assertFalse(self.at.exception)
+            self.assertTrue(any('Calcul manuel non sauvegardé' in item.value for item in self.at.warning))
+            self.assertFalse(any('sauvegardé automatiquement' in item.value for item in self.at.success))
+            self.journal_register.assert_not_called()
+            self._assert_idle_network()
+
+    def test_missing_calibration_keeps_all_proposals_before_match_and_same_selection_is_reused(self):
+        self.selection_policy.return_value = True
+        original_snapshot = self._snapshot
+
+        def confirmed_snapshot(day, signature, source):
+            snapshot = original_snapshot(day, signature, source)
+            snapshot['fixtures'] = [dict(row,
+                home_id=str(10000 + int(row['match_id']) * 2),
+                away_id=str(10001 + int(row['match_id']) * 2)) for row in snapshot['fixtures']]
+            return snapshot
+
+        self.snapshot.side_effect = confirmed_snapshot
+        self.manual_save.side_effect = REAL_MANUAL_RECORD
+        path = self.root / 'adaptive_manual.sqlite3'
+        with patch.dict(os.environ, {'PATTERNLAB_STORAGE_MODE': 'local'}), \
+             patch('admin_access.can_admin', return_value=False), \
+             patch.object(panel.manual_archive, 'database_path', return_value=path), \
+             patch.object(panel.manual_archive, '_now', return_value=self.now), \
+             patch.object(adaptive_proposals, 'load_artifact', side_effect=FileNotFoundError('Isolated missing calibration')):
+            self._select(101, 102)
+            self._predict()
+            self.assertFalse(self.at.exception)
+            shown = self.at.session_state['workspace_forecast']
+            saved = panel.manual_archive.list_entries()[0]
+            self.assertEqual(saved['version'], 'manual-analysis-v3')
+            self.assertEqual(shown['proposal_selection'], saved['proposal_selection'])
+            self.assertEqual(shown['comparison_methods'], saved['comparison_methods'])
+            selected = saved['proposal_selection']
+            self.assertEqual(selected['schema'], adaptive_proposals.VERSION)
+            self.assertEqual(selected['unavailable'], {})
+            self.assertEqual(set(selected['methods']), set(saved['comparison_methods']))
+            for name, value in saved['comparison_methods'].items():
+                self.assertEqual(selected['methods'][name]['ranking'], value['ranking'])
+                self.assertEqual(selected['methods'][name]['evidence']['status'], 'unavailable')
+            unique = {tuple(row['sequence']) for value in saved['comparison_methods'].values()
+                      for row in value['ranking']}
+            self.assertEqual(shown['manual_archive']['proposal_count'], len(unique))
+            self.assertGreater(len(unique), 0)
+            self.assertFalse(any('Aucun scénario proposé' in item.value for item in self.at.info))
+            self.at.run()
+            self.assertFalse(self.at.exception)
+            self.assertEqual(len(panel.manual_archive.list_entries()), 1)
+            self.manual_save.assert_called_once()
+            self.journal_register.assert_not_called()
+            self._assert_idle_network()
+
+    def test_manual_saves_after_kinshasa_midnight_with_previous_utc_day_cutoff(self):
+        self.now = datetime(2026, 10, 17, 23, 7, tzinfo=timezone.utc)
+        original_snapshot = self._snapshot
+
+        def identified_snapshot(day, signature, source):
+            value = original_snapshot(day, signature, source)
+            value['fixtures'] = [dict(row, home_id=str(10000+int(row['match_id'])*2),
+                away_id=str(10001+int(row['match_id'])*2)) for row in value['fixtures']]
+            return value
+
+        self.snapshot.side_effect = identified_snapshot
+        self.estimate.side_effect = REAL_ESTIMATE
+        self.manual_save.side_effect = REAL_MANUAL_RECORD
+        self.selection_policy.return_value = True
+        path = self.root/'midnight-manual.sqlite3'
+        with patch.dict(os.environ, {'PATTERNLAB_STORAGE_MODE':'local'}), \
+             patch('admin_access.can_admin', return_value=False), \
+             patch.object(panel.manual_archive, 'database_path', return_value=path), \
+             patch.object(panel.manual_archive, '_now', side_effect=lambda clock=None:self.now), \
+             patch.object(adaptive_proposals, 'load_artifact', side_effect=FileNotFoundError()):
+            self.at.run()
+            self._select(101,102,103)
+            self._predict()
+            self.assertFalse(self.at.exception)
+            self.assertFalse(any('non sauvegardé' in row.value for row in self.at.warning),
+                             [row.value for row in self.at.warning])
+            saved = panel.manual_archive.list_entries()[0]
+            self.assertEqual(saved['day'], '2026-10-18')
+            self.assertEqual(saved['history_cutoff_exclusive'], '2026-10-17')
+            self.assertEqual(saved['forecast']['before'], '2026-10-17')
+            self.assertTrue(all(method['training_before']=='2026-10-17'
+                                for method in saved['comparison_methods'].values()))
+            self.assertEqual(saved['proposal_selection']['unavailable'], {})
+            self.assertEqual(len(saved['proposal_selection']['methods']), 3)
+            self._assert_idle_network()
+
+    def test_anonymous_workspace_saves_real_sqlite_and_opens_exact_manual_history(self):
+        original_snapshot = self._snapshot
+
+        def confirmed_snapshot(day, signature, source):
+            snapshot = original_snapshot(day, signature, source)
+            snapshot['fixtures'] = [dict(row,
+                home_id=str(10000 + int(row['match_id']) * 2),
+                away_id=str(10001 + int(row['match_id']) * 2)) for row in snapshot['fixtures']]
+            return snapshot
+
+        self.snapshot.side_effect = confirmed_snapshot
+        self.manual_save.side_effect = REAL_MANUAL_RECORD
+        path = self.root / 'manual_analyses.sqlite3'
+        with patch.dict(os.environ, {'PATTERNLAB_STORAGE_MODE': 'local'}), \
+             patch('admin_access.can_admin', return_value=False), \
+             patch.object(panel.manual_archive, 'database_path', return_value=path), \
+             patch.object(panel.manual_archive, '_now', return_value=self.now), \
+             patch('journal_panel._now', return_value=self.now), \
+             patch('journal_panel._today', return_value=DAY), \
+             patch.object(manual_analysis_panel, '_now', return_value=self.now):
+            self._select(101, 102)
+            self._predict()
+            payload = self.at.session_state['workspace_forecast']
+            self.assertEqual(payload['manual_archive']['state'], 'recorded')
+            stored = panel.manual_archive.list_entries()
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0]['id'], payload['manual_archive']['id'])
+            self.assertEqual(stored[0]['comparison_methods'], payload['comparison_methods'])
+            self.assertEqual(stored[0]['version'], 'manual-analysis-v2')
+            methods = payload['comparison_methods']
+            proposals = {tuple(item['sequence']) for method in methods.values() for item in method['ranking']}
+            self.assertGreater(len(proposals), 3)
+            self.assertEqual(stored[0]['forecast']['ranking'],
+                             json.loads(json.dumps(payload['forecast']['ranking'])))
+            self.assertEqual([row['match_id'] for row in stored[0]['fixtures']], ['101', '102'])
+            self.at.run()
+            self.assertFalse(self.at.exception)
+            self.assertEqual(len(panel.manual_archive.list_entries()), 1)
+            self.manual_save.assert_called_once()
+            self.at.switch_page('ui_pages/journal.py').run()
+            self.assertFalse(self.at.exception)
+            self.assertFalse(any(item.key=='journal_type' for item in self.at.segmented_control))
+            self.at.button(key='journal_browser_open_manual:'+stored[0]['id']).click().run()
+            self.assertFalse(self.at.exception)
+            scenarios = next(frame for frame in static_frames(self.at) if 'Scénario complet' in frame.columns)
+            from manual_scenario_progress import project
+            following = project(stored[0], dict(status='pending', actual=None))
+            self.assertEqual(list(scenarios['Scénario complet']),
+                             [badge_text(manual_analysis_panel._colored_sequence(row['sequence'])) for row in following['rows']])
+            self.assertEqual(len(scenarios), len(proposals))
+            self.assertEqual(list(scenarios['Probabilité enregistrée (moteur choisi)']),
+                             [manual_analysis_panel._percentage(row['probability']) if row['probability'] is not None
+                              else 'Non conservée' for row in following['rows']])
+            self.journal_register.assert_not_called()
+            self.ensure.assert_not_called()
+            self._assert_idle_network()
+
     def test_historical_evaluation_persists_only_for_the_analyzed_group(self):
         self._select(101, 102)
         self._predict()
@@ -328,12 +509,12 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.evaluation.assert_called_once()
         self._assert_idle_network()
 
-    def test_selection_and_source_revision_hide_stale_forecasts_until_recalculated(self):
+    def test_only_selection_changes_hide_results_data_revisions_keep_the_frozen_forecast(self):
         self._select(101, 102)
         self._predict()
         self._select(103)
         self.assertFalse(self._scenario_metrics())
-        self.assertTrue(any('La sélection ou les données ont changé' in row.value for row in self.at.caption))
+        self.assertTrue(any('La sélection ou le moteur a changé' in row.value for row in self.at.caption))
         self.estimate.assert_called_once()
         self._predict()
         self.assertEqual(self.estimate.call_count, 2)
@@ -343,7 +524,7 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.signature.return_value = (str(self.root), 2, 2)
         self.at.run()
         self.assertFalse(self.at.exception)
-        self.assertFalse(self._scenario_metrics())
+        self.assertEqual(len(self._scenario_metrics()), 1)
         self.assertEqual(self.estimate.call_count, 2)
         self._assert_idle_network()
 
@@ -362,21 +543,20 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.now = NOW + timedelta(days=1)
         self.at.run()
         self.assertFalse(self.at.exception)
-        self.assertEqual(self.at.date_input(key='workspace_day').value, DAY + timedelta(days=1))
+        self.assertEqual(self.at.date_input(key='analysis_day_widget').value, DAY + timedelta(days=1))
         self.assertNotIn('workspace_forecast', self.at.session_state)
         self.assertFalse(self._scenario_metrics())
         self.assertFalse(self.at.checkbox)
         self.assertEqual(self.estimate.call_count, 2)
         self._assert_idle_network()
 
-    def test_persisted_future_or_past_date_cannot_move_the_analyser_off_today(self):
+    def test_obsolete_local_widget_cannot_override_shared_day(self):
         for stale in (DAY + timedelta(days=8), DAY - timedelta(days=8)):
             self.at.session_state['workspace_day'] = stale
             self.snapshot.reset_mock()
             self.at.run()
             self.assertFalse(self.at.exception)
-            self.assertEqual(self.at.date_input(key='workspace_day').value, DAY)
-            self.assertTrue(self.at.date_input(key='workspace_day').disabled)
+            self.assertEqual(self.at.date_input(key='analysis_day_widget').value, DAY)
             self.assertEqual(self.snapshot.call_args.args[0], DAY)
         self.estimate.assert_not_called()
         self.journal_register.assert_not_called()
@@ -386,11 +566,45 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.now = datetime(2026, 10, 18, 23, 0, tzinfo=timezone.utc)
         self.at.run()
         self.assertFalse(self.at.exception)
-        self.assertEqual(self.at.date_input(key='workspace_day').value, date(2026, 10, 19))
+        self.assertEqual(self.at.date_input(key='analysis_day_widget').value, date(2026, 10, 19))
         self.assertEqual(self.snapshot.call_args.args[0], date(2026, 10, 19))
         self.estimate.assert_not_called()
         self.refresh.assert_not_called()
         self._assert_idle_network()
+
+    def test_tomorrow_can_be_predicted_without_advancing_the_real_clock(self):
+        self.at.button(key='analysis_tomorrow').click().run()
+        tomorrow = DAY + timedelta(days=1)
+        self.assertFalse(self.at.exception)
+        self.assertEqual(self.snapshot.call_args.args[0], tomorrow)
+        self.at.selectbox(key=league_key(tomorrow)).set_value('39').run()
+        for mid in (101, 102):
+            self.at.checkbox(key=match_key(mid, tomorrow)).check().run()
+        self._predict()
+        self.assertEqual(self.at.session_state['workspace_forecast']['context'][0], tomorrow.isoformat())
+        self.assertTrue(self.journal_register.called)
+        self.assertEqual(self.now, NOW)
+        self.at.run()
+        self.assertTrue(self._scenario_metrics())
+        self.at.button(key='analysis_today').click().run()
+        self.assertFalse(self.at.exception)
+        self.assertNotIn('workspace_forecast', self.at.session_state)
+        self._assert_idle_network()
+
+    def test_past_calendar_remains_consultable_without_creating_a_forecast(self):
+        past = DAY - timedelta(days=3)
+        self.at.date_input(key='analysis_day_widget').set_value(past).run()
+        self.at.selectbox(key=league_key(past)).set_value('39').run()
+        self.assertFalse(self.at.exception)
+        self.assertEqual(self.snapshot.call_args.args[0], past)
+        self.assertTrue(all(widget.disabled for widget in self.at.checkbox))
+        self.estimate.assert_not_called()
+        self.journal_register.assert_not_called()
+
+    def test_future_prediction_history_excludes_current_and_future_utc_days(self):
+        rows = [dict(self.rows[0], day=day) for day in ('2026-10-17', '2026-10-18', '2026-10-19')]
+        actual = panel._prediction_history(rows, [fixture(101, DAY + timedelta(days=1))])
+        self.assertEqual([row['day'] for row in actual], ['2026-10-17'])
 
     def test_stale_snapshot_cannot_offer_yesterday_or_tomorrow_fixtures(self):
         snapshot = self._snapshot(DAY, (), 'API-Football')
@@ -419,8 +633,8 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
 
     def test_midnight_during_forecast_stops_registration_and_old_results_display(self):
         self._select(101, 102)
-        def crossing(result, fixtures, source):
-            estimate = panel.forecast(result, fixtures)
+        def crossing(result, fixtures, source, **kwargs):
+            estimate = panel.forecast(result, fixtures, **kwargs)
             self.now = NOW + timedelta(days=1)
             return estimate
         self.estimate.side_effect = crossing
@@ -598,7 +812,7 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.refresh.assert_not_called()
         self._assert_idle_network()
 
-    def test_catboost_is_explicit_and_new_generation_invalidates_display(self):
+    def test_catboost_is_explicit_and_new_generation_preserves_the_saved_display(self):
         self.ml_report.return_value = {'deployment': {'generation': 'one', 'trained_through': '2026-10-17'}}
         learned = self._patch(panel, '_ml_estimate', side_effect=lambda rows, fixtures, source, generation:
                               panel.forecast(panel._history_result(rows, fixtures[0]['league'], len(fixtures)), fixtures))
@@ -613,10 +827,13 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.assertEqual(self.at.session_state['workspace_forecast']['engine'], 'catboost')
         self.assertFalse(any(item.key == 'workspace_evaluate' for item in self.at.button))
         self.assertEqual(len(self._scenario_metrics()), 1)
+        frozen = copy.deepcopy(self.at.session_state['workspace_forecast'])
         self.ml_report.return_value['deployment']['generation'] = 'two'
         self.at.run()
         self.assertFalse(self.at.exception)
-        self.assertEqual(len(self._scenario_metrics()), 0)
+        self.assertEqual(len(self._scenario_metrics()), 1)
+        self.assertEqual(self.at.session_state['workspace_forecast'], frozen)
+        learned.assert_called_once()
         self._assert_idle_network()
 
     def test_context_engine_is_explicit_explains_neighbors_and_tracks_generation(self):
@@ -649,10 +866,13 @@ class ScenarioWorkspacePanelTests(unittest.TestCase):
         self.assertTrue(any('poids nul' in item.value for item in self.at.info))
         self.assertTrue(any('Identifiants API des matchs' in item.value.columns for item in self.at.dataframe))
         self.assertEqual(self.journal_register.call_args.args[3], 'context_neighbors')
+        frozen = copy.deepcopy(self.at.session_state['workspace_forecast'])
         self.context_report.return_value['deployment']['generation'] = 'context-two'
         self.at.run()
         self.assertFalse(self.at.exception)
-        self.assertFalse(any('Estimation du scénario complet' in item.label for item in self.at.metric))
+        self.assertTrue(any('Estimation du scénario complet' in item.label for item in self.at.metric))
+        self.assertEqual(self.at.session_state['workspace_forecast'], frozen)
+        engine.assert_called_once()
         self._assert_idle_network()
 
     def test_missing_context_configuration_disables_prediction_without_silent_fallback(self):

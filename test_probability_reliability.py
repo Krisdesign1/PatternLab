@@ -160,8 +160,63 @@ class ProbabilityReliabilityTests(unittest.TestCase):
         self.assertEqual(result['excluded'], 1)
         item['status'] = 'void'
         result = self.result([item])
+        self.assertEqual(result['evaluated'], 1)
+        self.assertEqual(result['excluded'], 1)
+        self.assertEqual(result['result_exclusions'], {'void': 1})
+
+    def test_valid_individual_in_void_group_counts_without_settling_group(self):
+        item = entry(status='void')
+        item['observed'] = item['observed'][:1]
+        item.update(actual=None, evaluations={}, issues=['Match 2 annulé, abandonné ou attribué.'])
+        original = deepcopy(item)
+        result = self.result([item])
+        rows = {row['match_id']: row for row in result['records']}
+        self.assertEqual(rows['1']['state'], 'evaluated')
+        self.assertEqual(rows['1']['actual'], '2nd')
+        self.assertEqual(rows['1']['probabilities'], item['methods']['clubs']['distribution']['distributions'][0])
+        self.assertEqual(rows['2']['state'], 'excluded')
+        self.assertEqual(rows['2']['reason'], 'void')
+        self.assertNotIn('actual', rows['2'])
+        self.assertEqual(item, original)
+
+    def test_first_void_group_still_anchors_probabilities_before_later_settled_forecast(self):
+        first = entry(status='void', identity='first')
+        first['observed'] = first['observed'][:1]
+        later = entry(identity='later', created='2026-10-20T11:00:00Z', probabilities=[
+            {'1st': .9, 'Égal': .05, '2nd': .05}, {'1st': .1, 'Égal': .8, '2nd': .1}])
+        result = self.result([later, first])
+        self.assertEqual(result['evaluated'], 1)
+        self.assertEqual(result['excluded'], 1)
+        self.assertEqual({row['entry_id'] for row in result['records']}, {'first'})
+        self.assertEqual(result['records'][0]['probabilities'],
+                         first['methods']['clubs']['distribution']['distributions'][0])
+
+    def test_void_group_does_not_admit_invalid_conflicting_or_premature_individual_scores(self):
+        for mutation in ('label', 'score', 'conflicting', 'premature'):
+            with self.subTest(mutation=mutation):
+                item = entry(status='void')
+                item['observed'] = item['observed'][:1]
+                if mutation == 'label':
+                    item['observed'][0]['value'] = '1st'
+                elif mutation == 'score':
+                    item['observed'][0].update(ht='2-0', ft='1-0', value='1st')
+                elif mutation == 'conflicting':
+                    item['observed'].append(dict(match_id='1', ht='2-0', ft='2-0', value='1st'))
+                else:
+                    item['checked_at'] = '2026-10-20T11:59:59Z'
+                result = self.result([item])
+                self.assertEqual(result['evaluated'], 0)
+                self.assertEqual(result['excluded'], 2)
+                self.assertEqual(result['result_exclusions'],
+                                 {'invalid_or_conflicting_result': 1, 'void': 1})
+
+    def test_void_group_without_saved_observations_never_invents_a_result(self):
+        item = entry(status='void')
+        item['observed'] = []
+        result = self.result([item])
         self.assertEqual(result['evaluated'], 0)
         self.assertEqual(result['excluded'], 2)
+        self.assertEqual(result['result_exclusions'], {'void': 2})
 
     def test_current_score_corrections_are_validated_against_result_label(self):
         item = entry()

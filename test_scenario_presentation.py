@@ -63,5 +63,42 @@ class PresentationTests(unittest.TestCase):
             with self.assertRaises(ValueError):presentation.forecast_methods(value)
             self.assertEqual(value,before)
 
+    def test_renderer_reuses_complete_archived_comparison_without_history_recalculation(self):
+        value = payload()
+        methods = presentation.forecast_methods(value)
+        value['comparison_methods'] = copy.deepcopy(methods)
+        value.pop('result')
+        with patch.object(presentation, 'fit_sequences', side_effect=AssertionError('No reconstruction')):
+            returned = presentation.forecast_methods(value)
+        self.assertEqual(returned, methods)
+        returned['clubs']['ranking'].clear()
+        self.assertEqual(value['comparison_methods'], methods)
+
+    def test_captured_comparison_cannot_replace_the_selected_forecast(self):
+        value = payload()
+        value['comparison_methods'] = presentation.forecast_methods(value)
+        value['comparison_methods']['combined']['ranking'][0]['probability'] /= 2
+        with self.assertRaises(ValueError):
+            presentation.forecast_methods(value)
+
+    def test_optional_full_learned_distribution_preserves_selected_order_and_mass(self):
+        value = payload()
+        frozen = presentation.forecast_methods(value)['combined']
+        for engine, name in (('catboost', 'catboost'), ('context_neighbors', 'context_neighbors')):
+            with self.subTest(engine=engine):
+                supplied = dict(value, engine=engine, frozen_selected_method=copy.deepcopy(frozen))
+                before = copy.deepcopy(supplied)
+                with patch('catboost_scenarios.train', side_effect=AssertionError('No training')):
+                    returned = presentation.forecast_methods(supplied)
+                self.assertEqual(returned, {name:frozen})
+                self.assertEqual(supplied, before)
+
+    def test_optional_full_distribution_cannot_attach_another_ranking(self):
+        value = payload()
+        frozen = presentation.forecast_methods(value)['clubs']
+        value.update(engine='catboost', frozen_selected_method=frozen)
+        with self.assertRaises(ValueError):
+            presentation.forecast_methods(value)
+
 
 if __name__=='__main__':unittest.main()

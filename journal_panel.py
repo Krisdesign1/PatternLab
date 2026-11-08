@@ -1,8 +1,11 @@
 """Prospective results, never filled with retrospective example predictions."""
+import table_views
 import json
 from datetime import datetime
 
 import streamlit as st
+from adaptive_scenario_proposals import effective_methods
+from analysis_date import get_selected_day
 import admin_access
 from cloud_ui import guarded
 
@@ -17,6 +20,11 @@ from ux_theme import render_page_header
 import scenario_tables
 import scenario_outcomes
 import scenario_presentation as presentation
+import result_explanations
+import manual_analysis_panel
+import manual_analysis_store as manual_archive
+import manual_journal_rows
+from result_explanations_panel import render_explanation
 
 NAMES = {'frequency': 'Répétitions seules', 'clubs': 'Clubs seuls',
          'combined': 'Clubs + répétitions', 'catboost': 'CatBoost',
@@ -34,9 +42,25 @@ def _today():
 
 
 def _export(entries):
-    st.download_button('Exporter le journal complet', json.dumps(entries, ensure_ascii=False, indent=2),
+    # Serialization can exceed the visible day's work by tens of megabytes.
+    # Keep the same captured journal, but create its file only on request.
+    st.download_button('Exporter les prévisions confirmées (JSON)', lambda: json.dumps(entries, ensure_ascii=False, indent=2),
                        file_name='patternlab_journal_api_football.json', mime='application/json',
-                       icon=':material/download:', key='journal_export')
+                       icon=':material/download:', key='journal_export', on_click='ignore')
+
+
+def _export_manual(entries, day):
+    if entries:
+        import manual_proposal_archive
+        incomplete = sum(not manual_proposal_archive.coverage(entry)['complete'] for entry in entries)
+        if incomplete:
+            st.caption(f'{incomplete} archive(s) manuelle(s) de cette journée ont une comparaison initiale incomplète. '
+                       'Le fichier conserve leurs données originales ; elles ne doivent pas entrer dans un taux '
+                       'de réussite portant sur toutes les propositions initialement affichées.')
+        st.download_button('Exporter les analyses manuelles de cette journée (JSON)',
+            lambda: json.dumps(entries, ensure_ascii=False, indent=2),
+            file_name=f'patternlab_analyses_manuelles_{day.isoformat()}.json', mime='application/json',
+            icon=':material/download:', key='journal_manual_export', on_click='ignore')
 
 
 def _comparison(scoped, league, size, selected_origin, focus_entry=None):
@@ -72,12 +96,12 @@ def _comparison(scoped, league, size, selected_origin, focus_entry=None):
         if len(result['settled']) == 1:
             st.info('Une seule prévision évaluée dans cette cohorte : ce résultat ne permet pas encore '
                     'de juger la précision du modèle sur plusieurs rencontres.')
-        st.dataframe([{'Méthode': NAMES[row['method']], 'Version': row['generation'][:12] or row['version'],
+        table_views.dataframe([{'Méthode': NAMES[row['method']], 'Version': row['generation'][:12] or row['version'],
                        'Groupes communs': row['tested'], 'Exact en premier': row['top1'],
                        'Réussite en premier (%)': 100*row['top1_rate'],
                        'Exact dans les 3 choix': row['top3'], 'Réussite dans les 3 (%)': 100*row['top3_rate'],
                        'Erreur probabiliste moyenne ↓': row['loss']} for row in result['summary']],
-                     hide_index=True, width='stretch')
+                     hide_index=True, width='stretch', table_id='journal_panel:_comparison:dataframe:1')
         if current['pending'] or current['unresolved']:
             st.caption(f"{current['pending']} groupe(s) attendent encore leurs résultats ; "
                        f"{current['unresolved']} nécessitent une vérification et restent exclus des taux.")
@@ -102,7 +126,7 @@ def _comparison(scoped, league, size, selected_origin, focus_entry=None):
             st.line_chart(chart, x='Date des prévisions UTC', y='Réussite exacte dans les 3 (%)', color='Méthode')
             st.caption('Cumul des seuls groupes actuellement évalués de cette cohorte, par date de prévision. '
                        'Les points sont recalculés lorsque des résultats arrivent ou sont corrigés ; la courbe ne mesure pas une certitude.')
-            st.dataframe(chart, hide_index=True, width='stretch')
+            table_views.dataframe(chart, hide_index=True, width='stretch', table_id='journal_panel:_comparison:dataframe:2')
 
 
 def _clear_analysis_link():
@@ -111,6 +135,7 @@ def _clear_analysis_link():
 
 def _detail(entry, day, daily, *, clock_day):
     outcome = scenario_outcomes.summarize(entry)
+    scenario_tables.render_archive_scope(entry)
     competition = entry['metadata'].get('competition', entry['league'])
     display_competition = journal_browser._markdown(competition)
     st.subheader(f"{display_competition} · {entry['size']} matchs", icon=':material/schema:')
@@ -120,30 +145,37 @@ def _detail(entry, day, daily, *, clock_day):
     st.caption(f"Origine : {ORIGINS[performance.origin(entry)]} · {performance.observed_count(entry)}/{entry['size']} "
                f"matchs terminés avec scores exploitables · Statut : {STATUSES[entry['status']]}")
     scenario_tables.render_outcome(outcome, show_sequence=True)
+    from scenario_group_contract_panel import render as render_group_contract
+    render_group_contract(entry, key=f'journal_group_contract_{entry["id"]}')
     if entry['status'] == 'pending':
         st.info('Ce groupe attend encore des résultats. Ses prévisions restent visibles et ne sont pas comptées comme des échecs.')
     elif entry['status'] == 'void':
         st.info('Ce groupe est annulé du suivi et ne participe pas aux taux de réussite.')
     elif entry['status'] == 'unresolved':
         st.warning('Ce groupe nécessite une vérification des matchs indiqués ci-dessous. Il ne participe pas aux taux de réussite.')
+    render_explanation(entry, key=f'journal_results_{entry["id"]}')
     if st.button('Actualiser les résultats API de ce groupe', icon=':material/refresh:', key='journal_refresh', disabled=not admin_access.can_admin()):
         admin_access.require_admin()
         if _today() != clock_day:
             st.rerun()
         try:
             with st.spinner('Vérification des scores à la pause et à 90 minutes…'):
-                tracking.refresh_entry(entry)
+                tracking.refresh_entry({key: value for key, value in entry.items() if key != 'result_explanation'})
             st.rerun()
         except (journal.JournalError, api_football.ApiFootballError, ValueError) as error:
             st.error(str(error))
     st.caption('Une requête API pour ce groupe. Les résultats déjà importés sont rapprochés localement '
                'à l’ouverture de cette page et lors des actualisations du calendrier. Aucun modèle n’est réentraîné.')
     observed = {row['match_id']: row for row in entry.get('observed', [])}
+    explanation = {str(row['match_id']): row for row in
+                   (entry.get('result_explanation') or {}).get('matches', [])}
     presentation.render_match_results([{'Ordre': i+1, 'Coup d’envoi (Kinshasa)':
                    journal._stamp(row['timestamp']).astimezone(performance.LOCAL_ZONE).strftime('%d/%m/%Y %H:%M'), 'Domicile': row['home'],
                    'Extérieur': row['away'], 'Score à la pause': observed.get(row['match_id'], {}).get('ht', '—'),
                    'Score à 90 minutes': observed.get(row['match_id'], {}).get('ft', '—'),
-                   'Résultat': observed.get(row['match_id'], {}).get('value', '—')}
+                   'Résultat': observed.get(row['match_id'], {}).get('value', '—'),
+                   'État du résultat': explanation.get(str(row['match_id']), {}).get('label', '—'),
+                   'Motif du suivi': explanation.get(str(row['match_id']), {}).get('reason', '—')}
                   for i, row in enumerate(entry['fixtures'])],key='journal_match_results')
     for issue in entry.get('issues', []):
         st.warning(issue)
@@ -153,18 +185,20 @@ def _detail(entry, day, daily, *, clock_day):
         st.info('Résultats rapprochés après une correction horaire confirmée : mêmes matchs, mêmes clubs et même compétition. '
                 'Les scénarios conservent leur ordre et leurs probabilités d’origine.')
         with st.expander('Horaires corrigés et règle de rapprochement'):
-            st.dataframe([{'Match API': row['match_id'], 'Horaire enregistré · UTC': row['original_timestamp'],
+            table_views.dataframe([{'Match API': row['match_id'], 'Horaire enregistré · UTC': row['original_timestamp'],
                            'Horaire confirmé · UTC': row['effective_timestamp'], 'Règle': row['version']}
-                          for row in corrections], hide_index=True, width='stretch', key='journal_schedule_audit')
+                          for row in corrections], hide_index=True, width='stretch', key='journal_schedule_audit', table_id='journal_panel:_detail:dataframe:1')
             st.caption('Prévision antérieure aux deux horaires, coupure historique compatible avec le match, '
                        'statut final et scores à 90 minutes vérifiés. Les changements de clubs restent à vérifier.')
-    scenario_tables.render_matrix(entry['methods'],actual=outcome.get('actual'),key='journal_scenarios',
+    proposed_methods = effective_methods(entry)
+    scenario_tables.render_matrix(proposed_methods,actual=outcome.get('actual'),key='journal_scenarios',
                                   title='Scénarios enregistrés avant match')
-    diagnostic_methods=[name for name in NAMES if name in entry['methods']]
-    selected_method=st.selectbox('Méthode à expliquer',diagnostic_methods,format_func=NAMES.get,
-                                 key=f'journal_explanation_{entry["id"]}')
-    presentation.render_diagnostic({'size':entry['size']},entry['fixtures'],engine=selected_method,
-                                   saved_methods=entry['methods'])
+    diagnostic_methods=[name for name in NAMES if name in proposed_methods]
+    if diagnostic_methods:
+        selected_method=st.selectbox('Méthode à expliquer',diagnostic_methods,format_func=NAMES.get,
+                                     key=f'journal_explanation_{entry["id"]}')
+        presentation.render_diagnostic({'size':entry['size']},entry['fixtures'],engine=selected_method,
+                                       saved_methods=proposed_methods)
     for name, reason in entry['metadata'].get('unavailable', {}).items():
         st.caption(f"{NAMES.get(name,name)} non enregistré : {reason}")
     with st.expander('Versions et historique des corrections de résultats'):
@@ -216,29 +250,53 @@ def _past_days(entries, today):
 @guarded
 def render_journal():
     today = _today()
+    selected_day = get_selected_day(_now())
     render_page_header('Mes analyses et évaluations',
-                       'Retrouver vos groupes du jour et les évaluations des journées passées.',
+                       'Retrouver vos groupes pour la date choisie et les évaluations des journées passées.',
                        eyebrow='PRÉVISIONS VERROUILLÉES · RÉSULTATS RÉELS', icon=':material/history_edu:')
-    st.caption('Source unique : API-Football. La première prévision de chaque groupe est conservée ; '
-               'un nouveau clic ou un réentraînement ne la remplace pas.')
+    st.caption('Source unique : API-Football. Vos analyses manuelles et les regroupements automatiques '
+               'sont réunis ici. Les scénarios et probabilités enregistrés sont conservés.')
+    manual_counts, linked_manual = {}, None
+    requested_manual = st.query_params.pop('manual_analysis', None)
+    try:
+        manual_counts = manual_archive.days()
+        if requested_manual:
+            linked_manual = manual_archive.get(requested_manual)
+            if linked_manual:
+                st.session_state['journal_view'] = 'today'
+            else:
+                st.info('Cette analyse manuelle n’est pas disponible dans l’historique partagé.')
+    except (manual_archive.ManualAnalysisError, OSError, ValueError):
+        st.warning('Les analyses manuelles enregistrées sont temporairement indisponibles. '
+                   'Les prévisions confirmées restent consultables.')
     try:
         if admin_access.can_admin():
             admin_access.require_admin()
             tracking.reconcile_local(if_changed=True)
-        all_entries = journal.list_entries()
+        all_entries = result_explanations.annotate_entries(journal.list_entries(), now=_now())
         entries = [entry for entry in all_entries if entry.get('group_kind') != 'mixed']
     except (journal.JournalError, api_football.ApiFootballError, ValueError) as error:
         st.error(str(error))
         return
     if _today() != today:
         st.rerun()
-    modes = {'today': 'Aujourd’hui', 'history': 'Historique'}
+    previous_day = st.session_state.get('journal_selected_day_context')
+    if previous_day != selected_day:
+        st.session_state['journal_selected_day_context'] = selected_day
+        if previous_day is not None and not st.session_state.get('analysis_follow_today', False):
+            st.session_state['journal_view'] = 'today'
+    st.session_state.setdefault('journal_view', 'today')
+    modes = {'today': 'Aujourd’hui' if selected_day == today else 'Date sélectionnée', 'history': 'Historique'}
     view = st.segmented_control('Consulter les analyses', list(modes), format_func=modes.get,
-                                default='today', required=True, key='journal_view', persist_state='page')
+                                required=True, key='journal_view', persist_state='page')
     historical = view == 'history'
-    day = today
+    day = selected_day
     if historical:
         counts = _past_days(entries, today)
+        for value, count in manual_counts.items():
+            manual_day = datetime.fromisoformat(value).date()
+            if manual_day < today:
+                counts[manual_day] = counts.get(manual_day, 0) + count
         dates = sorted(counts, reverse=True)
         if not dates:
             _reset_view((today.isoformat(), 'history', None))
@@ -259,9 +317,13 @@ def render_journal():
         st.caption('Les résultats affichés sont les derniers résultats enregistrés. '
                    'Les scénarios et probabilités restent ceux figés avant match.')
     else:
-        st.caption(f'Matchs du jour : {today.strftime("%d/%m/%Y")} · Africa/Kinshasa · UTC+1')
+        st.caption((f'Matchs du jour : {day.strftime("%d/%m/%Y")}' if day == today else
+                    f'Matchs du {day.strftime("%d/%m/%Y")}') + ' · Africa/Kinshasa · UTC+1')
+        if day > today:
+            st.caption('Journée à venir : les prévisions déjà enregistrées restent en attente des résultats. '
+                       'L’heure de calcul et les coupures historiques restent les heures réelles.')
     _reset_view((today.isoformat(), 'history' if historical else 'today', day.isoformat()))
-    if not entries:
+    if not entries and not manual_counts and not linked_manual:
         st.info('Aucune prévision avant match enregistrée pour le moment. Choisissez une compétition, '
                 'puis classez un groupe de matchs à venir dans Analyser des matchs.')
         st.page_link('ui_pages/analyze.py', label='Préparer une première prévision', icon=':material/calendar_month:')
@@ -272,7 +334,27 @@ def render_journal():
             _export(all_entries)
         return
     daily = performance.entries_on_day(entries, day)
+    try:
+        rows = journal_browser_data.build_rows(daily, now=_now(), day=day)
+    except (ValueError, TypeError, KeyError) as error:
+        st.error('Impossible d’afficher les analyses enregistrées : '+str(error))
+        _export(all_entries)
+        return
+    manual_entries, manual_rows = [], []
+    try:
+        manual_entries = manual_archive.list_entries(day=day.isoformat())
+        if manual_entries:
+            ids = sorted({fixture['match_id'] for entry in manual_entries for fixture in entry['fixtures']}, key=int)
+            raw = api_football.load_fixtures(ids=ids)
+            manual_rows = manual_journal_rows.build_rows(manual_entries, raw, now=_now())
+    except (manual_archive.ManualAnalysisError, api_football.ApiFootballError, OSError, ValueError):
+        st.warning('Les résultats locaux des analyses manuelles ne peuvent pas être lus pour le moment.')
+        if manual_entries:
+            manual_rows = manual_journal_rows.build_rows(manual_entries, None, now=_now())
+    rows = sorted(rows + manual_rows, key=lambda row: (row['created_at'], row['id']), reverse=True)
     indexed = {entry['id']: entry for entry in daily}
+    manual_indexed = {'manual:' + entry['id']: entry for entry in manual_entries}
+    manual_results = {row['id']: row['evaluation'] for row in manual_rows}
     requested = st.query_params.pop('analysis', None)
     if requested:
         if isinstance(requested, str) and requested in indexed:
@@ -281,30 +363,61 @@ def render_journal():
             _clear_analysis_link()
             st.session_state.pop('journal_selected_id', None)
             st.info('Cette analyse n’est pas disponible dans la journée consultée. '
-                    'Choisissez sa date dans Historique pour retrouver une évaluation passée.')
+                    'Choisissez sa date dans le calendrier ou dans Historique pour retrouver une évaluation passée.')
+    if linked_manual:
+        identity = 'manual:' + linked_manual['id']
+        manual_indexed[identity] = linked_manual
+        st.session_state['journal_selected_id'] = identity
     selected = st.session_state.get('journal_selected_id')
-    if selected not in indexed:
+    if isinstance(selected, str) and selected.startswith('manual:') and selected not in manual_indexed:
+        try:
+            saved = manual_archive.get(selected.removeprefix('manual:'))
+        except (manual_archive.ManualAnalysisError, OSError, ValueError):
+            saved = None
+        if saved:
+            manual_indexed[selected] = saved
+    if selected not in indexed and selected not in manual_indexed:
         st.session_state.pop('journal_selected_id', None)
         selected = None
-    st.caption((f'{len(daily)} prévision(s) pour les matchs du {day.strftime("%d/%m/%Y")}' if historical else
-                f'{len(daily)} prévision(s) pour les matchs d’aujourd’hui') +
-               f' · {len(entries)} prévision(s) conservée(s) dans le journal complet. '
+    st.caption((f'{len(rows)} prévision(s) pour les matchs du {day.strftime("%d/%m/%Y")}' if historical or day != today else
+                f'{len(rows)} prévision(s) pour les matchs d’aujourd’hui') +
+               f' · {len(entries) + sum(manual_counts.values())} prévision(s) conservée(s) dans le journal complet. '
                'Les journées passées sont consultables dans Historique et exportables.')
-    if not daily:
-        st.info('Aucune prévision enregistrée pour les matchs d’aujourd’hui. '
+    if manual_entries:
+        st.caption(f'{len(daily)} prévision(s) confirmée(s) et {len(manual_entries)} analyse(s) manuelle(s). '
+                   'Le filtre « Sélection manuelle » inclut vos calculs sauvegardés. '
+                   'Les calculs sans confirmation API restent exclus des cohortes de validation.')
+    if not rows and not selected:
+        st.info(('Aucune prévision enregistrée pour les matchs d’aujourd’hui. ' if day == today else
+                 f'Aucune prévision enregistrée pour les matchs du {day.strftime("%d/%m/%Y")}. ') +
                 'Les prévisions des autres journées ne sont pas affichées dans cette vue.')
-        st.page_link('ui_pages/analyze.py', label='Consulter les matchs du jour', icon=':material/calendar_month:')
+        st.page_link('ui_pages/analyze.py', label='Consulter les matchs de cette date', icon=':material/calendar_month:')
         _export(all_entries)
         return
     if selected:
-        if st.button('Retour à l’historique' if historical else 'Retour à mes analyses du jour',
+        if st.button('Retour à l’historique' if historical else
+                     'Retour à mes analyses du jour' if day == today else 'Retour aux analyses de cette date',
                      icon=':material/arrow_back:', key='journal_back'):
             st.session_state.pop('journal_selected_id', None)
             _clear_analysis_link()
             st.rerun()
-        _detail(indexed[selected], day, daily, clock_day=today)
+        if selected in manual_indexed:
+            entry = manual_indexed[selected]
+            result = manual_results.get(selected)
+            if result is None:
+                try:
+                    raw = api_football.load_fixtures(ids=[fixture['match_id'] for fixture in entry['fixtures']])
+                    result = manual_archive.evaluate(entry, raw, now=_now())
+                except (manual_archive.ManualAnalysisError, api_football.ApiFootballError, OSError, ValueError):
+                    result = manual_analysis_panel._unavailable(entry)
+            st.caption('Sélection manuelle · calcul sauvegardé automatiquement. '
+                       'Les résultats proviennent des scores API déjà importés ; '
+                       'ce calcul reste distinct des prévisions confirmées pour la validation du modèle.')
+            manual_analysis_panel._detail(entry, result)
+        else:
+            _detail(indexed[selected], day, daily, clock_day=today)
     else:
-        current = performance.counts(daily)
+        current = manual_journal_rows.summary(rows)
         st.caption('Bilan de la journée, toutes compétitions, tailles et origines confondues.')
         metrics = st.columns(4)
         for column, code, label in zip(metrics, performance.STATUSES,
@@ -312,14 +425,10 @@ def render_journal():
             column.metric(label, current[code])
         st.caption(f"{current['observed_matches']}/{current['expected_matches']} résultats de matchs connus. "
                    'Les groupes qui partagent des matchs restent des analyses distinctes.')
-        try:
-            rows = journal_browser_data.build_rows(daily, now=_now(), day=day)
-        except (ValueError, TypeError, KeyError) as error:
-            st.error('Impossible d’afficher les analyses enregistrées : '+str(error))
-            _export(all_entries)
-            return
-        chosen = journal_browser.render(rows, day, key='journal_browser', historical=historical)
-        if chosen in indexed:
+        chosen = journal_browser.render(rows, day, key='journal_browser', historical=historical,
+                                        selected_date=day != today)
+        if chosen in indexed or chosen in manual_indexed:
             st.session_state['journal_selected_id'] = chosen
             st.rerun()
     _export(all_entries)
+    _export_manual(manual_entries, day)

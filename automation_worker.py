@@ -2,7 +2,8 @@
 
 All known competitions participate. Calendar collection and forecasts concern
 today's Africa/Kinshasa fixtures only. Group anchors persist across updates;
-no group is chosen on results, no forecast is backfilled, no model is fitted here.
+no group is chosen on results and no forecast is backfilled. Isolated daily
+candidates advance between provider tasks without replacing serving models.
 """
 
 import cloud_storage
@@ -13,6 +14,7 @@ import fcntl
 import json
 import math
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import time
@@ -33,6 +35,7 @@ TIMEZONE = workspace.DEFAULT_TIMEZONE
 # Scheduling cadence, not a budget: every history item is still processed.
 # One provider request / one forecast calculation remains indivisible.
 DAY_REFRESH_SECONDS = 60
+DAY_REFRESH_POLICY = 'civil-or-monotonic-refresh-v2'
 
 
 class AutomationError(ValueError):
@@ -398,48 +401,264 @@ def _history(root, config, gate, report, info, clock, *, after_batch=None):
             after_batch()
 
 
-def _refresh_results(root, gate, clock, report, *, after_batch=None):
+def _refresh_results(root, gate, clock, report, *, after_batch=None, max_batches=None):
+    """Refresh due IDs, optionally yielding after a scheduler-sized quantum.
+
+    Checks are durable per ID, so subsequent passages resume the unattempted
+    work. ``due``/``remaining`` describe the latest passage; received, missing
+    and batch counters accumulate within the caller's report.
+    """
+    if max_batches is not None and (type(max_batches) is not int or max_batches < 1):
+        raise AutomationError('Le nombre de lots de résultats doit être un entier positif.')
     due = {}
     checks = gate.state.setdefault('result_checks', {})
-    for entry in journal.list_entries(root / 'predictions.sqlite3'):
-        if entry['status'] == 'void':
-            continue
+    missing_checks = gate.state.setdefault('result_missing', {})
+    import candidate_tracking
+    import high_probability_archive
+    sources = [
+        ('journal', lambda: journal.list_entries(root / 'predictions.sqlite3')),
+        ('candidates', lambda: journal.list_entries(candidate_tracking.database_path(root))),
+        ('probabilities', lambda: [dict(status=entry['status'], fixtures=[entry['fixture']]) for entry in
+            high_probability_archive.latest(high_probability_archive.list_entries(root=root))])]
+    if not cloud_storage.configured():
+        import daily_learning_tracking
+        import argumented_selection_store
+        sources.append(('daily_learning',lambda:[dict(status=entry['status'],fixtures=[entry['fixture']])
+            for entry in daily_learning_tracking.entries(root=root)]))
+        sources.append(('argumented_selection',lambda:[dict(status=entry['status'],fixtures=[entry['fixture']])
+            for entry in argumented_selection_store.entries(root=root)]))
+        import causal_confirmation_worker
+        sources.append(('causal_confirmation',lambda:causal_confirmation_worker.refresh_entries(root=root)))
+    entries = []
+    availability = report.setdefault('result_refresh_sources', {})
+    for name, load in sources:
+        try:
+            entries.extend(load())
+            availability[name] = 'available'
+        except _Pause:
+            raise
+        except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
+            availability[name] = 'unavailable'
+            report['status'] = 'error'
+            report.setdefault('issues', []).append(
+                f'Source {name} indisponible pour la récupération des résultats ; les autres sources restent traitées.')
+    # An administrative group outcome does not close its other fixtures.
+    # Only a confirmed administrative fixture can be omitted individually.
+    void_ids = {row['match_id'] for entry in entries if entry['status'] == 'void' for row in entry['fixtures']}
+    void_raw = {}
+    if void_ids:
+        try:
+            void_raw = {str(item['fixture']['id']): item for item in api.load_fixtures(
+                root / 'fixtures.json', ids=sorted(void_ids, key=int))}
+        except _Pause:
+            raise
+        except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
+            report.setdefault('issues', []).append(
+                'États individuels des groupes annulés indisponibles ; leurs rencontres restent à vérifier.')
+    for entry in entries:
         for row in entry['fixtures']:
             kickoff = journal._stamp(row['timestamp'])
             if kickoff > clock():
                 continue
+            finished = entry['status'] == 'settled'
+            if entry['status'] == 'void':
+                item = void_raw.get(row['match_id'])
+                if item is not None:
+                    from fixture_import_policy import quality_error
+                    if not quality_error(item) and api._status_short(item) in ('CANC', 'ABD', 'AWD', 'WO'):
+                        continue
+                    if api._status_short(item) in api.FINISHED_STATUSES:
+                        try:
+                            api.normalize_fixture(item)
+                            finished = True
+                        except (ValueError, KeyError, TypeError):
+                            pass
             # Finished forecasts receive seven days of correction checks.
-            if entry['status'] == 'settled' and kickoff < clock()-timedelta(days=7):
+            if finished and kickoff < clock()-timedelta(days=7):
                 continue
-            interval = 21600 if entry['status'] == 'settled' else 900
+            interval = 21600 if finished else 900
             if checks.get(row['match_id'], 0) <= clock().timestamp()-interval:
-                due[row['match_id']] = checks.get(row['match_id'], 0)
+                priority = (int(finished), checks.get(row['match_id'], 0))
+                # A shared ID still needed by an unevaluated forecast must not
+                # inherit the lower priority of another, already settled one.
+                due[row['match_id']] = min(due.get(row['match_id'], priority), priority)
     ordered = sorted(due, key=lambda mid: (due[mid], int(mid)))
-    for index in range(0, len(ordered), 20):
+    refresh = report.setdefault('result_refresh', dict(received=0, missing=0, batches=0))
+    refresh.update(due=len(ordered), remaining=len(ordered),
+                   status='pending' if ordered else 'partial' if refresh['missing'] else 'completed')
+    for batch, index in enumerate(range(0, len(ordered), 20)):
+        if max_batches is not None and batch >= max_batches:
+            break
         ids = ordered[index:index+20]
         raw = gate.call(ids='-'.join(ids), timezone='UTC')
-        if {str(r['fixture']['id']) for r in raw} != set(ids):
-            raise AutomationError('Réponse des résultats incomplète : aucun résultat de ce lot modifié.')
-        api.save_fixtures(raw, root / 'fixtures.json')
-        checks.update({mid: clock().timestamp() for mid in ids})
+        # A partial response is not a result for an omitted fixture. Verify
+        # every returned identity before persisting any subset of this lot.
+        try:
+            if not isinstance(raw, list):
+                raise ValueError()
+            received = [api._numeric_id(item['fixture']['id'], 'du match') for item in raw]
+            if len(received) != len(set(received)) or set(received)-set(ids):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError):
+            raise AutomationError('Réponse des résultats invalide : identifiant étranger, répété ou absent ; aucun résultat de ce lot modifié.') from None
+        if raw:
+            api.save_fixtures(raw, root / 'fixtures.json')
+        attempted_at = clock().timestamp()
+        absent = set(ids)-set(received)
+        for mid in ids:
+            if mid in absent:
+                previous = missing_checks.get(mid, {})
+                missing_checks[mid] = dict(first_attempt_at=previous.get('first_attempt_at', attempted_at),
+                    last_attempt_at=attempted_at, attempts=previous.get('attempts', 0)+1,
+                    reason='not_returned_by_api')
+            else:
+                missing_checks.pop(mid, None)
+        # Persist attempts even for absent IDs, so they cannot repeatedly
+        # monopolize the first lot. They remain eligible for a later retry.
+        checks.update({mid: attempted_at for mid in ids})
         gate.save()
+        refresh['received'] += len(received)
+        refresh['missing'] += len(absent)
+        refresh['batches'] += 1
+        refresh['remaining'] = len(ordered)-index-len(ids)
+        refresh['status'] = ('pending' if refresh['remaining'] else
+                             'partial' if refresh['missing'] else 'completed')
+        if absent:
+            report.setdefault('issues', []).append(
+                f'{len(absent)} match(s) absent(s) de la réponse des résultats : aucune issue inventée, '
+                'nouvelle tentative ultérieure ; les autres lots restent traités.')
         if after_batch is not None:
             after_batch()
+
+
+def _candidate_observation(root,report,when=None):
+    if cloud_storage.configured():
+        return
+    try:
+        import candidate_followup_report as observations
+        # Production observations always use their actual UTC capture time.
+        deterministic=when if Path(root).resolve()!=Path(api.DATA_DIR).resolve() else None
+        report['candidate_observation']=observations.capture(root,now=deterministic)
+    except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+        report['candidate_observation']=dict(status='unavailable',
+            reason='Le relevé daté du suivi est indisponible ; les prévisions et leurs règles restent conservées.')
+
+
+def _forecast_checkpoint(gate):
+    """Yield to result collection between indivisible prediction calculations."""
+    gate.check_time()
+    checkpoint = getattr(gate, 'results_checkpoint', None)
+    if checkpoint is not None:
+        checkpoint()
+    if isinstance(gate,_Gate):
+        _track_causal_confirmation(gate.root,gate,gate.report,gate.clock)
+
+
+def _forecast_fetch(gate, **params):
+    _forecast_checkpoint(gate)
+    return gate.call(**params)
+
+
+def _track_candidates(root, gate, report, clock):
+    if not cloud_storage.configured():
+        import candidate_tracking
+        try:
+            report['candidate_tracking'] = candidate_tracking.run_cycle(
+                root, clock=clock, refresh=lambda **params: _forecast_fetch(gate, **params),
+                check_time=lambda: _forecast_checkpoint(gate))
+        except _Pause:
+            raise
+        except (ValueError, OSError, KeyError, TypeError):
+            report['candidate_tracking'] = dict(status='error', reason='Le suivi du candidat nécessite une vérification ; les prévisions habituelles restent séparées.')
+        _candidate_observation(root,report,clock())
+
+
+def _track_daily_learning(root,gate,report,clock):
+    if cloud_storage.configured():return
+    try:
+        import daily_learning_worker
+        report['daily_learning_tracking']=daily_learning_worker.capture_cycle(
+            root,clock=clock,refresh=lambda **params:_forecast_fetch(gate,**params),
+            check_time=lambda:_forecast_checkpoint(gate))
+    except _Pause:
+        raise
+    except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+        report['daily_learning_tracking']=dict(status='unavailable',created=0,
+            reason='Comparaison individuelle indisponible ; aucune prévision reconstruite.')
+
+
+def _track_causal_confirmation(root,gate,report,clock):
+    if cloud_storage.configured():return
+    guarded=isinstance(gate,_Gate)
+    if guarded:
+        if getattr(gate,'causal_confirmation_active',False) is True:return
+        if time.monotonic()<getattr(gate,'causal_confirmation_due',0):return
+        gate.causal_confirmation_active=True
+        gate.causal_confirmation_due=time.monotonic()+30
+    try:
+        import causal_confirmation_worker
+        report['causal_confirmation']=causal_confirmation_worker.capture_cycle(
+            root,clock=clock,refresh=lambda **params:_forecast_fetch(gate,**params),
+            check_time=lambda:_forecast_checkpoint(gate))
+    except _Pause:
+        raise
+    except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+        report['causal_confirmation']=dict(status='unavailable',created=0,
+            reason='Confirmation du candidat causal indisponible ; aucune prévision antidatée.')
+    finally:
+        if guarded:gate.causal_confirmation_active=False
+
+
+def _track_argumented_selection(root,gate,report,clock):
+    if cloud_storage.configured():return
+    try:
+        import argumented_selection_workspace
+        if argumented_selection_workspace.is_enabled(root):
+            report['argumented_selection']=argumented_selection_workspace.capture_cycle(
+                root,clock=clock,refresh=gate.call,check_time=gate.check_time)
+    except _Pause:
+        raise
+    except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+        report['argumented_selection']=dict(status='unavailable',created=0,
+            reason='Sélection argumentée indisponible ; aucune prévision reconstruite.')
+
+
+def _prepare_daily_learning(root,config,gate,report):
+    """Advance a local fit between provider tasks, even in a long API cycle."""
+    if cloud_storage.configured() or not config.get('models_enabled',True):return
+    gate.check_time()
+    try:
+        import daily_learning_worker
+        if daily_learning_worker.is_enabled(root):
+            report['daily_learning_training']=daily_learning_worker.run_training(root,config=config)
+    except (ValueError,OSError,RuntimeError,sqlite3.Error):
+        report['daily_learning_training']=dict(status='error',prepared=0,
+            reason='Préparation quotidienne interrompue ; modèle courant conservé.')
+    gate.check_time()
 
 
 def _forecast(root, config, gate, report, clock, today, now):
     """Process the finite forecast queue using the latest local history."""
     state = gate.state
     _same_day(today, clock)
+    # Give the served daily queue its turn before secondary inference/training.
+    # Its cooperative checkpoints still keep result collection ahead of writes.
     try:
         import daily_analysis_worker
         report['daily_analyses'] = daily_analysis_worker.run(root, clock, gate.call,
-                                                            check_time=gate.check_time)
+                                                            check_time=lambda: _forecast_checkpoint(gate))
     except _Pause:
         raise
     except (ValueError, OSError, ImportError, KeyError, TypeError):
         report['daily_analyses'] = dict(status='error',
             reason='La préparation quotidienne est indisponible ; les autres groupes restent suivis.')
+    _archive_probabilities(root, clock, report)
+    _track_causal_confirmation(root,gate,report,clock)
+    _track_argumented_selection(root,gate,report,clock)
+    if config['models_enabled']:
+        _prepare_daily_learning(root,config,gate,report)
+        _track_daily_learning(root,gate,report,clock)
+    _track_candidates(root,gate,report,clock)
     raw = api.load_fixtures(root / 'fixtures.json')
     info, rows, issues = _inventory(raw, clock())
     day_info, _, _ = _inventory(workspace._day_rows(raw, today, TIMEZONE), clock())
@@ -456,7 +675,7 @@ def _forecast(root, config, gate, report, clock, today, now):
                                   default=clock()), int(g['league']), g['size']))
     import prospective_models as models
     for group in groups:
-        gate.check_time()
+        _forecast_checkpoint(gate)
         _same_day(today, clock)
         fixtures = _fixtures(group, raw_ids, clock())
         job_key = (group['day'], group['league'], group['size'], tuple(group['ids']))
@@ -494,6 +713,7 @@ def _forecast(root, config, gate, report, clock, today, now):
                        unavailable=frozen['unavailable'])
             continue
         # Preflight is AFTER all calculations. No cached NS status can authorize a write.
+        _forecast_checkpoint(gate)
         _same_day(today, clock)
         fresh = gate.call(ids='-'.join(r['match_id'] for r in fixtures), timezone='UTC')
         _same_day(today, clock)
@@ -519,7 +739,7 @@ def _forecast(root, config, gate, report, clock, today, now):
                    unavailable=frozen['unavailable'], reason='Prévision verrouillée avant match.')
 
 
-def _calendar(root, gate, clock, today):
+def _calendar(root, gate, clock, today, *, archive=True):
     _same_day(today, clock)
     raw = gate.call(date=today.isoformat(), timezone=TIMEZONE)
     if any(workspace._stamp(r).astimezone(ZoneInfo(TIMEZONE)).date() != today for r in raw):
@@ -527,12 +747,78 @@ def _calendar(root, gate, clock, today):
     api.save_fixtures(raw, root / 'fixtures.json')
     workspace._mark_calendar_refresh(root / 'fixtures.json', today, TIMEZONE)
     _same_day(today, clock)
+    return _archive_probabilities(root, clock) if archive else dict(status='deferred')
+
+
+def _archive_probabilities(root, clock, report=None):
+    """Keep single-match probabilities ahead of long group/history queues."""
+    import high_probability_workspace
+    try:
+        result = high_probability_workspace.archive_scan(root=root, clock=clock)
+    except (ValueError, OSError, sqlite3.Error):
+        result = dict(status='unavailable')
+        if report is not None:
+            report['issues'].append('Archivage des probabilités individuelles indisponible pour ce passage.')
+    if report is not None:
+        report['probability_archive'] = result
+    return result
 
 
 def _reconcile(root, report, now):
-    settled = journal.reconcile(api.load_fixtures(root / 'fixtures.json'), now=now,
-                                path=root / 'predictions.sqlite3')
-    report.update(settled=settled['settled'], pending=settled['pending'], unresolved=settled['unresolved'])
+    if not cloud_storage.configured():
+        try:
+            import causal_confirmation_worker
+            timing=None if Path(root).resolve()==Path(api.DATA_DIR).resolve() else now
+            report['causal_confirmation_results']=causal_confirmation_worker.reconcile(root,now=timing)
+        except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+            report['causal_confirmation_results']=dict(status='unavailable',
+                reason='Résultats de confirmation indisponibles ; aucun échec déduit.')
+        try:
+            import argumented_selection_store
+            report['argumented_selection_results']=argumented_selection_store.reconcile(root,now=now)
+        except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+            report['argumented_selection_results']=dict(status='unavailable',
+                reason='Résultats de la sélection argumentée indisponibles ; aucun échec déduit.')
+        try:
+            import daily_learning_worker
+            report['daily_learning_results']=daily_learning_worker.reconcile(root,now=now)
+        except (ValueError,OSError,sqlite3.Error,KeyError,TypeError):
+            report['daily_learning_results']=dict(status='unavailable',
+                reason='Résultats des candidats indisponibles ; aucun échec déduit.')
+    try:
+        settled = journal.reconcile(now=now, path=root / 'predictions.sqlite3',
+                                    fixtures_path=root / 'fixtures.json')
+        report['journal_results'] = dict(settled, status='available')
+        report.update(settled=settled['settled'], pending=settled['pending'], unresolved=settled['unresolved'])
+    except _Pause:
+        raise
+    except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
+        report['journal_results'] = dict(status='unavailable')
+        for name in ('settled', 'pending', 'unresolved'):
+            report.pop(name, None)
+        report['status'] = 'error'
+        report.setdefault('issues', []).append(
+            'Rapprochement du journal principal indisponible ; les autres historiques restent traités.')
+    import high_probability_archive
+    try:
+        report['probability_archive_results'] = high_probability_archive.reconcile(root=root, now=now)
+    except _Pause:
+        raise
+    except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
+        report['probability_archive_results'] = dict(status='unavailable')
+        report['status'] = 'error'
+        report.setdefault('issues', []).append('Rapprochement des probabilités individuelles indisponible.')
+    if not cloud_storage.configured():
+        import candidate_tracking
+        try:
+            report['candidate_results'] = candidate_tracking.reconcile(root, now=now)
+        except _Pause:
+            raise
+        except (ValueError, OSError, sqlite3.Error, KeyError, TypeError):
+            report['candidate_results'] = dict(status='unavailable')
+            report['status'] = 'error'
+            report.setdefault('issues', []).append('Rapprochement du suivi des candidats indisponible.')
+        _candidate_observation(root,report,now)
 
 
 class _DayRefresh:
@@ -540,12 +826,32 @@ class _DayRefresh:
 
     No queue is truncated. Resume markers remain the existing imports/attempts;
     no timer or pending in-memory queue is required to survive a restart.
+    Civil UTC and monotonic deadlines are independent: either can make a pass
+    due. This catches a suspension without relying on platform sleep semantics,
+    while a backward civil-clock correction cannot postpone monotonic work.
+    Work still starts only at a cooperative checkpoint, never in a timer thread.
     """
     def __init__(self, root, config, gate, report, clock, today, now, pulse):
         self.root, self.config, self.gate, self.report = root, config, gate, report
         self.clock, self.today, self.now, self.pulse = clock, today, now, pulse
-        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.defer_calendar()
+        self.defer_results()
+        self.servicing_results = False
         self.last_imports = report['history_imports']
+
+    def defer_calendar(self):
+        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.due_wall = self.clock()+timedelta(seconds=DAY_REFRESH_SECONDS)
+
+    def defer_results(self):
+        self.results_due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.results_due_wall = self.clock()+timedelta(seconds=DAY_REFRESH_SECONDS)
+
+    def _calendar_due(self):
+        return time.monotonic() >= self.due or self.clock() >= self.due_wall
+
+    def _results_due(self):
+        return time.monotonic() >= self.results_due or self.clock() >= self.results_due_wall
 
     def mark(self, field):
         if self.gate.state.get('day_service',{}).get('day') != self.today.isoformat():
@@ -561,30 +867,79 @@ class _DayRefresh:
             self.report['monitoring_warning'] = health.MONITORING_WARNING
 
     def during_results(self):
+        self.gate.check_time()
+        _same_day(self.today, self.clock)
         self.mark('results_at')
-        self(final=False,refresh_results=False)
+        # Finish result batches before entering any expensive forecast queue.
+        # A calendar refresh is cheap and does not start group inference.
+        refreshed_calendar = self._calendar_due()
+        if refreshed_calendar:
+            self.pulse.progress('calendar')
+            _calendar(self.root, self.gate, self.clock, self.today, archive=False)
+            self.mark('calendar_at')
+        _reconcile(self.root, self.report, self.clock())
+        self.mark('reconciled_at')
+        self.defer_results()
+        if refreshed_calendar:
+            self.defer_calendar()
         self.pulse.progress('results')
+
+    def check_results(self):
+        """Lightweight result work; never recurse into a forecast calculation."""
+        if self.servicing_results or not self._results_due():
+            return
+        self.servicing_results = True
+        try:
+            # An ID backlog can contain thousands of fixtures. A single
+            # calendar request catches up today's scores after sleep without
+            # waiting for every older ID to receive its turn in that queue.
+            _same_day(self.today, self.clock)
+            refreshed_calendar = self._calendar_due()
+            if refreshed_calendar:
+                self.pulse.progress('calendar')
+                _calendar(self.root, self.gate, self.clock, self.today, archive=False)
+                self.mark('calendar_at')
+            self.pulse.progress('results')
+            _refresh_results(self.root, self.gate, self.clock, self.report, max_batches=1)
+            self.mark('results_at')
+            self.pulse.progress('reconcile')
+            _reconcile(self.root, self.report, self.clock())
+            self.mark('reconciled_at')
+            self.report['result_priority_passes'] = self.report.get('result_priority_passes', 0)+1
+            # A slow result/reconciliation pass must leave a full interval for
+            # the interrupted forecast, rather than being due again on return.
+            self.defer_results()
+            if refreshed_calendar:
+                self.defer_calendar()
+            _write(self.root/'automation_status.json', dict(self.report, status='running',
+                                                           last_updated_at=self.clock().isoformat()))
+        finally:
+            self.servicing_results = False
+            self.pulse.progress('forecasts')
 
     def __call__(self, *, final=False, refresh_results=True):
         self.gate.check_time()
         _same_day(self.today, self.clock)
-        if time.monotonic() < self.due and not (final and self.report['history_imports'] > self.last_imports):
+        if not self._calendar_due() and not (final and self.report['history_imports'] > self.last_imports):
             return
         self.gate.state['next_phase'] = 'results'
         self.gate.save()
         self.pulse.progress('calendar')
-        _calendar(self.root, self.gate, self.clock, self.today)
+        _calendar(self.root, self.gate, self.clock, self.today, archive=False)
         self.mark('calendar_at')
-        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.defer_calendar()
         if refresh_results:
             self.pulse.progress('results')
             self.gate.state['next_phase'] = 'forecasts'
             self.gate.save()
-            _refresh_results(self.root, self.gate, self.clock, self.report,after_batch=self.during_results)
+            _refresh_results(self.root, self.gate, self.clock, self.report,
+                             after_batch=self.during_results, max_batches=1)
             self.mark('results_at')
         self.pulse.progress('reconcile')
         _reconcile(self.root, self.report, self.now)
         self.mark('reconciled_at')
+        if refresh_results:
+            self.defer_results()
         self.pulse.progress('forecasts')
         _same_day(self.today, self.clock)
         # Leave history the next turn if the host interrupts this finite pass.
@@ -599,7 +954,7 @@ class _DayRefresh:
         _write(self.root/'automation_status.json', dict(self.report,status='running',
                                                        last_updated_at=self.clock().isoformat()))
         self.last_imports = self.report['history_imports']
-        self.due = time.monotonic()+DAY_REFRESH_SECONDS
+        self.defer_calendar()
         self.pulse.progress('history')
 
 
@@ -615,6 +970,7 @@ def run_cycle(*, config=None, root=None, client=None, now=None, dry_run=False, m
     config = _config(config if config is not None else load_config(root))
     clock = (lambda: _time(now)) if now is not None else _time
     report = dict(version=VERSION, source='API-Football', status='completed', started_at=clock().isoformat(),
+                  refresh_policy=DAY_REFRESH_POLICY,
                   requests=0, created=0, already_recorded=0, history_imports=0, history_received=0,
                   coverage_competitions=0, groups_considered=0, settled=0, pending=0, issues=[], jobs=[])
     if dry_run:
@@ -656,9 +1012,54 @@ def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
                     gate.client = api.ApiFootballClient(api.load_key())
                 today = _local_day(clock())
                 pulse.progress('calendar')
-                _calendar(root, gate, clock, today)
+                _calendar(root, gate, clock, today, archive=False)
                 day_refresh = _DayRefresh(root, config, gate, report, clock, today, now, pulse)
                 day_refresh.mark('calendar_at')
+                # Results cannot wait behind a multi-hour group preparation.
+                # An immediately resumed, host-limited passage keeps its fair
+                # phase turn after having just attempted this priority pass.
+                state.setdefault('next_phase', 'results')
+                try:
+                    attempted = journal._stamp(state['result_priority_attempted_at'])
+                except (KeyError, ValueError, TypeError):
+                    attempted = None
+                age = (clock()-attempted).total_seconds() if attempted else None
+                if age is None or age < 0 or age >= DAY_REFRESH_SECONDS:
+                    state['result_priority_attempted_at'] = clock().isoformat()
+                    if state['next_phase'] == 'results':
+                        state['next_phase'] = 'forecasts'
+                    gate.save()
+                    pulse.progress('results')
+                    _refresh_results(root, gate, clock, report,
+                                     after_batch=day_refresh.during_results, max_batches=1)
+                    day_refresh.mark('results_at')
+                    _reconcile(root, report, clock())
+                    day_refresh.mark('reconciled_at')
+                    day_refresh.defer_results()
+                gate.results_checkpoint = day_refresh.check_results
+                # The pinned candidate has a short declared capture window.
+                # Give it an inference turn before unrelated training/group jobs.
+                _track_causal_confirmation(root,gate,report,clock)
+                # A shadow comparison can itself take several minutes. Give
+                # the served daily queue one calculation first; its complete
+                # queue still resumes in the normal forecast phase below.
+                pulse.progress('forecasts')
+                try:
+                    import daily_analysis_worker
+                    report['daily_analysis_priority'] = daily_analysis_worker.run(
+                        root, clock, gate.call, max_jobs=1,
+                        check_time=lambda: _forecast_checkpoint(gate))
+                except _Pause:
+                    raise
+                except (ValueError, OSError, ImportError, KeyError, TypeError):
+                    report['daily_analysis_priority'] = dict(status='error',
+                        reason='Premier tour quotidien indisponible ; reprise dans la phase des prévisions.')
+                # The forecast phase already captures the shadow study after
+                # its full daily queue. Only a resumed background phase needs
+                # this early capture; otherwise it would delay that queue.
+                if state.get('next_phase') != 'forecasts':
+                    pulse.progress('forecasts')
+                    _track_candidates(root,gate,report,clock)
                 phases = ('results', 'forecasts', 'history')
                 next_phase = state.get('next_phase', 'results')
                 if next_phase not in phases:
@@ -674,8 +1075,10 @@ def _execute_cycle(root, config, client, clock, report, deadline, now, pulse):
                     state['next_phase'] = phases[(phases.index(phase)+1) % len(phases)]
                     gate.save()
                     if phase == 'results':
-                        _refresh_results(root, gate, clock, report,after_batch=day_refresh.during_results)
+                        _refresh_results(root, gate, clock, report,
+                                         after_batch=day_refresh.during_results, max_batches=1)
                         day_refresh.mark('results_at')
+                        day_refresh.defer_results()
                     elif phase == 'forecasts':
                         _forecast(root, config, gate, report, clock, today, now)
                         day_refresh.mark('forecasts_at')

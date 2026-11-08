@@ -1,4 +1,5 @@
 """Explicit football-data.org access, season preview, and local import controls."""
+import table_views
 from datetime import datetime, timezone
 import json
 
@@ -141,7 +142,7 @@ def _render_import(client, key):
         table, usable, excluded = fixture_preview(batch["fixtures"])
         st.markdown(f"**{len(table)} matchs reçus**, dont **{usable} résultats HT/FT utilisables**.")
         if table:
-            st.dataframe(table[:50], hide_index=True, width="stretch")
+            table_views.dataframe(table[:50], hide_index=True, width="stretch", table_id='football_data_panel:_render_import:dataframe:1')
             st.caption("Aperçu limité aux 50 premiers matchs. L’enregistrement conserve tout le lot, "
                        "y compris le calendrier. Seuls les matchs terminés avec scores HT/90 min "
                        "valides entrent dans les analyses.")
@@ -158,7 +159,7 @@ def _render_import(client, key):
         if excluded:
             st.warning(f"{len(excluded)} match(s) terminé(s) exclus des analyses : "
                        "scores HT/90 min absents ou incohérents.")
-            st.dataframe(excluded, hide_index=True, width="stretch")
+            table_views.dataframe(excluded, hide_index=True, width="stretch", table_id='football_data_panel:_render_import:dataframe:2')
 
 
 def _render_stored(key):
@@ -172,7 +173,7 @@ def _render_stored(key):
         st.caption(f"{len(stored)} matchs enregistrés localement · {usable} résultats utilisables · "
                    f"{len(excluded)} résultats exclus.")
         with st.expander("Calendrier et résultats football-data.org enregistrés"):
-            st.dataframe(table, hide_index=True, width="stretch")
+            table_views.dataframe(table, hide_index=True, width="stretch", table_id='football_data_panel:_render_stored:dataframe:1')
             try:
                 backup = STORE_PATH.read_bytes()
             except OSError:

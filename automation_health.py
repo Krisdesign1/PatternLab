@@ -293,7 +293,8 @@ def load(root, *, now=None, days=7, limit=300):
                              interval_minutes=interval, reasons=reasons, counters=counters,
                              last_seen_at=last_seen,last_progress_at=progress,phase=phase,
                              elapsed_seconds=max(0, (now-_stamp(started)).total_seconds()) if status=='running' else duration,
-                             signal_state=('recent' if (now-_stamp(last_seen)).total_seconds() <= 3*HEARTBEAT_SECONDS
+                             signal_state=('future' if _stamp(last_seen)>now else
+                                           'recent' if (now-_stamp(last_seen)).total_seconds() <= 3*HEARTBEAT_SECONDS
                                            else 'stale') if status=='running' and last_seen else 'unavailable'))
         return dict(rows=rows, total=total, first_started_at=first, truncated=len(values)>limit)
     except (OSError, sqlite3.Error, ValueError, TypeError):
@@ -327,30 +328,44 @@ def confirm_service_interruption(root, ids, *, confirmed_at):
         raise HealthError('L’arrêt confirmé ne peut pas être enregistré dans le journal local.') from None
 
 
-def summarize(view, *, now=None, schedule_expected=False):
-    """Describe observed gaps, without treating a stopped Mac as a model error."""
+def summarize(view, *, now=None, schedule_expected=False, cadence='start_to_start'):
+    """Describe gaps using the observed scheduler's scheduling semantics.
+
+    launchd keeps the historical start cadence. The Linux timer explicitly
+    waits a full interval after completion (OnUnitInactiveSec); a long run must
+    not make that normal wait appear to be an interruption. Unknown run ends
+    cannot supply an expected Linux restart time.
+    """
+    if cadence not in {'start_to_start', 'after_finish'}:
+        raise HealthError('Rythme du planificateur invalide.')
     now = _stamp(now or datetime.now(timezone.utc))
     rows = view['rows']
     counts = {status: sum(row['status'] == status for row in rows) for status in STATUSES}
     completed = [row['duration_seconds'] for row in rows if row['duration_seconds'] is not None]
     service = sorted((row for row in rows if row['origin'] == 'service'), key=lambda row: row['started_at'])
+
+    def expected_after(row):
+        interval = timedelta(minutes=row['interval_minutes'])
+        if cadence == 'after_finish':
+            return _stamp(row['finished_at']) + interval if row['finished_at'] else None
+        expected = _stamp(row['started_at']) + interval
+        return max(expected, _stamp(row['finished_at'])) if row['finished_at'] else expected
+
     gaps = []
     for previous, following in zip(service, service[1:]):
         if previous['status'] == 'running':
             continue  # No known end: do not invent an idle scheduling gap.
-        expected = _stamp(previous['started_at']) + timedelta(minutes=previous['interval_minutes'])
-        if previous['finished_at']:
-            expected = max(expected, _stamp(previous['finished_at']))
+        expected = expected_after(previous)
+        if expected is None:
+            continue
         observed = _stamp(following['started_at'])
         if observed > expected + timedelta(minutes=previous['interval_minutes']/2):
             gaps.append(dict(start=expected.isoformat(), end=observed.isoformat(),
                              minutes=(observed-expected).total_seconds()/60, ongoing=False))
     if schedule_expected and service and service[-1]['status'] != 'running':
         previous = service[-1]
-        expected = _stamp(previous['started_at']) + timedelta(minutes=previous['interval_minutes'])
-        if previous['finished_at']:
-            expected = max(expected, _stamp(previous['finished_at']))
-        if now > expected + timedelta(minutes=previous['interval_minutes']/2):
+        expected = expected_after(previous)
+        if expected is not None and now > expected + timedelta(minutes=previous['interval_minutes']/2):
             gaps.append(dict(start=expected.isoformat(), end=now.isoformat(),
                              minutes=(now-expected).total_seconds()/60, ongoing=True))
     return dict(counts=counts, gaps=gaps, longest_duration=max(completed, default=None),

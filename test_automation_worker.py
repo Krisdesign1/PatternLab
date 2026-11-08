@@ -292,15 +292,18 @@ class WorkerTests(unittest.TestCase):
         self.assertFalse((self.root/'predictions.sqlite3').exists())
 
     def test_daily_counter_and_exhausted_provider_quota_reset_on_next_utc_day(self):
-        client = Client([])
+        client = Client(self.future)
         self.run_cycle(client)
         state = json.loads((self.root/'automation_state.json').read_text())
         state['quota'] = {'requests_remaining_day':0}
         worker._write(self.root/'automation_state.json', state)
         self.assertEqual(self.run_cycle(client)['requests'], 0)
         result = self.run_cycle(client, now=BEFORE+timedelta(days=1))
-        self.assertEqual(result['requests'], 1)
-        self.assertEqual(result['requests_today'], 1)
+        # One calendar request and one deduplicated results batch, shared by
+        # the saved groups and automatically archived individual matches.
+        self.assertEqual(result['requests'], 2)
+        self.assertEqual(result['requests_today'], 2)
+        self.assertEqual(result['status'], 'completed')
 
     def test_old_budgets_high_daily_counter_and_ten_recent_calls_do_not_block(self):
         self.config.update(daily_request_budget=1, cycle_request_budget=1)
@@ -531,7 +534,7 @@ class WorkerTests(unittest.TestCase):
              patch.object(worker,'_forecast',side_effect=tracked('forecasts',forecast)):
             report = self.run_cycle()
         self.assertEqual((report['status'],report['created'],report['history_imports']),('completed',3,1))
-        self.assertEqual(events,['forecasts','history','results','forecasts','results'])
+        self.assertEqual(events,['results','forecasts','history','results','forecasts','results'])
         self.assertEqual(report['day_refreshes'],1)
         self.assertEqual(json.loads((self.root/'automation_state.json').read_text())['next_phase'],'results')
 
@@ -548,7 +551,7 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual([len(params['ids'].split('-')) for params in client.calls], [20,20,20,5])
         self.assertEqual(set(state['result_checks']), {row['match_id'] for row in fixtures})
 
-    def test_long_results_queue_yields_to_calendar_and_forecasts_between_batches(self):
+    def test_long_results_queue_yields_to_calendar_without_entering_heavy_forecasts(self):
         rows = [raw_match(12000+i,stamp='2025-03-20T08:00:00Z',status='FT',league=39,season=2025)
                 for i in range(45)]
         selected = [dict(match_id=str(row['fixture']['id']),timestamp=row['fixture']['date']) for row in rows]
@@ -571,7 +574,7 @@ class WorkerTests(unittest.TestCase):
             refresh = worker._DayRefresh(self.root,self.config,gate,report,clock,BEFORE.date(),BEFORE,
                                          SimpleNamespace(progress=lambda phase:None))
             worker._refresh_results(self.root,gate,clock,report,after_batch=refresh.during_results)
-        self.assertEqual(len(forecasts),3)
+        self.assertEqual(len(forecasts),0)
         self.assertEqual([('ids' if 'ids' in p else 'date') for p in client.calls],['ids','date']*3)
         self.assertEqual([len(p['ids'].split('-')) for p in client.calls if 'ids' in p],[20,20,5])
         self.assertEqual(len(state['result_checks']),45)

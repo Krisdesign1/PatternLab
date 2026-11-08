@@ -28,7 +28,7 @@ class MixedJournalTests(unittest.TestCase):
                         patch.object(models,'_context_neighbors',side_effect=models.SnapshotError('Configuration absente.'))):
             patcher.start();self.addCleanup(patcher.stop)
         self.chosen=mixed_fixtures()
-        self.methods=models.build_mixed_methods(mixed_history(),self.chosen)['methods']
+        self.methods=models.build_mixed_methods(mixed_history(),self.chosen,decision_at=NOW)['methods']
 
     def record(self,**kwargs):
         options=dict(now=NOW,path=self.path,raw_fixtures=raw_fixtures(self.chosen))
@@ -98,16 +98,24 @@ class MixedJournalTests(unittest.TestCase):
                 journal.record_mixed(self.chosen,changed,now=NOW,path=self.path,raw_fixtures=raw_fixtures(self.chosen))
             self.assertFalse(self.path.exists())
 
-    def test_only_whole_local_today_groups_and_future_kickoffs_can_be_registered(self):
-        for now in (NOW-timedelta(days=1),NOW+timedelta(days=1),AFTER):
+    def test_only_same_local_day_groups_and_future_kickoffs_can_be_registered(self):
+        for now in (NOW+timedelta(days=1),AFTER):
             with self.subTest(now=now),self.assertRaises(journal.JournalError):self.record(now=now)
             self.assertFalse(self.path.exists())
         chosen=copy.deepcopy(self.chosen)
         chosen[-1]['timestamp']='2025-03-20T23:00:00'
-        methods=models.build_mixed_methods(mixed_history(),chosen)['methods']
+        methods=models.build_mixed_methods(mixed_history(),chosen,decision_at=NOW)['methods']
         with self.assertRaises(journal.JournalError):
             journal.record_mixed(chosen,methods,now=NOW,path=self.path,raw_fixtures=raw_fixtures(chosen))
         self.assertFalse(self.path.exists())
+
+    def test_tomorrow_group_keeps_real_creation_time_and_remains_pending(self):
+        current = NOW - timedelta(days=1)
+        self.methods=models.build_mixed_methods(mixed_history(),self.chosen,decision_at=current)['methods']
+        entry = self.record(now=current)
+        self.assertEqual(entry['created_at'], current.isoformat(timespec='microseconds'))
+        self.assertTrue(all(row['timestamp'].startswith('2025-03-20') for row in entry['fixtures']))
+        self.assertEqual(entry['status'], 'pending')
 
     def test_live_clock_checked_at_insert_and_commit_rolls_back_when_it_crosses_kickoff(self):
         for stamps in ((NOW,AFTER),(NOW,NOW,AFTER)):
@@ -119,14 +127,14 @@ class MixedJournalTests(unittest.TestCase):
 
     def test_mono_daily_group_reuses_exact_legacy_id_digest_and_forecast(self):
         chosen=fixtures()
-        old_methods=models.build_methods(sample(),chosen)['methods']
+        old_methods=models.build_methods(sample(),chosen,decision_at=NOW)['methods']
         first=journal.record(chosen,old_methods,now=NOW,path=self.path,raw_fixtures=raw_fixtures(chosen))
         self.assertEqual(first['version'],journal.VERSION)
         self.assertNotIn('group_kind',first)
         old_id=journal._group_key(journal._fixtures(chosen))
         with sqlite3.connect(self.path) as connection:
             original=connection.execute('SELECT payload,digest FROM predictions').fetchone()
-        new_methods=models.build_mixed_methods(sample(),chosen)['methods']
+        new_methods=models.build_mixed_methods(sample(),chosen,decision_at=NOW)['methods']
         again=journal.record_mixed(chosen,new_methods,now=NOW,path=self.path,raw_fixtures=raw_fixtures(chosen))
         self.assertEqual(again['id'],old_id);self.assertFalse(again['created'])
         self.assertEqual(again['methods'],first['methods'])

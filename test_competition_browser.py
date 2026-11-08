@@ -1,4 +1,5 @@
 """Day boundaries, causal history and stable native competition actions."""
+from test_table_view_support import html_nodes
 from contextlib import ExitStack
 import copy
 from datetime import date, datetime, timedelta, timezone
@@ -65,7 +66,7 @@ class CompetitionTable(HTMLParser):
 
 
 def rendered_table(at):
-    markup=next(item.proto.body for item in at.get('html') if 'pl-competition-table' in item.proto.body)
+    markup=next(item.proto.body for item in html_nodes(at) if 'pl-competition-table' in item.proto.body)
     return CompetitionTable(markup)
 
 
@@ -231,7 +232,7 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.assess.call_count,46)
         at.text_input(key='competition_browser_query').set_value('not found').run()
         self.assertFalse(at.exception)
-        self.assertFalse(any('pl-competition-table' in item.proto.body for item in at.get('html')))
+        self.assertFalse(any('pl-competition-table' in item.proto.body for item in html_nodes(at)))
         self.assertTrue(any('Aucune compétition ne correspond' in item.value for item in at.info))
         self.assertFalse(at.button)
         self.network.assert_not_called()

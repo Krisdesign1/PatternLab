@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from league_model import outcome
+from halftime_domain import FINISHED_STATUSES, parse_score, outcome
 import fixture_store
 
 
@@ -21,7 +21,6 @@ BASE_URL = "https://v3.football.api-sports.io"
 DATA_DIR = Path(__file__).resolve().parent / "data" / "api_football"
 STORE_PATH = DATA_DIR / "fixtures.json"
 SECRETS_PATH = Path(__file__).resolve().parent / ".streamlit" / "secrets.toml"
-FINISHED_STATUSES = frozenset(("FT", "AET", "PEN"))
 
 
 class ApiFootballError(Exception):
@@ -153,19 +152,20 @@ def _score_pair(scores, period):
     pair = scores.get(period)
     if not isinstance(pair, dict):
         raise ValueError("Score HT/FT absent ou invalide")
-    home, away = pair.get("home"), pair.get("away")
-    if any(type(value) is not int or value < 0 for value in (home, away)):
-        raise ValueError("Score HT/FT absent ou invalide")
-    return home, away
+    return parse_score(pair)
 
 
 def normalize_fixture(fixture):
     """Convert one completed fixture using regulation fulltime, even after AET/PEN."""
     try:
+        import fixture_import_policy as import_policy
+        conflict = import_policy.quality_error(fixture)
+        if conflict:
+            raise ValueError(conflict)
         if fixture.get('provider') not in (None, 'api-football', 'API-Football'):
             raise ValueError('Seules les données API-Football sont acceptées')
         event = fixture["fixture"]
-        if event["status"]["short"] not in FINISHED_STATUSES:
+        if _status_short(fixture) not in FINISHED_STATUSES:
             raise ValueError("Match non terminé")
         match_id = _numeric_id(event["id"], "du match")
         league = fixture["league"]
@@ -284,6 +284,26 @@ def export_store(path=STORE_PATH):
             else _load_store(path))
 
 
+def load_import_observations(path=STORE_PATH, *, ids=None):
+    """Read recorded receipts only, without API, migration or data repair."""
+    import fixture_import_policy as import_policy
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.import_observations, database, ids=ids)
+    selected = None if ids is None else set(map(str, ids))
+    records = _load_store(path).get('import_revisions', [])
+    output, latest = [], {}
+    for record in records:
+        import_policy.validate_record(record)
+        mid = record['match_id']
+        if record['previous_observation'] != latest.get(mid):
+            raise ApiFootballError('La chronologie des imports locaux est incohérente.')
+        latest[mid] = record['id']
+        if selected is None or mid in selected:
+            output.append(record)
+    return output
+
+
 def _season_identity(raw):
     league = _numeric_id(raw["league"]["id"], "de compétition")
     season = raw["league"]["season"]
@@ -305,6 +325,9 @@ def _validate_season_import(entry, fixtures, *, imported_at=None):
     if entry.get("league") is not None and _numeric_id(entry["league"], "de compétition") != code:
         raise ValueError("Mismatched competition")
     for match_id in ids:
+        from fixture_import_policy import quarantine
+        if quarantine(fixtures[match_id]):
+            raise ValueError('Un manifeste ne peut pas confirmer une rencontre en quarantaine.')
         if _season_identity(fixtures[match_id]) != (code, season):
             raise ValueError("Mismatched season fixture")
     if imported_at is None:
@@ -345,10 +368,8 @@ def load_season_imports(path=STORE_PATH):
 
 
 def _status_short(raw):
-    event = raw.get("fixture")
-    state = event.get("status") if isinstance(event, dict) else None
-    short = state.get("short") if isinstance(state, dict) else None
-    return short if isinstance(short, str) else None
+    from fixture_import_policy import status
+    return status(raw)
 
 
 @contextmanager
@@ -392,25 +413,36 @@ def save_fixtures(fixtures, path=STORE_PATH, *, season_imports=None):
 def _save_fixtures_locked(fixtures, path, *, season_imports=None):
     """Atomically upsert fixtures and optional full-season manifests.
 
-    Calendar/live states never overwrite FT/AET/PEN results. API-Football has no
-    update timestamp used here: final-to-final corrections follow import order.
+    Live regressions cannot overwrite final results. Incomplete final replies
+    and identity conflicts retain prior payloads in quarantine, with revisions.
     ``season_imports`` is reserved for complete league/season responses.
     """
     path = Path(path)
     stored = _load_store(path)
+    import fixture_import_policy as import_policy
     merged = {_numeric_id(row["fixture"]["id"], "du match"): row for row in stored["fixtures"]}
     incoming = {}
+    records = list(stored.get('import_revisions', []))
+    latest = {}
+    for record in records:
+        import_policy.validate_record(record)
+        if record.get('previous_observation') != (latest.get(record['match_id']) or {}).get('id'):
+            raise ApiFootballError('La chronologie des imports locaux est incohérente.')
+        latest[record['match_id']] = record
+    now = datetime.now(timezone.utc).isoformat(timespec='microseconds')
     try:
         for row in fixtures:
             match_id = _numeric_id(row["fixture"]["id"], "du match")
             incoming[match_id] = row
             previous = merged.get(match_id)
-            if previous is not None and _status_short(previous) in FINISHED_STATUSES and _status_short(row) not in FINISHED_STATUSES:
-                continue
-            merged[match_id] = row
+            selected, decision, reason = import_policy.decide(previous, row, normalize_fixture, latest=latest.get(match_id))
+            event = import_policy.observation(previous, row, selected, decision, reason, now, latest.get(match_id))
+            if event is not None:
+                records.append(event)
+                latest[match_id] = event
+            merged[match_id] = selected
     except (KeyError, TypeError, ValueError):
         raise ApiFootballError("Un match API-Football à enregistrer a un identifiant invalide.") from None
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     markers = {(row["competition_code"], row["season"]): row for row in _valid_season_imports(stored, merged)}
     if season_imports is not None:
         try:
@@ -426,7 +458,13 @@ def _save_fixtures_locked(fixtures, path, *, season_imports=None):
                 markers[marker["competition_code"], marker["season"]] = marker
         except (KeyError, TypeError, ValueError, AttributeError):
             raise ApiFootballError("Le manifeste de saison API-Football est invalide ou ne correspond pas au lot reçu.") from None
-    payload = dict(version=1, fixtures=list(merged.values()), season_imports=list(markers.values()), updated_at=now)
+    payload = dict(version=1, fixtures=list(merged.values()), season_imports=list(markers.values()),
+                   updated_at=now, import_revisions=records)
+    _publish_store_payload(path, payload)
+    return len(merged)
+
+
+def _publish_store_payload(path, payload):
     temporary = None
     try:
         serialized = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -446,24 +484,76 @@ def _save_fixtures_locked(fixtures, path, *, season_imports=None):
                 temporary.unlink()
             except OSError:
                 pass
-    return len(merged)
 
 
-def load_matches(path=STORE_PATH, **filters):
+def import_quarantines(path=STORE_PATH):
+    """Read quality conflicts without loading unrelated SQLite raw histories."""
+    from fixture_import_policy import quarantine
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.import_quarantines, database)
+    return [raw for raw in load_fixtures(path) if quarantine(raw)]
+
+
+@cloud_storage.persisted
+def review_import(match_id, *, choice, expected_observation, reason, path=STORE_PATH):
+    """Explicit review only; never called by a reader or an automatic worker."""
+    import fixture_import_policy as policy
+    mid = _numeric_id(match_id, 'du match')
+    database = active_store(path)
+    if database is not None:
+        return _sqlite_call(fixture_store.review_import, database, mid, choice=choice,
+                            expected_observation=expected_observation, reason=reason)
+    with _store_write_lock(path):
+        database = active_store(path)
+        if database is not None:
+            return _sqlite_call(fixture_store.review_import, database, mid, choice=choice,
+                                expected_observation=expected_observation, reason=reason)
+        stored = _load_store(path)
+        current = next((raw for raw in stored['fixtures'] if _numeric_id(raw['fixture']['id'], 'du match') == mid), None)
+        events = load_import_observations(path, ids=[mid])
+        now = datetime.now(timezone.utc).isoformat(timespec='microseconds')
+        selected, event = policy.review_selection(current or {}, events[-1] if events else None,
+            choice=choice, expected_observation=expected_observation, reason=reason,
+            normalize=normalize_fixture, observed_at=now)
+        stored['fixtures'] = [selected if _numeric_id(raw['fixture']['id'], 'du match') == mid else raw
+                              for raw in stored['fixtures']]
+        stored.setdefault('import_revisions', []).append(event)
+        stored['updated_at'] = now
+        merged = {_numeric_id(raw['fixture']['id'], 'du match'): raw for raw in stored['fixtures']}
+        stored['season_imports'] = _valid_season_imports(stored, merged)
+        _publish_store_payload(Path(path), stored)
+        return event
+
+
+def load_matches(path=STORE_PATH, *, as_of=None, **filters):
     """Only completed fixtures enter the model; audit invalid completed scores."""
+    if as_of is not None:
+        from fixture_temporal_store import history_as_of
+        return _sqlite_call(history_as_of,path,as_of,**filters)
     database = active_store(path)
     if database is not None:
         return _sqlite_call(fixture_store.matches, database, **filters)
-    fixtures = load_fixtures(path, **filters)
+    return _normalize_matches(load_fixtures(path, **filters))
+
+
+def _normalize_matches(fixtures):
+    """Apply the same regulation/quality gates to current and reconstructed raw."""
     rows, issues, expected = [], [], 0
     for fixture in fixtures:
+        from fixture_import_policy import quality_error
+        conflict = quality_error(fixture)
+        if conflict:
+            expected += 1
+            issues.append(dict(match_id=str(fixture.get('fixture', {}).get('id', '?')), reason=conflict))
+            continue
         event = fixture.get("fixture", {})
         status = event.get("status")
         if not isinstance(status, dict) or not isinstance(status.get("short"), str):
             expected += 1
             issues.append(dict(match_id=str(event.get("id", "?")), reason="Statut du match absent ou invalide"))
             continue
-        if status.get("short") not in FINISHED_STATUSES:
+        if _status_short(fixture) not in FINISHED_STATUSES:
             continue
         expected += 1
         try:

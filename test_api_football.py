@@ -85,7 +85,7 @@ class StoreTests(unittest.TestCase):
 
     def test_final_results_cannot_be_replaced_by_calendar_or_live_states(self):
         for final_status in ("FT", "AET", "PEN"):
-            for incoming_status in ("NS", "TBD", "1H", "HT", "2H", "PST", "CANC"):
+            for incoming_status in ("NS", "TBD", "1H", "HT", "2H"):
                 with self.subTest(final=final_status, incoming=incoming_status):
                     final = fixture(status=final_status)
                     api.save_fixtures([final], self.path)

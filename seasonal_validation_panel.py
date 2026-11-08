@@ -1,4 +1,5 @@
 """Local, explicitly requested seasonal evaluation, separate from deployment."""
+import table_views
 import json
 from datetime import datetime
 
@@ -49,7 +50,7 @@ def show_report(report, league):
                                  default=scopes[0], required=True, key=f'seasonal_scope_{league}')
     aggregate_key = {'complete': 'aggregate_complete', 'partial': 'aggregate_partial', 'all': 'aggregate'}[scope]
     metrics = report[aggregate_key][str(size)]
-    st.dataframe(metric_rows(metrics), hide_index=True, width='stretch')
+    table_views.dataframe(metric_rows(metrics), hide_index=True, width='stretch', table_id='seasonal_validation_panel:show_report:dataframe:1')
     st.caption('Une réussite exige tous les résultats dans le bon ordre. L’erreur probabiliste '
                'mesure la probabilité attribuée au scénario réalisé : plus elle est faible, mieux c’est. '
                'Les cinq méthodes sont comparées sur les mêmes groupes pour cette taille.')
@@ -67,7 +68,7 @@ def show_report(report, league):
                      'Force des répétitions': selection['alpha'],
                      'Historique des répétitions': 'Tout l’apprentissage' if selection['window'] == 'all' else 'Dernière saison'})
     st.markdown('**Stabilité et apport des répétitions par saison**')
-    st.dataframe(rows, hide_index=True, width='stretch')
+    table_views.dataframe(rows, hide_index=True, width='stretch', table_id='seasonal_validation_panel:show_report:dataframe:2')
     wins = sum(fold['sizes'][str(size)]['test']['catboost_repeats']['loss'] <
                fold['sizes'][str(size)]['test']['catboost_plain']['loss'] - 1e-12 for fold in folds)
     st.info(f'Pour les groupes de {size} matchs, la correction des répétitions réduit l’erreur '
@@ -79,13 +80,13 @@ def show_report(report, league):
     with st.expander('Périodes, réglages et comparaisons détaillés'):
         for fold in report['folds']:
             st.markdown(f"**Test sur la saison {fold['test_season']}**")
-            st.dataframe([{'Période': label, 'Saisons': _season_names(fold['split'][name]),
+            table_views.dataframe([{'Période': label, 'Saisons': _season_names(fold['split'][name]),
                            'Matchs': fold['split'][name]['matches'],
                            'Début UTC': fold['split'][name]['start'],
                            'Fin UTC': fold['split'][name]['end']}
                           for name, label in [('train', 'Entraînement'), ('validation', 'Validation'), ('test', 'Test')]],
-                         hide_index=True, width='stretch')
-            st.dataframe(metric_rows(fold['sizes'][str(size)]['test']), hide_index=True, width='stretch')
+                         hide_index=True, width='stretch', table_id='seasonal_validation_panel:show_report:dataframe:3')
+            table_views.dataframe(metric_rows(fold['sizes'][str(size)]['test']), hide_index=True, width='stretch', table_id='seasonal_validation_panel:show_report:dataframe:4')
             st.json(fold['sizes'][str(size)]['selection'], expanded=False)
         st.caption('Les paramètres CatBoost sont choisis sur la validation des groupes de 4 matchs ; '
                    'la force et la fenêtre des répétitions sont ensuite choisies sur la validation de chaque taille. '
@@ -114,11 +115,11 @@ def render(rows, league, source):
         return
     with st.expander('Historique disponible et plan des évaluations'):
         st.caption('L’année affichée désigne le début de la saison. Les résultats de 2026/27 sont encore partiels.')
-        st.dataframe(plan['seasons'], hide_index=True, width='stretch')
-        st.dataframe([{'Apprendre sur': _season_names(fold['train']),
+        table_views.dataframe(plan['seasons'], hide_index=True, width='stretch', table_id='seasonal_validation_panel:render:dataframe:1')
+        table_views.dataframe([{'Apprendre sur': _season_names(fold['train']),
                        'Valider sur': _season_names(fold['validation']),
                        'Tester sur': _season_names(fold['test'])}
-                      for fold in plan['folds']], hide_index=True, width='stretch')
+                      for fold in plan['folds']], hide_index=True, width='stretch', table_id='seasonal_validation_panel:render:dataframe:2')
     st.caption('Groupes de 2, 4, 6 et 8 matchs. Calcul local, sans requête API. '
                'Les modèles utilisés pour les prochains matchs et le journal restent distincts de cette évaluation.')
     if st.button('Évaluer l’historique par saison', type='primary', icon=':material/analytics:',

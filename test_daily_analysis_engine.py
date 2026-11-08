@@ -1,7 +1,7 @@
 """Daily planning is synthetic, deterministic, causal, and never requests data."""
 import copy
 from contextlib import ExitStack
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import math
 import unittest
@@ -43,6 +43,26 @@ def candidate_sets(report):
 
 
 class DailyAnalysisEngineTests(unittest.TestCase):
+    def test_explicit_tomorrow_uses_real_clock_and_excludes_current_utc_day_results(self):
+        tomorrow = NOW.date() + timedelta(days=1)
+        targets = future(2, now=NOW + timedelta(days=1))
+        today_games = future(2)
+        for row in today_games:
+            row['fixture']['id'] += 100
+        same_day_result = raw_fixture(99999, '2026-10-21T08:00:00Z', status='FT')
+        report = engine.plan(history() + targets + today_games + [same_day_result], now=NOW, day=tomorrow)
+        self.assertEqual(report['day'], tomorrow.isoformat())
+        self.assertEqual(report['before'], NOW.date().isoformat())
+        self.assertEqual(candidate_sets(report), {frozenset(('9000', '9001'))})
+        self.assertEqual(report['candidates'][0]['selection']['support']['history_matches_min'], 60)
+        automatic = engine.plan(history() + targets + today_games, now=NOW)
+        self.assertEqual(candidate_sets(automatic), {frozenset(('9100', '9101'))})
+
+    def test_explicit_day_requires_a_calendar_date_and_never_allows_retrospective_preparation(self):
+        for invalid in (NOW, '2026-10-22', date(2026, 10, 20)):
+            with self.subTest(day=invalid), self.assertRaises(engine.DailyAnalysisError):
+                engine.plan(history() + future(2), now=NOW, day=invalid)
+
     def test_id_role_counts_distinguish_namesakes_and_keep_renamed_clubs(self):
         past, targets = history(), future(2)
         for row in past[2:]:

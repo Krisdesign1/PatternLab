@@ -266,7 +266,7 @@ def _validate_method(method_payload, size, *, _component=False):
     for saved, actual in zip(ranking, expected):
         if not isinstance(saved, dict) or _sequence(saved.get('sequence'), size) != tuple(actual['sequence']):
             raise SnapshotError('Le classement figé ne correspond pas à la distribution complète.')
-        if not isclose(_number(saved.get('probability'), positive=True), actual['probability'], rel_tol=1e-9, abs_tol=1e-12):
+        if not isclose(_number(saved.get('probability'), positive=True), actual['probability'], rel_tol=1e-9, abs_tol=0):
             raise SnapshotError('La probabilité affichée ne correspond pas à la distribution figée.')
 
 
@@ -306,14 +306,25 @@ def _fixtures(fixtures, source, *, allow_mixed=False):
             row = dict(fixture)
             if row.get('provider', PROVIDER) != PROVIDER:
                 raise SnapshotError('Chaque affiche doit provenir d’API-Football.')
-            row.update(provider=PROVIDER, league=str(row['league']),
-                       timestamp=ml._utc_stamp(row['timestamp']), match_id=str(int(row['match_id'])))
-            if row['league'] in ('None', '') or int(row['match_id']) <= 0:
-                raise ValueError('Invalid identity')
+            for key in ('match_id', 'league', 'home_id', 'away_id'):
+                if key not in row and key in ('home_id', 'away_id'):
+                    continue
+                value = row[key]
+                if (isinstance(value, bool) or not isinstance(value, (str, int))
+                        or not str(value).isascii() or not str(value).isdecimal() or int(value) <= 0):
+                    raise SnapshotError('Les identifiants API-Football doivent être des entiers positifs.')
+                row[key] = str(int(value))
+            row.update(provider=PROVIDER, timestamp=ml._utc_stamp(row['timestamp']))
             home, away = row['home'], row['away']
             if (not all(isinstance(name, str) and name.strip() for name in (home, away))
-                    or not different_clubs(home, away, row.get('home_id'), row.get('away_id'))):
+                    or not different_clubs(home.strip(), away.strip(), row.get('home_id'), row.get('away_id'))):
                 raise ValueError('Invalid clubs')
+            row.update(home=home.strip(), away=away.strip())
+            if row.get('season') is not None:
+                if type(row['season']) is not int or not 1900 <= row['season'] <= 2100:
+                    raise SnapshotError('La saison doit être une année entière valide.')
+            else:
+                row.pop('season', None)
             identity = fixture_key(row, row['timestamp'])
             if row['match_id'] in ids or identity in identities:
                 raise SnapshotError('Chaque affiche doit apparaître une seule fois dans le groupe.')
@@ -329,11 +340,55 @@ def _fixtures(fixtures, source, *, allow_mixed=False):
             raise SnapshotError('Affiche absente, contradictoire ou invalide.') from None
     if len(leagues) != 1 and not allow_mixed:
         raise SnapshotError('Un groupe doit conserver une seule compétition.')
+    if normalized != sorted(normalized, key=lambda row: (row['timestamp'], int(row['match_id']))):
+        raise SnapshotError('Le groupe doit conserver l’ordre chronologique et les identifiants numériques.')
     return normalized, next(iter(leagues)) if len(leagues) == 1 else 'mixed', min(row['timestamp'][:10] for row in normalized)
 
 
-def _catboost(rows, fixtures, source, league, before, selected_estimate, engine):
-    report = ml.load_report(source, league)
+def _context(fixtures, before, decision_at=None):
+    """Bind positional probabilities to score-free fixture identities and T.
+
+    No injected date is inferred from future target days. A caller omitting T
+    retains the historical-builder convention, explicitly without a decision
+    timestamp. The live journal separately controls actual storage time.
+    """
+    decision = None
+    if decision_at is not None:
+        try:
+            value = datetime.fromisoformat(decision_at.replace('Z', '+00:00')) if isinstance(decision_at, str) else decision_at
+            if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError()
+            decision = value.astimezone(timezone.utc)
+            if any(datetime.fromisoformat(row['timestamp']).replace(tzinfo=timezone.utc) <= decision for row in fixtures):
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            raise SnapshotError('La décision doit préciser son fuseau et précéder tous les coups d’envoi.') from None
+        before = min(before, decision.date().isoformat())
+    encoded = json.dumps(fixtures, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return dict(decision_at=decision.isoformat() if decision else None, training_before=before,
+                ordered_match_ids=[row['match_id'] for row in fixtures],
+                fixture_fingerprint=hashlib.sha256(encoded.encode('utf-8')).hexdigest())
+
+
+def group_context(fixtures, decision_at=None):
+    """Pure common UTC cutoff and ordered target binding for a 2–20 group."""
+    fixtures, _, before = _fixtures(fixtures, SOURCE, allow_mixed=True)
+    return _context(fixtures, before, decision_at)
+
+
+def _bind_methods(value, fixtures, before, decision_at=None):
+    context = _context(fixtures, before, decision_at)
+    for payload in value['methods'].values():
+        # Context engines use their own internal fixture fingerprint too. Keep
+        # that independent audit field; this binding covers the canonical group.
+        if 'fixture_fingerprint' in payload:
+            payload['engine_fixture_fingerprint'] = payload['fixture_fingerprint']
+        payload.update(context)
+    return value
+
+
+def _catboost(rows, fixtures, source, league, before, selected_estimate, engine, *, directory=None):
+    report = ml.load_report(source, league, directory) if directory is not None else ml.load_report(source, league)
     if report is None:
         raise ml.ModelError('Aucun modèle CatBoost enregistré pour cette compétition.')
     deployment = report['deployment']
@@ -342,18 +397,11 @@ def _catboost(rows, fixtures, source, league, before, selected_estimate, engine)
     fit_rows = ml._rows(rows, league, source, deployment['cutoff_exclusive'])
     if ml._fingerprint(fit_rows) != deployment['fingerprint']:
         raise ml.ModelError('L’historique appris par CatBoost a changé ; contrôlez les données et la campagne figée.')
-    if engine == 'catboost' and selected_estimate is not None:
-        prediction = selected_estimate
-        module = ml._features()
-        if (report['feature_version'] != module.FEATURE_VERSION
-                or report['feature_columns'] != list(module.FEATURE_COLUMNS)
-                or report['categorical_columns'] != list(module.CATEGORICAL_COLUMNS)):
-            raise ml.ModelError('Les caractéristiques CatBoost ont changé ; ce modèle exige un contrôle de compatibilité.')
-        path = ml._location(source, league, None) / deployment['generation'] / 'model.cbm'
-        if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != deployment['model_sha256']:
-            raise ml.ModelError('Le fichier du modèle CatBoost est absent ou invalide.')
-    else:
-        prediction = ml.forecast(rows, fixtures, source)
+    # Existing UI estimates do not attest their ordered fixture identities.
+    # Recompute with these exact fixtures, rather than attach another group's
+    # probabilities merely because league, size and generation happen to match.
+    prediction = (ml.forecast(rows, fixtures, source, directory) if directory is not None
+                  else ml.forecast(rows, fixtures, source))
     if (not isinstance(prediction, dict) or not prediction.get('eligible') or prediction.get('version') != ml.VERSION
             or prediction.get('generation') != deployment['generation'] or prediction.get('before') != before
             or str(prediction.get('league')) != league or prediction.get('size') != len(fixtures)
@@ -375,7 +423,7 @@ def _catboost(rows, fixtures, source, league, before, selected_estimate, engine)
     payload = _method(ml.VERSION, distribution, provenance,
                       generation=deployment['generation'], alpha=prediction['alpha'])
     for saved, frozen in zip(prediction.get('ranking', []), payload['ranking']):
-        if tuple(saved['sequence']) != tuple(frozen['sequence']) or not isclose(saved['probability'], frozen['probability'], rel_tol=1e-9, abs_tol=1e-12):
+        if tuple(saved['sequence']) != tuple(frozen['sequence']) or not isclose(saved['probability'], frozen['probability'], rel_tol=1e-9, abs_tol=0):
             raise ml.ModelError('Le classement CatBoost ne correspond pas à ses probabilités figées.')
     if len(prediction.get('ranking', [])) != 3:
         raise ml.ModelError('Le classement CatBoost doit conserver trois scénarios.')
@@ -449,21 +497,22 @@ def _context_neighbors(rows, fixtures, source, league, before, selected_estimate
         raise SnapshotError('Le classement par contexte doit conserver trois scénarios.')
     for saved, frozen in zip(ranking, payload['ranking']):
         if (not isinstance(saved, dict) or _sequence(saved.get('sequence'), len(fixtures)) != tuple(frozen['sequence'])
-                or not isclose(_number(saved.get('probability'), positive=True), frozen['probability'], rel_tol=1e-9, abs_tol=1e-12)):
+                or not isclose(_number(saved.get('probability'), positive=True), frozen['probability'], rel_tol=1e-9, abs_tol=0)):
             raise SnapshotError('Le classement par contexte ne correspond pas à la distribution figée.')
     return payload
 
 
-def build_methods(rows, fixtures, source=SOURCE, estimate=None, engine=None):
+def build_methods(rows, fixtures, source=SOURCE, estimate=None, engine=None, *, decision_at=None):
     """Freeze comparable methods for one ordered group; never train automatically.
 
-    ``estimate`` may reuse the selected CatBoost forecast when ``engine`` is
-    ``catboost``. Otherwise one CatBoost inference is attempted if a saved model
-    exists. A saved context configuration is also attempted independently of the
+    A CatBoost inference is attempted on these exact fixtures if a saved model
+    exists; an unbound UI estimate is never reused. A saved context configuration is also attempted independently of the
     selected engine. Unavailable methods carry explicit reasons and never impersonate a
     different algorithm. The journal owns the future-kickoff/write-once checks.
     """
     fixtures, league, before = _fixtures(fixtures, source)
+    context = _context(fixtures, before, decision_at)
+    before = context['training_before']
     source = SOURCE
     rows = list(rows)
     try:
@@ -473,7 +522,7 @@ def build_methods(rows, fixtures, source=SOURCE, estimate=None, engine=None):
     result = repeated_scenarios(history, len(fixtures)).get(league,
         dict(size=len(fixtures), matches=[], blocks=[], ranking=[], pending=[], simultaneous=False))
     methods, unavailable = {}, {}
-    prepared, model = contextual._prepare(result, fixtures)
+    prepared, model = contextual._prepare(result, fixtures, before=before)
     if not prepared['eligible']:
         reason = prepared['diagnostic'] or 'Historique insuffisant pour comparer ces méthodes.'
         unavailable.update({name: reason for name in METHODS[:3]})
@@ -489,17 +538,21 @@ def build_methods(rows, fixtures, source=SOURCE, estimate=None, engine=None):
         methods['combined'] = _method(contextual.VERSION,
             _distribution('corrected', len(fixtures), fit=fit, distributions=distributions,
                           alpha=.5, normalization=model['normalization']), provenance, alpha=.5)
-    try:
-        methods['catboost'] = _catboost(rows, fixtures, source, league, before, estimate, engine)
-    except (ml.ModelError, SnapshotError, OSError, KeyError, TypeError, ValueError) as error:
-        unavailable['catboost'] = str(error) if isinstance(error, (ml.ModelError, SnapshotError)) else (
-            'Le modèle CatBoost local est incomplet ou indisponible.')
-    try:
-        methods['context_neighbors'] = _context_neighbors(rows, fixtures, source, league, before, estimate, engine)
-    except (ImportError, OSError, KeyError, TypeError, ValueError, AttributeError) as error:
-        unavailable['context_neighbors'] = str(error) if isinstance(error, ValueError) else (
-            'La configuration par contexte locale est absente ou indisponible.')
-    return dict(methods=methods, unavailable=unavailable)
+    if min(row['timestamp'][:10] for row in fixtures) != before:
+        unavailable.update({name:'La décision précède le jour des affiches ; ce moteur ne prend pas en charge la coupure UTC commune.'
+                            for name in ('catboost', 'context_neighbors')})
+    else:
+        try:
+            methods['catboost'] = _catboost(rows, fixtures, source, league, before, estimate, engine)
+        except (ml.ModelError, SnapshotError, OSError, KeyError, TypeError, ValueError) as error:
+            unavailable['catboost'] = str(error) if isinstance(error, (ml.ModelError, SnapshotError)) else (
+                'Le modèle CatBoost local est incomplet ou indisponible.')
+        try:
+            methods['context_neighbors'] = _context_neighbors(rows, fixtures, source, league, before, estimate, engine)
+        except (ImportError, OSError, KeyError, TypeError, ValueError, AttributeError) as error:
+            unavailable['context_neighbors'] = str(error) if isinstance(error, ValueError) else (
+                'La configuration par contexte locale est absente ou indisponible.')
+    return _bind_methods(dict(methods=methods, unavailable=unavailable), fixtures, before, decision_at)
 
 
 def _mixed_component(rows, fixtures, league, before):
@@ -548,7 +601,7 @@ def _mixed_component(rows, fixtures, league, before):
     return dict(methods=methods, unavailable=unavailable)
 
 
-def build_mixed_methods(rows, fixtures, source=SOURCE):
+def build_mixed_methods(rows, fixtures, source=SOURCE, *, decision_at=None):
     """Freeze products of independent league blocks, with one common UTC cutoff.
 
     Corrections remain inside their own league block. No repeated pattern or
@@ -556,6 +609,8 @@ def build_mixed_methods(rows, fixtures, source=SOURCE):
     only the explicitly independent clubs method. No model is fitted here.
     """
     fixtures, league, before = _fixtures(fixtures, source, allow_mixed=True)
+    context = _context(fixtures, before, decision_at)
+    before = context['training_before']
     if fixtures != sorted(fixtures,key=lambda row:(row['timestamp'],int(row['match_id']))):
         raise SnapshotError('Le groupe mixte doit conserver l’ordre chronologique et les identifiants numériques.')
     grouped = {}
@@ -576,6 +631,7 @@ def build_mixed_methods(rows, fixtures, source=SOURCE):
         members = grouped[code]
         try:
             parts[code] = _mixed_component(rows,[fixture for _,fixture in members],code,before)
+            _bind_methods(parts[code], [fixture for _, fixture in members], before, decision_at)
         except (ml.ModelError,ValueError,KeyError,TypeError) as error:
             raise SnapshotError(f'Historique de la compétition {code} invalide pour le groupe mixte : {error}') from None
     methods, unavailable = {}, {}
@@ -595,5 +651,5 @@ def build_mixed_methods(rows, fixtures, source=SOURCE):
         distribution = dict(schema=DISTRIBUTION_VERSION,type='block_product',size=len(fixtures),components=components)
         methods[name] = _method(MIXED_VERSION,distribution,provenance,
             generation=hashlib.sha256(json.dumps(provenance['component_versions'],sort_keys=True).encode()).hexdigest())
-    return dict(methods=methods,unavailable=unavailable,source=SOURCE,league='mixed',leagues=leagues,
-                before=before,size=len(fixtures),assumes_block_independence=True)
+    return _bind_methods(dict(methods=methods,unavailable=unavailable,source=SOURCE,league='mixed',leagues=leagues,
+                before=before,size=len(fixtures),assumes_block_independence=True), fixtures, before, decision_at)

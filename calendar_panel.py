@@ -1,4 +1,5 @@
 """Browse API-Football display data without passing scores into model fixtures."""
+import table_views
 from datetime import datetime, timezone
 from time import monotonic
 from zoneinfo import ZoneInfo
@@ -37,8 +38,8 @@ def maybe_refresh(source, day, today):
         return
     admin_access.require_admin()
     context = (source, day.isoformat())
-    if day != today:
-        st.caption('Le suivi automatique est actif uniquement pour la journée en cours.')
+    if day < today:
+        st.caption('Pour une journée passée, utilisez Actualiser pour récupérer les résultats corrigés.')
         return
     error = st.session_state.get('calendar_auto_error')
     if error and error['context'] == context:
@@ -63,12 +64,29 @@ def display_rows(snapshot, day):
 
 
 def table_rows(rows):
-    return [{'Heure': datetime.fromisoformat(row['timestamp']).replace(tzinfo=timezone.utc).astimezone(ZONE).strftime('%H:%M'),
+    return [{'Date': datetime.fromisoformat(row['timestamp']).replace(tzinfo=timezone.utc).astimezone(ZONE).strftime('%d/%m/%Y'),
+             'Heure': datetime.fromisoformat(row['timestamp']).replace(tzinfo=timezone.utc).astimezone(ZONE).strftime('%H:%M'),
              'Pays': row['country'], 'Compétition': row['competition'],
              'Domicile': row['home'], 'Score': row['score'], 'Extérieur': row['away'],
-             'Statut': row['status_label'], 'Minute': row['minute'],
+             'Verdict final': [row['final_verdict']],
+             'Statut': (row['status_label'] + ' · ' + row['final_verdict_reason']
+                        if row['final_verdict'] in ('Non évaluable', 'À vérifier')
+                        and row['final_verdict_reason'] != row['status_label'] else row['status_label']),
+             'Minute': row['minute'],
              'Mi-temps': row['halftime_score'], 'À 90 minutes': row['regulation_score']}
             for row in rows]
+
+
+def verdict_column():
+    colors = (['#8fc1ff', '#d7b9ff', '#ffc58a'] if st.context.theme.type == 'dark'
+              else ['#175da7', '#7040a0', '#934b08'])
+    return st.column_config.MultiselectColumn(
+        'Verdict final', width=130,
+        options=['1st', 'Égal', '2nd', 'En attente', 'En cours', 'Non évaluable', 'À vérifier'],
+        color=colors + ['gray', 'gray', 'orange', 'orange'],
+        help='Résultat observé : 1st = plus de buts avant la pause ; Égal = autant dans chaque '
+             'mi-temps ; 2nd = plus de buts après la pause. Hors prolongations et tirs au but. '
+             'Un verdict final nécessite un match terminé et deux scores exploitables.')
 
 
 def render_calendar(snapshot, day, league):
@@ -85,11 +103,20 @@ def render_calendar(snapshot, day, league):
                    f'{live} en cours au dernier relevé. Les filtres ne limitent pas les données reçues.')
     if league == ALL:
         if filtered:
-            st.dataframe(table_rows(filtered), hide_index=True, width='stretch', height=550,
-                         key='calendar_table')
+            table_views.dataframe(table_rows(filtered), hide_index=True, width='stretch', height=550,
+                         column_config={'Verdict final': verdict_column()},
+                         key='calendar_table', table_id='calendar_panel:render_calendar:dataframe:1')
+            st.caption('Verdict final : 1st = plus de buts avant la pause · Égal = autant dans chaque mi-temps · '
+                       '2nd = plus de buts après la pause. Hors prolongations et tirs au but.')
             st.caption('Toutes les lignes sont consultables en faisant défiler le tableau. '
                        'Choisissez une compétition ci-dessus pour préparer un groupe de prédiction.')
         else:
             st.info('Aucun match ne correspond à ces filtres dans le relevé local. '
                     'Utilisez Actualiser pour demander les derniers scores.')
+    export = st.expander('Exporter le calendrier : une ou plusieurs journées', icon=':material/download:',
+                          key='calendar_export_open', on_change='rerun')
+    if export.open:
+        with export:
+            from calendar_export_panel import render_export
+            render_export(day, selected_league=league)
     return filtered, status, query

@@ -1,0 +1,21 @@
+[Unit]
+Description=PatternLab compressed RAM reserve without disk writeback
+After=local-fs.target
+Before=patternlab-worker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/patternlab-ops/configure_zram.py
+# Do not automatically swapoff when stopping: doing so under pressure can fail
+# or force another OOM. Teardown is an explicit maintenance operation.
+TimeoutStartSec=60
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

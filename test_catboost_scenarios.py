@@ -35,6 +35,16 @@ def fixtures():
 
 
 class DistributionTests(unittest.TestCase):
+    def test_shared_selection_is_joint_and_retains_first_exact_tie(self):
+        candidates=({'depth':2},{'depth':3})
+        def evaluate(model,alpha):
+            loss=1 if (model['depth'],alpha) in ((2,.5),(3,0)) else 2
+            return {'catboost':{'loss':loss}},['validation-only']
+        selection,trials,_,_,targets=ml.select_validation(lambda p:p,evaluate,candidates,(0,.5))
+        self.assertEqual(selection['params'],{'depth':2})
+        self.assertEqual(selection['alpha'],.5)
+        self.assertEqual(len(trials),4)
+        self.assertEqual(targets,['validation-only'])
     def test_exact_partition_and_top_three_for_all_alphas(self):
         for size in (2, 4):
             fit = fit_sequences([("1st",) * size] * 12 + [("2nd",) * size] * 8, size)
@@ -123,6 +133,18 @@ class NativeRoundtripTests(unittest.TestCase):
     def test_report_read_does_not_import_or_load_catboost(self):
         with patch.object(ml, "_classifier", side_effect=AssertionError("JSON report read must stay cheap")):
             self.assertIsNotNone(ml.load_report("API-Football", "39", self.directory.name))
+
+    def test_shadow_snapshot_loads_pinned_native_directory_and_scores_without_model(self):
+        import prospective_models as snapshots
+        expected=ml.forecast(self.rows,fixtures(),'API-Football',self.directory.name)
+        payload=snapshots._catboost(self.rows,fixtures(),'API-Football','39','2025-03-20',None,None,
+                                    directory=self.directory.name)
+        self.assertEqual(payload['generation'],self.report['deployment']['generation'])
+        self.assertEqual([r['sequence'] for r in payload['ranking']],
+                         [list(r['sequence']) for r in expected['ranking']])
+        before=snapshots.probability_for_sequence(payload,['Égal']*4)
+        with patch.object(ml,'forecast',side_effect=AssertionError('No settlement inference')):
+            self.assertEqual(before,snapshots.probability_for_sequence(json.loads(json.dumps(payload)),['Égal']*4))
 
     def test_target_and_future_outcomes_are_not_read_at_inference(self):
         original = ml.forecast(self.rows, fixtures(), "API-Football", self.directory.name)

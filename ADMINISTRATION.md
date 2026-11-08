@@ -11,14 +11,14 @@ Installer les dépendances de `requirements.txt`, qui incluent `streamlit[auth]`
 Dans le compte du fournisseur d’identité (par exemple Google), créer une application OIDC Web et déclarer l’adresse de retour exacte :
 
 ```text
-https://patternlab-hlh3eqshs2ulmgnezjo9wv.streamlit.app/oauth2callback
+https://patternlab.51-21-132-22.sslip.io/oauth2callback
 ```
 
-Ajouter ensuite les paramètres dans les **secrets privés Streamlit Cloud**, en conservant les sections déjà présentes pour la base et API-Football :
+Sur AWS, ajouter les paramètres dans le fichier privé `/opt/patternlab/.streamlit/secrets.toml`, en conservant les sections déjà présentes. Le fichier doit appartenir au compte de service `patternlab` avec les permissions `0600` :
 
 ```toml
 [auth]
-redirect_uri = "https://patternlab-hlh3eqshs2ulmgnezjo9wv.streamlit.app/oauth2callback"
+redirect_uri = "https://patternlab.51-21-132-22.sslip.io/oauth2callback"
 cookie_secret = "REMPLACER_PAR_UN_SECRET_ALEATOIRE_LONG"
 client_id = "REMPLACER_PAR_LE_CLIENT_ID_OIDC"
 client_secret = "REMPLACER_PAR_LE_CLIENT_SECRET_OIDC"
@@ -28,6 +28,26 @@ server_metadata_url = "https://accounts.google.com/.well-known/openid-configurat
 local_owner = false
 admin_emails = ["proprietaire@example.com"]
 ```
+
+Le propriétaire du déploiement est défini dans le fichier privé de configuration
+par `access.admin_emails`. La connexion Google ne nécessite ni nouveau compte
+Google ni activation de facturation Cloud.
+
+### Verrou de qualification du serveur AWS
+
+La section privée `[access]` accepte `shared_writes = false`. Ce verrou conserve la reconnaissance du propriétaire après connexion, mais interdit les commandes web qui modifient les données partagées ou les modèles. Le propriétaire voit explicitement « Administrateur connecté » et le verrou de qualification. Les tâches serveur existantes et les analyses sur les données disponibles continuent de fonctionner.
+
+Ce paramètre est installé sur AWS pour préserver le protocole figé et le worker comme seul importateur. Il ne faut pas le retirer simplement pour faire disparaître un bouton désactivé : la remise en service des imports ou entraînements web exige leur validation. Le Mac conserve son comportement antérieur si ce paramètre est absent. Une valeur présente doit être le booléen `true` pour autoriser les écritures ; une chaîne ou un nombre ne suffit pas.
+
+Le portefeuille de **Simulation de paris** est séparé des prévisions et des
+réglages globaux. Le propriétaire reconnu peut y ajouter ses paris fictifs,
+modifier leurs mises ou les retirer, même pendant ce verrou. L'identité est
+revérifiée avant chaque écriture ; aucun visiteur ne peut gérer ce portefeuille
+commun. Ce droit limité n'autorise ni import, ni entraînement, ni modification
+des prévisions. Le bouton **Se connecter pour gérer mes paris** utilise la même
+connexion Google configurée pour le propriétaire.
+
+Le service web AWS conserve son accès réseau limité à la boucle locale. Le relais `patternlab-google-auth-proxy.service`, écoutant sur `127.0.0.1:18081`, autorise uniquement HTTPS vers les quatre hôtes Google OIDC. Le fichier `deployment/linux/patternlab-google-auth-web.conf` fournit le proxy au service web ; les règles entrantes AWS ne changent pas. Les identifiants et les cookies restent privés, TLS est vérifié de bout en bout, et le relais n'enregistre pas le contenu des échanges.
 
 L’adresse doit être celle du propriétaire. Elle n’autorise l’administration que si le fournisseur certifie `email_verified = true`. Un simple nom, une adresse de domaine identique ou un paramètre dans l’URL ne suffisent pas. Le jeton doit être encore valide ; après expiration, se déconnecter puis se reconnecter.
 
@@ -73,7 +93,7 @@ Ces réglages ne sont pas activés automatiquement. L’appellation « local » 
 
 - Sans connexion : consulter les résultats et calculer sur l’historique existant ; les commandes sensibles sont désactivées et aucun appel API n’est lancé automatiquement.
 - Avec un compte OIDC non autorisé : la consultation reste disponible, l’administration reste refusée.
-- Avec le compte autorisé : les commandes sont actives. L’autorisation est relue immédiatement avant l’action, même après l’affichage du bouton.
+- Avec le compte autorisé : le propriétaire est reconnu. Les commandes sont actives seulement si les écritures partagées sont aussi autorisées par le serveur. Ces deux conditions sont relues immédiatement avant l’action, même après l’affichage du bouton.
 - Retirer l’identité de la liste privée ou désactiver `local_owner` retire les droits au prochain passage serveur. Aucun rôle administrateur n’est conservé dans les paramètres de l’URL ou dans `session_state`.
 
 Références : [authentification Streamlit](https://docs.streamlit.io/develop/concepts/connections/authentication), [st.user et expiration](https://docs.streamlit.io/develop/api-reference/user/st.user).

@@ -1,4 +1,6 @@
+from test_table_view_support import html_nodes
 import copy
+import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 import tempfile
@@ -31,6 +33,15 @@ def entry(identifier='a', day='2026-10-21', status='pending', size=3, support=75
 
 
 class DailyDataTests(unittest.TestCase):
+    def test_preparation_status_uses_latest_passage_for_selected_day(self):
+        day = date(2026, 10, 21)
+        status = dict(day=day.isoformat(), created=12, finished_at='2026-10-21T09:00:00Z')
+        manual = dict(day=day.isoformat(), created=0, finished_at='2026-10-21T08:00:00Z')
+        self.assertEqual(panel._latest_preparation(day, status, manual), status)
+        manual['finished_at'] = '2026-10-21T10:00:00Z'
+        self.assertEqual(panel._latest_preparation(day, status, manual), manual)
+        self.assertEqual(panel._latest_preparation(date(2026,10,22), status, manual), {})
+
     def test_saved_support_orders_across_competitions_sizes_without_using_odds_probabilities_or_results(self):
         low=entry('low', support=55, status='settled')
         high=entry('high', size=8, support=90)
@@ -52,23 +63,61 @@ class DailyDataTests(unittest.TestCase):
         self.assertEqual(rows[0]['support'],65)
         self.assertNotIn('daily_policy',legacy['metadata'])
 
-    def test_local_day_archives_and_future_guard_keep_whole_groups(self):
+    def test_local_day_archives_and_future_views_keep_whole_groups(self):
         past=entry('past',day='2026-10-20');future=entry('future',day='2026-10-22')
         mixed=entry('mixed');mixed['fixtures'][-1]['timestamp']='2026-10-21T23:30:00Z'
         rows=data.project([past,future,mixed])
         self.assertEqual([row['id'] for row in data.on_day(rows,date(2026,10,20),today=date(2026,10,21))],['past'])
         self.assertNotIn('mixed',[row['id'] for row in rows])
-        with self.assertRaises(ValueError):data.on_day(rows,date(2026,10,22),today=date(2026,10,21))
+        self.assertEqual([row['id'] for row in data.on_day(rows,date(2026,10,22),today=date(2026,10,21))],['future'])
+        with self.assertRaises(ValueError):data.on_day(rows,'2026-10-22',today=date(2026,10,21))
 
 
 class DailyPanelTests(unittest.TestCase):
+    def test_only_opened_day_loads_explanations_and_export_is_deferred_complete(self):
+        self.entries = [entry('today-small', size=2), entry('today-large', size=20),
+                        entry('past', day='2026-10-20'), entry('future', day='2026-10-22')]
+        original = copy.deepcopy(self.entries)
+        explanation = dict(label='Résultat attendu', summary='Contrôle conservé', matches=[], blocking=[])
+        calls = []
+        def annotate(entries, **kwargs):
+            entries = list(entries)
+            calls.append([value['id'] for value in entries])
+            return [dict(value, result_explanation=copy.deepcopy(explanation)) for value in entries]
+        self.patch(panel.result_explanations, 'annotate_entries', side_effect=annotate)
+        with patch.object(panel.st, 'download_button', wraps=panel.st.download_button) as downloads:
+            at = self.open()
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(set(calls[0]), {'today-small', 'today-large'})
+            at.selectbox(key='daily_group_size').set_value(2).run()
+            self.assertTrue(all(set(values) == {'today-small', 'today-large'} for values in calls))
+            exported = next(call for call in reversed(downloads.call_args_list)
+                            if call.kwargs.get('key') == 'daily_export')
+            self.assertTrue(callable(exported.args[1]))
+            self.assertEqual(exported.kwargs['on_click'], 'ignore')
+            content = json.loads(exported.args[1]())
+            self.assertEqual({value['id'] for value in content}, {'today-small', 'today-large'})
+            for value in content:
+                source = next(item for item in original if item['id'] == value['id'])
+                self.assertEqual(value, json.loads(json.dumps(dict(source, result_explanation=explanation))))
+            at.segmented_control(key='daily_view').set_value('history').run()
+            self.assertEqual(calls[-1], ['past'])
+        self.assertEqual(self.entries, original)
+        self.network.assert_not_called()
+
     def setUp(self):
         admin = patch('admin_access.can_admin', return_value=True)
         admin.start(); self.addCleanup(admin.stop)
         self.entries=[]
         self.intents=[]
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.fixture_path = Path(folder.name) / 'fixtures.json'
+        self.patch(api, 'STORE_PATH', new=self.fixture_path)
         self.patch(workspace,'_snapshot',return_value=dict(competitions={},fixtures=[],day_count=0,usable_count=0,updated_at=None))
         self.patch(panel,'_now',return_value=NOW)
+        local_date = patch('analysis_date.local_today', return_value=NOW.astimezone(panel.performance.LOCAL_ZONE).date())
+        local_date.start(); self.addCleanup(local_date.stop)
         self.patch(journal,'list_entries',side_effect=lambda *args:self.entries)
         self.patch(panel.tracking,'reconcile_local',return_value={})
         self.patch(panel.worker,'load_selections',return_value=[])
@@ -81,11 +130,40 @@ class DailyPanelTests(unittest.TestCase):
     def patch(self,target,name,**kwargs):
         p=patch.object(target,name,**kwargs);result=p.start();self.addCleanup(p.stop);return result
 
-    def open(self):
-        at=AppTest.from_file('app.py',default_timeout=20).run()
+    def open(self, day=None):
+        at=AppTest.from_file('app.py',default_timeout=20)
+        if day is not None:
+            at.session_state['api_only_data_version'] = '2026-10-18-v1'
+            at.session_state['analysis_selected_day'] = day
+            at.session_state['analysis_follow_today'] = False
+        at.run()
         at.switch_page('ui_pages/daily.py').run()
         self.assertFalse(at.exception)
         return at
+
+    def test_future_selected_day_shows_saved_mixed_groups_details_and_explicit_preparation(self):
+        tomorrow = date(2026,10,22)
+        self.entries=[entry('today'),entry('tomorrow',day=tomorrow.isoformat())]
+        before=copy.deepcopy(self.entries)
+        at=self.open(day=tomorrow)
+        self.assertEqual([button.key for button in at.button if button.label=='Voir l’analyse'],['daily_open_tomorrow'])
+        self.prepare.assert_not_called(); self.network.assert_not_called()
+        at.button(key='daily_prepare').click().run()
+        self.assertFalse(at.exception)
+        self.prepare.assert_called_once_with(day=tomorrow)
+        at.button(key='daily_open_tomorrow').click().run()
+        self.assertFalse(at.exception)
+        table=next(frame.value for frame in at.dataframe if 'Compétition' in frame.value.columns)
+        self.assertEqual(set(table['Compétition']),{'Premier League','Ligue 1'})
+        self.assertEqual(self.entries,before)
+        self.network.assert_not_called()
+
+    def test_past_selected_day_is_consultable_but_cannot_prepare_retrospective_predictions(self):
+        self.entries=[entry('past',day='2026-10-20')]
+        at=self.open(day=date(2026,10,20))
+        self.assertTrue(at.button(key='daily_prepare').disabled)
+        self.assertEqual([button.key for button in at.button if button.label=='Voir l’analyse'],['daily_open_past'])
+        self.prepare.assert_not_called(); self.network.assert_not_called()
 
     def test_all_groups_visible_and_detail_has_every_competition_and_multiple_scenarios(self):
         self.entries=[entry('three'),entry('eight',size=8,support=90)]
@@ -98,13 +176,76 @@ class DailyPanelTests(unittest.TestCase):
         table=next(frame.value for frame in at.dataframe if 'Compétition' in frame.value.columns)
         self.assertEqual(len(table),3)
         self.assertEqual(set(table['Compétition']),{'Premier League','Ligue 1'})
-        html='\n'.join(node.proto.body for node in at.get('html'))
+        html='\n'.join(node.proto.body for node in html_nodes(at))
         self.assertIn('Cote cumulée',html)
         self.assertGreaterEqual(html.count('<th scope="row">'),3)
         self.assertEqual(self.entries,before)
         at.button(key='daily_back').click().run()
         self.assertFalse(at.exception)
         self.assertEqual(len([button for button in at.button if button.label=='Voir l’analyse']),2)
+
+    def test_exact_group_size_filter_covers_two_to_twenty_without_limiting_scenarios_or_pages(self):
+        self.entries=[entry(f'size_{size}',size=size,support=90-size) for size in range(2,21)]
+        original=copy.deepcopy(self.entries)
+        at=self.open()
+        self.assertEqual(len([button for button in at.button if button.label=='Voir l’analyse']),19)
+        for size in (2,3,4,20):
+            at.selectbox(key='daily_group_size').set_value(size).run()
+            self.assertFalse(at.exception)
+            self.assertEqual([button.key for button in at.button if button.label=='Voir l’analyse'],[f'daily_open_size_{size}'])
+        at.button(key='daily_open_size_20').click().run()
+        self.assertFalse(at.exception)
+        frame=next(row.value for row in at.dataframe if 'Compétition' in row.value.columns)
+        self.assertEqual(len(frame),20)
+        at.button(key='daily_back').click().run()
+        self.assertEqual(at.selectbox(key='daily_group_size').value,20)
+        at.selectbox(key='daily_group_size').set_value(None).run()
+        self.assertEqual(len([button for button in at.button if button.label=='Voir l’analyse']),19)
+        self.assertEqual(self.entries,original)
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
+    def test_absent_group_size_stays_selected_with_empty_list_and_resets_pagination(self):
+        self.entries=[entry(f'two_{i}',size=2,support=90-i) for i in range(21)]+[entry('three',size=3)]
+        at=self.open()
+        at.selectbox(key='daily_list_page_size').set_value(10).run()
+        at.selectbox(key='daily_page_index').set_value(2).run()
+        at.selectbox(key='daily_group_size').set_value(3).run()
+        self.assertEqual([button.key for button in at.button if button.label=='Voir l’analyse'],['daily_open_three'])
+        self.assertEqual(at.session_state['daily_preferences']['daily_page_index'],0)
+        at.selectbox(key='daily_group_size').set_value(20).run()
+        self.assertEqual(at.selectbox(key='daily_group_size').value,20)
+        self.assertFalse(any(button.label=='Voir l’analyse' for button in at.button))
+        self.assertTrue(any('Aucune analyse ne correspond' in row.value for row in at.info))
+        at.selectbox(key='daily_group_size').set_value(None).run()
+        self.assertEqual(at.selectbox(key='daily_page_index').value,0)
+        self.prepare.assert_not_called();self.refresh.assert_not_called();self.network.assert_not_called()
+
+    def test_blocking_cause_is_visible_in_list_and_match_table_without_changing_saved_forecast(self):
+        self.entries = [entry('missing-halftime', status='unresolved', day='2026-10-20')]
+        self.entries[0]['created_at'] = '2026-10-19T23:30:00+00:00'
+        original = copy.deepcopy(self.entries)
+        detail = dict(match_id='100', label='Score à la pause manquant',
+            reason='Le score final est présent, mais le score à la pause manque.',
+            state='missing_halftime', raw_status='FT')
+        explanation = dict(label='Score à la pause manquant',
+            summary='Club 0 — Visiteur 0 : score à la pause manquant.', matches=[detail], blocking=[detail])
+        self.patch(panel.result_explanations, 'annotate_entries',
+            side_effect=lambda entries, **kwargs: [dict(value, result_explanation=copy.deepcopy(explanation))
+                                                  for value in entries])
+        at = self.open()
+        at.segmented_control(key='daily_view').set_value('history').run()
+        self.assertFalse(at.exception)
+        self.assertTrue(any('Club 0 — Visiteur 0' in node.value and 'score à la pause manquant' in node.value
+                            for node in at.caption))
+        self.assertEqual(at.selectbox(key='daily_state').value, None)
+        at.button(key='daily_open_missing-halftime').click().run()
+        self.assertFalse(at.exception)
+        table = next(frame.value for frame in at.dataframe if 'Motif du suivi' in frame.value.columns)
+        self.assertEqual(table['État du résultat'].iloc[0], 'Score à la pause manquant')
+        self.assertEqual(table['Motif du suivi'].iloc[0], detail['reason'])
+        self.assertEqual(self.entries, original)
+        self.refresh.assert_not_called()
+        self.network.assert_not_called()
 
     def test_eighty_five_analyses_have_two_pages_by_default_and_all_remain_accessible(self):
         self.entries=[entry(f'analysis_{i:03}',support=90-i) for i in range(85)]
@@ -282,12 +423,25 @@ class DailyPanelTests(unittest.TestCase):
         self.assertIn('Aucun scénario proposé réalisé',text)
         self.assertIn('Scénarios en attente',text)
         self.assertTrue(any(item.value=='Clubs · Choix 2' for item in at.caption))
+        html='\n'.join(node.proto.body for node in html_nodes(at))
+        self.assertIn('aria-label="'+' → '.join(hit['actual'])+'"',html)
+        self.assertIn('aria-label="'+' → '.join(miss['actual'])+'"',html)
+        self.assertEqual(html.count('class="pl-scenario-sequence"'),2)
+        self.assertTrue(any(item.value=='**Scénario réalisé :**' for item in at.markdown))
+        self.assertTrue(any(item.value=='**Scénario observé :**' for item in at.markdown))
+        from scenario_odds import scenario_odds_text
+        for saved, label in ((hit,'réalisé'),(miss,'observé')):
+            self.assertTrue(any(item.value == f'Cote cumulée indicative du scénario {label} : '
+                                f'**{scenario_odds_text(saved["actual"])}** · Référence fixe manuelle'
+                                for item in at.caption))
         at.selectbox(key='daily_verdict').set_value('hit').run()
         self.assertEqual([button.key for button in at.button if button.label=='Voir l’analyse'],['daily_open_hit'])
+        html='\n'.join(node.proto.body for node in html_nodes(at))
+        self.assertEqual(html.count('class="pl-scenario-sequence"'),1)
         at.button(key='daily_open_hit').click().run()
         self.assertFalse(at.exception)
         self.assertTrue(any(item.value=='Clubs · Choix 2' for item in at.caption))
-        html='\n'.join(node.proto.body for node in at.get('html'))
+        html='\n'.join(node.proto.body for node in html_nodes(at))
         self.assertTrue(any(item.value=='**Scénario réalisé :**' for item in at.markdown))
         self.assertIn('<tr class="pl-scenario-realized">',html)
         evaluation=next(frame.value for frame in at.dataframe if 'Premier choix exact' in frame.value.columns)
@@ -325,7 +479,7 @@ class DailyPanelTests(unittest.TestCase):
         at.button(key='daily_open_waiting').click().run()
         self.assertFalse(at.exception)
         self.assertFalse(any('Premier choix exact' in frame.value.columns for frame in at.dataframe))
-        html='\n'.join(node.proto.body for node in at.get('html'))
+        html='\n'.join(node.proto.body for node in html_nodes(at))
         self.assertNotIn('<tr class="pl-scenario-realized">',html)
         at.button(key='daily_back').click().run()
         at.button(key='daily_open_damaged').click().run()

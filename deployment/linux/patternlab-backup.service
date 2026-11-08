@@ -1,0 +1,37 @@
+[Unit]
+Description=Create a verified compressed PatternLab data recovery point
+After=local-fs.target
+ConditionPathExists=/etc/patternlab/worker-cutover-approved
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/patternlab
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+ExecStart=/opt/patternlab/.venv/bin/python /opt/patternlab/deployment/linux/backup.py --run
+TimeoutStartSec=2h
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/patternlab-backups /var/lib/patternlab-ops /opt/patternlab/data
+InaccessiblePaths=/opt/patternlab/.streamlit/secrets.toml /etc/patternlab
+
+# The root installer creates these existing directories before enabling.
+# The online SQLite reader uses mode=ro; SQLite may create its WAL/SHM reader
+# sidecars beside a database. Denying directory writes makes cold WAL reads
+# fail even though no application row is modified. Source code stays read-only
+# and secrets stay inaccessible. All snapshot/restore writes use backup storage.

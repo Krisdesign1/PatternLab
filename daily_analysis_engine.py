@@ -12,7 +12,7 @@ O(N*log(N)).  Historical profiles are counted once.  No API, artifact, journal,
 prediction, training or persistent-store access occurs in this module.
 """
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
 from math import fsum
@@ -148,11 +148,13 @@ def _support(fixture, leagues):
                 reason=' ; '.join(reasons))
 
 
-def plan(raw, now=None, existing=()):
+def plan(raw, now=None, existing=(), *, day=None):
     """Return all constructed daily candidates, excluding already frozen groups.
 
     ``raw`` contains API-Football raw fixtures, including local historical FT
-    results. ``now`` is timezone-aware. ``existing`` accepts previous candidates,
+    results. ``now`` is the real timezone-aware calculation time. ``day`` is an
+    optional Kinshasa calendar date, today by default, including future dates.
+    ``existing`` accepts previous candidates,
     journal entries containing fixtures, or candidate IDs. Equal fixture sets
     are skipped even when an existing journal ID uses a different namespace.
 
@@ -167,7 +169,10 @@ def plan(raw, now=None, existing=()):
     """
     now = _now(now)
     zone = ZoneInfo(TIMEZONE)
-    day = now.astimezone(zone).date().isoformat()
+    today = now.astimezone(zone).date()
+    if day is not None and (type(day) is not date or day < today):
+        raise DailyAnalysisError('Choisissez aujourd’hui ou une date à venir pour préparer une analyse.')
+    day = (day or today).isoformat()
     raw = list(raw)
     diagnostics = dict(raw_fixtures=len(raw), invalid_raw=0, calendar_matches=0,
                        upcoming_confirmed=0, eligible_matches=0, existing_skipped=0,
@@ -194,7 +199,8 @@ def plan(raw, now=None, existing=()):
         except (ValueError, TypeError, AttributeError):
             excluded_counts['unconfirmed_teams'] += 1
     upcoming.sort(key=_order)
-    before = min((row['timestamp'][:10] for row in upcoming), default=now.date().isoformat())
+    before = min(now.date().isoformat(),
+                 min((row['timestamp'][:10] for row in upcoming), default=now.date().isoformat()))
     leagues = _history(raw, before, now, diagnostics)
     diagnostics['upcoming_confirmed'] = len(upcoming)
     support, eligible = {}, []
