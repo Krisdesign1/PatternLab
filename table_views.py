@@ -160,6 +160,26 @@ def dataframe(data=None, *, table_id, reset_token=None, view_key=None, **kwargs)
     return _dataframe_fragment(data, table_id, reset_token, instance, kwargs)
 
 
+def selectable_dataframe(data, *, table_id, key, **kwargs):
+    """Return the displayed frame and its row selection, with saved preferences.
+
+    Unlike read-only tables this stays in the calling page: selecting rows must
+    update the page's add-to-group action. A view/data revision creates a new
+    selection widget so old row offsets can never target different matches.
+    """
+    frame = _frame(data)
+    defaults = _defaults(frame, kwargs)
+    view = _control(_columns(frame, kwargs.get('column_config') or {}), table_id=table_id,
+                    key=key, defaults=defaults)
+    rendered = apply_dataframe_view(frame, view)
+    identity = sha256((json.dumps(view, sort_keys=True, ensure_ascii=False) +
+                       rendered.to_json(orient='split', date_format='iso', default_handler=str)).encode()).hexdigest()[:20]
+    options = _view_kwargs(frame, view, kwargs)
+    event = st.dataframe(rendered, key=f'{key}_{identity}', on_select='rerun',
+                         selection_mode='multi-row', **options)
+    return rendered, event
+
+
 class _Headers(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)

@@ -371,6 +371,13 @@ def render_workspace():
                      icon=':material/database:')
         st.page_link('ui_pages/journal.py', label='Résultats des prévisions avant match',
                      icon=':material/monitoring:')
+    mode = st.segmented_control('Composer mon groupe', ['single', 'mixed'],
+        format_func=lambda value: {'single':'Une compétition', 'mixed':'Toutes compétitions'}[value],
+        default='single', required=True, key='workspace_group_mode', persist_state='session')
+    if mode == 'mixed':
+        from manual_mixed_panel import render
+        render(source)
+        return
     auto = st.toggle('Suivre les scores automatiquement · toutes les 60 secondes', value=False, key='workspace_auto',
                      help='Une requête API par minute pour la date sélectionnée, aujourd’hui ou à venir, pendant que cette page est ouverte. '
                           'Les prédictions restent déclenchées par leur bouton.')

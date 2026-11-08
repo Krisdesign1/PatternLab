@@ -26,6 +26,21 @@ def entry(*, engine='statistical', probability=.3, created=None, size=2, mixed=F
                                dict(sequence=['Égal'] * size, probability=min(.2, probability)),
                                dict(sequence=['2nd'] * size, probability=min(.1, probability))]),
         model_generation={'key': 'saved-generation'}, competition={'name': 'Première division', 'country': 'Côte d’Ivoire'})
+    if mixed:
+        # A new cross-competition record must carry the actual independently
+        # composed distributions and their fixture provenance. A manufactured
+        # statistical ranking cannot attest a multi-competition calculation.
+        import catboost_scenarios
+        import manual_mixed_analysis
+        import prospective_models
+        from test_mixed_models import mixed_history
+        with patch.object(catboost_scenarios, 'load_report', return_value=None), \
+                patch.object(prospective_models, '_context_neighbors',
+                             side_effect=prospective_models.SnapshotError('Configuration absente.')):
+            calculated = manual_mixed_analysis.build(mixed_history(40), fixtures, decision_at=NOW)
+        value = {name: calculated[name] for name in ('source', 'engine', 'fixtures', 'forecast',
+            'comparison_methods', 'history_cutoff_exclusive', 'model_generation')}
+        value['competition'] = {'name': 'Première division', 'country': 'Côte d’Ivoire'}
     snapshot = archive._snapshot(value, NOW)
     return dict(snapshot, id=archive._digest(archive._semantic(snapshot)),
                 created_at=(created or NOW).isoformat())
@@ -175,11 +190,15 @@ class ManualJournalRowsTests(unittest.TestCase):
         mixed = next(row for row in rows if row['size'] == 3)
         self.assertEqual(mixed['league'], 'mixed')
         self.assertEqual(mixed['leagues'], ['39', '61'])
+        self.assertEqual(mixed['primary_method'], 'mixed_clubs')
+        self.assertEqual(mixed['primary_method_name'], 'Clubs · toutes compétitions')
+        self.assertTrue(mixed['comparison_complete'])
         self.assertEqual(mixed['fixtures'], saved[1]['fixtures'])
         self.assertEqual(mixed['day'], '2026-11-06')
         self.assertEqual(mixed['created_local'], '06/11/2026 à 10:00')
         self.assertEqual(mixed['kickoff_range'], '15:00–15:02')
         self.assertEqual(browser.filter_rows(rows, size=3, league='mixed'), [mixed])
+        self.assertEqual(browser.filter_rows(rows, size=3, origin='manual'), [mixed])
         self.assertEqual([row['id'] for row in rows], sorted(row['id'] for row in rows))
 
     def test_tampered_archive_duplicates_and_invalid_clocks_are_rejected(self):

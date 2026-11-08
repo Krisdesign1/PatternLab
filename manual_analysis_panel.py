@@ -18,7 +18,7 @@ from scenario_presentation import result_column
 
 ZONE = ZoneInfo('Africa/Kinshasa')
 ENGINES = {'statistical': 'Clubs + répétitions', 'catboost': 'CatBoost entraîné',
-           'context_neighbors': 'Répétitions par contexte'}
+           'context_neighbors': 'Répétitions par contexte', 'mixed_clubs': 'Clubs · toutes compétitions'}
 
 
 def _now():
@@ -130,6 +130,10 @@ def _detail(entry, result):
                            'Mi-temps': match.get('ht') or 'Non reçu', 'À 90 minutes': match.get('ft') or 'Non reçu',
                            'Résultat': [actual] if actual else [], 'Statut du match':label,
                            'Motif': match.get('reason') or ('Résultat confirmé.' if actual else 'Résultat encore attendu.')})
+        if entry['engine'] == 'mixed_clubs':
+            competition = (entry.get('competition') or {}).get('competitions', {}).get(fixture['league'], {})
+            match_rows[-1]['Compétition'] = ' · '.join(filter(None, (
+                competition.get('country'), competition.get('name')))) or fixture['league']
     st.subheader('Les matchs du groupe', icon=':material/sports_soccer:')
     table_views.dataframe(match_rows,
                  hide_index=True, height='content', width='stretch', row_height=56,

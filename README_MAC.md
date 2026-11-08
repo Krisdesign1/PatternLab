@@ -690,6 +690,30 @@ Voir [le bilan de cette mise en place](audit/VALIDATION_INDIVIDUELLE_2026-10-28.
 
 ## Analyser les matchs
 
+Pour composer vous-même un groupe de plusieurs compétitions, ouvrez
+**Matchs → Choisir mes matchs → Composer mon groupe → Toutes compétitions**.
+Choisissez la date, cochez les lignes du calendrier, puis cliquez sur
+**Ajouter les matchs cochés à mon groupe**. Vous pouvez changer les filtres
+et ajouter d'autres rencontres sans perdre celles du groupe. Retirez les matchs
+indésirables depuis le récapitulatif, puis cliquez sur **Analyser mon groupe**.
+
+Le groupe contient de **2 à 20 matchs** encore à venir, ordonnés par coup d'envoi
+puis identifiant. Le calcul utilise les profils des clubs dans chaque compétition
+et affiche les probabilités par match, leur base et leurs effectifs. La combinaison
+suppose l'indépendance des matchs. Les autres méthodes disponibles sont comparées
+sur les mêmes rencontres ; les méthodes indisponibles sont expliquées.
+Tous les classements effectivement produits sont conservés, avec leurs distributions.
+La sauvegarde automatique est consultable dans **Mes analyses → Sélection manuelle**,
+avec suivi des résultats et export JSON. Ce calcul sauvegardé reste distinct des
+prévisions confirmées par API pour la validation du modèle.
+
+Le groupe et son calcul restent en mémoire dans la session ouverte ; les calculs
+déjà sauvegardés restent dans l'historique après fermeture. Un match commencé,
+disparu du relevé ou dont l'identité a changé reste dans le récapitulatif pour
+vérification et ne peut pas provoquer un nouveau calcul silencieux.
+
+Pour le parcours dans une seule compétition :
+
 1. Choisis la **Date des matchs, à Kinshasa (Africa/Kinshasa, UTC+1)**.
    Le calendrier et les groupes à analyser contiennent uniquement les matchs
    de cette journée. Le mode **Aujourd’hui** suit automatiquement le passage à minuit.

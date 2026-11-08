@@ -4,6 +4,8 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pandas as pd
 from streamlit.testing.v1 import AppTest
@@ -67,6 +69,25 @@ class SavedTableViewsTests(unittest.TestCase):
         self.assertNotIn('test-only-private-value', json.dumps(payload))
         self.assertEqual(payload['columns'], [{'id': 'Match', 'label': 'Match'}, {'id': 'p', 'label': 'p'}])
 
+    def test_selectable_view_preserves_match_ids_and_resets_selection_on_revision(self):
+        frame = pd.DataFrame({'ID match': ['101', '202'], 'Match': ['A', 'B'], 'p': [.4, .8]})
+        view = normalize_view(list(frame), supplied=dict(version=1, columns=list(frame),
+            hidden=['ID match'], widths={'Match': 240}, sort=[{'column': 'p', 'direction': 'desc'}]))
+        event = SimpleNamespace(selection=SimpleNamespace(rows=[0]))
+        with patch.object(views, '_control', return_value=view), patch.object(views.st, 'dataframe', return_value=event) as render:
+            displayed, selection = views.selectable_dataframe(frame, table_id='selectable-test', key='draft')
+            first_key = render.call_args.kwargs['key']
+            self.assertEqual(displayed.iloc[selection.selection.rows[0]]['ID match'], '202')
+            self.assertEqual(render.call_args.kwargs['column_order'], ['Match', 'p'])
+            self.assertEqual(render.call_args.kwargs['column_config']['Match']['width'], 240)
+            self.assertEqual(render.call_args.kwargs['selection_mode'], 'multi-row')
+            views.selectable_dataframe(frame.copy(), table_id='selectable-test', key='draft')
+            self.assertEqual(render.call_args.kwargs['key'], first_key)
+            changed = frame.copy(); changed.loc[1, 'ID match'] = '303'
+            views.selectable_dataframe(changed, table_id='selectable-test', key='draft')
+            self.assertNotEqual(render.call_args.kwargs['key'], first_key)
+        self.assertEqual(list(frame['ID match']), ['101', '202'])
+
     def test_every_production_dataframe_uses_explicit_stable_view_id(self):
         routed, raw = [], []
         for path in Path(__file__).parent.glob('*.py'):
@@ -76,13 +97,13 @@ class SavedTableViewsTests(unittest.TestCase):
                         and isinstance(node.func.value, ast.Name)): continue
                 owner, name = node.func.value.id, node.func.attr
                 if owner == 'st' and name in ('dataframe', 'table'): raw.append((path.name, node.lineno))
-                if owner == 'table_views' and name in ('dataframe', 'table', 'html_table'):
+                if owner == 'table_views' and name in ('dataframe', 'selectable_dataframe', 'table', 'html_table'):
                     identity = next((kw.value for kw in node.keywords if kw.arg == 'table_id'), None)
                     self.assertIsInstance(identity, ast.Constant, (path.name, node.lineno))
                     routed.append(identity.value)
         self.assertFalse(raw)
-        self.assertEqual(len(routed), 192)
-        self.assertEqual(len(set(routed)), 192)
+        self.assertEqual(len(routed), 195)
+        self.assertEqual(len(set(routed)), 195)
 
 
 if __name__ == '__main__': unittest.main()

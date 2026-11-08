@@ -24,7 +24,7 @@ VERSION = 'manual-analysis-v1'
 COMPARISON_VERSION = 'manual-analysis-v2'
 SELECTION_VERSION = 'manual-analysis-v3'
 MAX_BYTES = 512 * 1024
-ENGINES = frozenset(('statistical', 'catboost', 'context_neighbors'))
+ENGINES = frozenset(('statistical', 'catboost', 'context_neighbors', 'mixed_clubs'))
 ZONE = ZoneInfo('Africa/Kinshasa')
 _DROP = frozenset(('result', 'results', 'result_history', 'actual', 'evaluations',
     'matches', 'blocks', 'rows', 'history', 'historical_rows', 'training_rows',
@@ -114,7 +114,10 @@ def _safe(value):
             if any(not isinstance(key, str) for key in item):
                 raise ManualAnalysisError('Le calcul doit contenir uniquement des données JSON.')
             return {key: visit(child, depth + 1) for key, child in item.items()
-                    if key.casefold() not in _DROP}
+                    if key.casefold() not in _DROP
+                    # Club profiles use "matches" for a scalar sample count;
+                    # preserve that diagnostic while excluding match rows.
+                    or key.casefold() == 'matches' and type(child) is int}
         raise ManualAnalysisError('Le calcul doit contenir uniquement des données JSON.')
 
     copied = visit(value, 0)
@@ -170,7 +173,13 @@ def _snapshot(payload, current):
     if forecast.get('size', len(fixtures)) != len(fixtures):
         raise ManualAnalysisError('La taille de l’estimation ne correspond pas aux matchs.')
     leagues = {row['league'] for row in fixtures}
-    if forecast.get('league') is not None and leagues != {str(forecast['league'])}:
+    mixed = payload['engine'] == 'mixed_clubs'
+    if mixed and (forecast.get('league') != 'mixed'
+                  or forecast.get('leagues') != sorted(leagues, key=int)
+                  or forecast.get('assumes_block_independence') is not True):
+        raise ManualAnalysisError('Le calcul de compétitions multiples doit conserver ses compétitions et son hypothèse de composition.')
+    if not mixed and (len(leagues) != 1 or forecast.get('league') is not None
+                      and leagues != {str(forecast['league'])}):
         raise ManualAnalysisError('La compétition de l’estimation ne correspond pas aux matchs.')
     if forecast.get('source', 'API-Football') != 'API-Football':
         raise ManualAnalysisError('La provenance de l’estimation est invalide.')
@@ -197,6 +206,8 @@ def _snapshot(payload, current):
     if country is not None and (not isinstance(country, str) or not country.strip()):
         raise ManualAnalysisError('Le pays de la compétition est invalide.')
     comparisons = payload.get('comparison_methods')
+    if mixed and comparisons is None:
+        raise ManualAnalysisError('Le calcul de compétitions multiples doit conserver ses méthodes complètes.')
     declared = payload.get('version')
     selection = payload.get('proposal_selection')
     if declared not in (None, VERSION, COMPARISON_VERSION, SELECTION_VERSION):
@@ -217,7 +228,8 @@ def _snapshot(payload, current):
         comparisons = _safe(comparisons)
         try:
             snapshot['comparison_methods'] = manual_proposal_archive.validate(
-                comparisons, forecast, payload['engine'], len(fixtures), cutoff=cutoff, leagues=leagues)
+                comparisons, forecast, payload['engine'], len(fixtures), cutoff=cutoff, leagues=leagues,
+                fixtures=fixtures, captured_at=current)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             raise ManualAnalysisError(str(error)) from None
     if selection is not None:

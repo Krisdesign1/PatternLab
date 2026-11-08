@@ -8,7 +8,7 @@ from math import fsum, isclose, isfinite
 
 VALUES = ('1st', 'Égal', '2nd')
 ENGINE_METHOD = {'statistical': 'combined', 'catboost': 'catboost',
-                 'context_neighbors': 'context_neighbors'}
+                 'context_neighbors': 'context_neighbors', 'mixed_clubs': 'clubs'}
 METHOD_ORDER = ('frequency', 'clubs', 'combined', 'catboost', 'context_neighbors')
 VERSION = 'manual-proposals-v1'
 
@@ -32,7 +32,7 @@ def _ranking(payload, size):
         raise ValueError('Les probabilités comparatives ne respectent pas leur classement.')
 
 
-def validate(methods, forecast, engine, size, *, cutoff=None, leagues=()):
+def validate(methods, forecast, engine, size, *, cutoff=None, leagues=(), fixtures=None, captured_at=None):
     """Validate the complete displayed method set and selected-model agreement."""
     selected = ENGINE_METHOD.get(engine)
     if selected is None or not isinstance(methods, dict) or not methods:
@@ -48,17 +48,37 @@ def validate(methods, forecast, engine, size, *, cutoff=None, leagues=()):
         _ranking(payload, size)
         if payload.get('source', 'API-Football') != 'API-Football':
             raise ValueError('La comparaison doit provenir d’API-Football.')
-        if payload.get('league') is not None and {str(payload['league'])} != set(map(str, leagues)):
+        if payload.get('distribution') is not None:
+            from scenario_proposal_archive import validate_method
+            # Validate the partition before reading its component indices in
+            # the provenance checks below.
+            validate_method(payload, size)
+        elif engine == 'mixed_clubs':
+            raise ValueError('La distribution complète du calcul mixte doit être conservée.')
+        if engine == 'mixed_clubs':
+            if not fixtures or len(fixtures) != size or cutoff is None or captured_at is None:
+                raise ValueError('Les affiches et l’heure du calcul mixte doivent être conservées.')
+            # Reuse the official block-product provenance checks: every league
+            # has its own positions, identities, distribution and common cutoff.
+            import prediction_journal as journal
+            journal._mixed_provenance(payload, fixtures, cutoff, sorted(map(str, leagues), key=int))
+        elif payload.get('league') is not None and {str(payload['league'])} != set(map(str, leagues)):
             raise ValueError('La compétition de comparaison ne correspond pas aux matchs.')
         if cutoff and payload.get('training_before') is not None:
             from datetime import date
             before = payload['training_before']
             if not isinstance(before, str) or date.fromisoformat(before).isoformat() != before or before > cutoff:
                 raise ValueError('La comparaison contient une coupure historique postérieure au calcul.')
-        if payload.get('distribution') is not None:
-            import prospective_models
-            from scenario_proposal_archive import validate_method
-            validate_method(payload, size)
+    if engine == 'mixed_clubs':
+        # Additional proposals remain archived intact. The group contract uses
+        # the canonical reference when checking target/time bindings.
+        from scenario_group_contract import require_recordable
+        canonical = deepcopy(methods)
+        for payload in canonical.values():
+            payload['ranking'] = payload['ranking'][:3]
+        contract = require_recordable(fixtures, canonical, captured_at.isoformat())
+        if contract['status'] != 'valid':
+            raise ValueError('Les probabilités du calcul mixte doivent conserver les identifiants ordonnés et leur heure de décision.')
     # Preserve exactly the selected engine's pre-existing ordering and masses.
     for archived, original in zip(methods[selected]['ranking'], forecast['ranking']):
         if archived['sequence'] != original['sequence'] or not isclose(

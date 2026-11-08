@@ -18,7 +18,7 @@ import scenario_outcomes
 
 ZONE = ZoneInfo('Africa/Kinshasa')
 ENGINES = {'statistical': 'Clubs + répétitions', 'catboost': 'CatBoost entraîné',
-           'context_neighbors': 'Répétitions par contexte'}
+           'context_neighbors': 'Répétitions par contexte', 'mixed_clubs': 'Clubs · toutes compétitions'}
 
 
 def _stamp(value):
