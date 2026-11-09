@@ -167,7 +167,8 @@ class ClubTrendsDayPanelTests(unittest.TestCase):
             self.assertFalse(self.at.exception)
             self.assertEqual(len(self.table()), 5)
             arguments = download.call_args.kwargs
-        exported = list(csv.DictReader(StringIO(arguments['data'].decode('utf-8-sig')), delimiter=';'))
+        content = arguments['data']() if callable(arguments['data']) else arguments['data']
+        exported = list(csv.DictReader(StringIO(content.decode('utf-8-sig')), delimiter=';'))
         self.assertEqual(len(exported), 15)
         self.assertEqual({row['Date'] for row in exported}, {'06/11/2026'})
         self.assertEqual({row['Journée des matchs (Kinshasa)'] for row in exported}, {DAY.isoformat()})

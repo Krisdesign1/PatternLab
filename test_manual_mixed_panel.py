@@ -84,6 +84,8 @@ def readonly_grid(data, **kwargs):
 
 class ManualMixedPanelTests(unittest.TestCase):
     def setUp(self):
+        panel._coverage.clear()
+        self.addCleanup(panel._coverage.clear)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / 'manual.sqlite3'
@@ -264,6 +266,91 @@ class ManualMixedPanelTests(unittest.TestCase):
         self.assertEqual(self.at.button_group(key='workspace_group_mode').value, 'mixed')
         self.assertEqual(len(self.table('ID match')), 4)
         self.history.assert_not_called()
+
+    def test_history_filter_names_usable_and_unusable_matches_and_restores_all(self):
+        self.history.return_value = ([row for row in mixed_history(40) if row['league'] == '39'] +
+                                     [row for row in mixed_history(20) if row['league'] == '61'])
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('eligible').run()
+        self.assert_clean()
+        table = self.table('ID match')
+        self.assertEqual(list(table['ID match']), ['9000', '9002'])
+        self.assertTrue((table['Exploitable pour Clubs'] == 'Oui').all())
+        self.assertTrue((table['Résultats exploitables'] == 40).all())
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('unavailable').run()
+        self.assert_clean()
+        table = self.table('ID match')
+        self.assertEqual(list(table['ID match']), ['9001', '9003'])
+        self.assertTrue((table['Exploitable pour Clubs'] == 'Non').all())
+        self.assertTrue((table['Résultats exploitables'] == 20).all())
+        self.assertTrue(all('30' in reason for reason in table['Motif des données']))
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('all').run()
+        self.assertEqual(len(self.table('ID match')), 4)
+        self.saved.assert_not_called()
+
+    def test_history_filter_does_not_drop_existing_group_or_saved_forecast(self):
+        self.choose(0, 1)
+        self.at.button(key='mixed_manual_analyze').click().run()
+        self.assert_clean()
+        group = deepcopy(self.draft())
+        forecast = deepcopy(self.at.session_state['mixed_manual_forecast'])
+        with patch.object(panel.analysis, 'build', side_effect=AssertionError('Filtering must not infer')):
+            for value in ('eligible', 'unavailable', 'all', 'eligible'):
+                self.at.selectbox(key='mixed_manual_data_filter').set_value(value).run()
+                self.assert_clean()
+                self.assertEqual(self.draft(), group)
+                self.assertEqual(self.at.session_state['mixed_manual_forecast'], forecast)
+        self.saved.assert_called_once()
+
+    def test_history_filter_uses_displayed_sorted_match_ids(self):
+        self.history.return_value = ([row for row in mixed_history(40) if row['league'] == '39'] +
+                                     [row for row in mixed_history(20) if row['league'] == '61'])
+        self.at.session_state['test_reverse_calendar'] = True
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('eligible').run()
+        self.choose(0)
+        self.assertEqual(set(self.draft()), {'9002'})
+        self.saved.assert_not_called()
+
+    def test_unavailable_history_is_not_presented_as_zero_and_all_remains_available(self):
+        self.history.side_effect = api_football.ApiFootballError('Read unavailable')
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('unavailable').run()
+        self.assert_clean()
+        table = self.table('ID match')
+        self.assertTrue(table['Résultats exploitables'].isna().all())
+        self.assertTrue(all('indisponible' in reason for reason in table['Motif des données']))
+        self.assertTrue(any('vérifiée' in item.value for item in self.at.warning))
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('all').run()
+        self.assert_clean()
+        self.assertEqual(len(self.table('ID match')), 4)
+        self.saved.assert_not_called()
+
+    def test_failed_group_analysis_names_the_matches_with_missing_history(self):
+        self.history.return_value = ([row for row in mixed_history(40) if row['league'] == '39'] +
+                                     [row for row in mixed_history(20) if row['league'] == '61'])
+        self.choose(0, 1)
+        self.at.button(key='mixed_manual_analyze').click().run()
+        self.assert_clean()
+        self.assertTrue(self.at.warning)
+        table = self.table('ID compétition')
+        self.assertEqual(list(table['ID compétition']), ['61'])
+        self.assertEqual(list(table['Compétition']), ['France · Ligue 1'])
+        self.assertEqual(list(table['Match']), ['H1 — A1'])
+        self.assertEqual(list(table['Résultats exploitables']), [20])
+        self.assertEqual(set(self.draft()), {'9000', '9001'})
+        self.saved.assert_not_called()
+
+    def test_new_data_revision_updates_filter_without_removing_selected_matches(self):
+        self.choose(0, 1)
+        group = deepcopy(self.draft())
+        self.at.selectbox(key='mixed_manual_data_filter').set_value('eligible').run()
+        self.assertEqual(len(self.table('ID match')), 4)
+        self.history.return_value = [row for row in mixed_history(40) if row['league'] == '39']
+        workspace._signature.return_value = ('mixed-panel-isolated', 2)
+        self.at.run(); self.assert_clean()
+        self.assertEqual(list(self.table('ID match')['ID match']), ['9000', '9002'])
+        self.assertEqual(self.draft(), group)
+        selected = self.table('État')
+        self.assertEqual(list(selected['Exploitable pour Clubs']), ['Oui', 'Non'])
+        self.saved.assert_not_called()
 
 
 if __name__ == '__main__':

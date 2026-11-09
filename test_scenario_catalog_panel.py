@@ -1,5 +1,8 @@
 """Complete-catalogue UI: pagination is presentation, never model selection."""
 from copy import deepcopy
+import csv
+from decimal import Decimal
+from io import StringIO
 import json
 import unittest
 from unittest.mock import patch
@@ -86,6 +89,17 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.network.assert_not_called()
         self.assertTrue(any('catalogue complet est lié' in item.value for item in at.caption))
 
+    def test_all_nine_two_match_scenarios_have_their_full_manual_odds(self):
+        value = {'clubs': method(size=2)}
+        original = deepcopy(value)
+        at = self.app(methods=value)
+        expected = ['9,61', '9,30', '6,51', '9,30', '9,00', '6,30', '6,51', '6,30', '4,41']
+        self.assertEqual(self.table()['Cote cumulée'].tolist(), expected)
+        self.assertEqual(self.table()['Rang'].tolist(), list(range(1, 10)))
+        self.assertTrue(any('références fixes manuelles' in item.value for item in at.caption))
+        self.assertEqual(value, original)
+        self.network.assert_not_called()
+
     def test_old_distribution_is_consultable_without_inventing_historical_proposals(self):
         methods = deepcopy(self.methods)
         for value in methods.values():
@@ -100,6 +114,7 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         next_button.click().run()
         self.assertFalse(at.exception)
         self.assertEqual(self.table()['Rang'].tolist(), list(range(51, 101)))
+        self.assertTrue(self.table()['Cote cumulée'].notna().all())
         previous = next(item for item in at.button if item.label == 'Page précédente')
         previous.click().run()
         self.assertFalse(at.exception)
@@ -143,6 +158,10 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.assertEqual(self.native_grid.call_args.kwargs['height'], 650)
         self.assertEqual(list(self.table()['Scénario complet'].iloc[0]),
                          [f'{index} 1st' for index in range(1, 11)])
+        self.assertAlmostEqual(self.table()['Cote cumulée'].iloc[0], float(Decimal('3.1')**10))
+        self.assertAlmostEqual(self.table()['Cote cumulée'].iloc[-1], float(Decimal('2.1')**10))
+        self.assertTrue(self.table()['Cote cumulée'].notna().all())
+        self.assertEqual(self.native_grid.call_args.kwargs['column_config']['Cote cumulée']['type_config']['format'], '%.2f')
         self.assertTrue(at.number_input[0].disabled)
         self.assertEqual(self.methods, self.before)
 
@@ -199,6 +218,8 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.lookup.assert_called_once()
         self.assertEqual(self.lookup.call_args.args[1], ['Égal'] * 10)
         self.assertTrue(any(item.label == 'Probabilité conservée de ce scénario' for item in at.metric))
+        self.assertTrue(any('Cote cumulée indicative de ce scénario : 59\u202f049,00' in item.value
+                            for item in at.caption))
         self.assertEqual(len(self.table()), 50)
 
     def test_invalid_lookup_does_not_score_a_prefix(self):
@@ -256,9 +277,25 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.assertEqual(exported['catalogue']['total'], 59049)
         self.assertEqual(exported['method']['distribution'], value['distribution'])
         self.assertEqual(exported['ordered_fixtures'][0]['match_id'], '1')
+        self.assertEqual(exported['reference_odds']['per_outcome'], {'1st': 3.1, 'Égal': 3.0, '2nd': 2.1})
+        self.assertEqual(exported['reference_odds']['source'], 'manual_fixed_reference')
+        self.assertEqual(exported['reference_odds']['calculation'], 'product_of_all_outcomes_in_sequence')
         self.assertEqual(value, original)
-        csv = panel._csv([dict(sequence=['1st', '2nd'], probability=.002)], 8, None).decode('utf-8-sig')
-        self.assertIn('9,1st → 2nd,0.2,', csv)
+        payload = panel._csv([dict(sequence=['1st', '2nd'], probability=.002)], 8, None).decode('utf-8-sig')
+        row = next(csv.DictReader(StringIO(payload)))
+        self.assertEqual(row, {'Rang':'9', 'Scénario':'1st → 2nd', 'Cote cumulée':'6.51',
+                              'Probabilité (%)':'0.2', 'Scénario observé':''})
+
+    def test_csv_odds_use_twenty_matches_without_changing_probabilities_or_verdict(self):
+        rows = [dict(sequence=['2nd']*20, probability=.000001)]
+        original = deepcopy(rows)
+        payload = panel._csv(rows, 500, ['2nd']*20).decode('utf-8-sig')
+        row = next(csv.DictReader(StringIO(payload)))
+        self.assertEqual(row['Rang'], '501')
+        self.assertAlmostEqual(float(row['Cote cumulée']), float(Decimal('2.1')**20))
+        self.assertAlmostEqual(float(row['Probabilité (%)']), .0001)
+        self.assertEqual(row['Scénario observé'], 'Oui')
+        self.assertEqual(rows, original)
 
 
 class CompleteCatalogueLoadingTests(unittest.TestCase):

@@ -16,6 +16,7 @@ import streamlit as st
 
 from analytics import normalize_value
 import frozen_scenario_catalog as catalog
+from scenario_odds import DEFAULT_ODDS, combined_odds, scenario_odds_text
 import scenario_tables as tables
 import table_views
 
@@ -104,6 +105,7 @@ def _render_rows(rows, offset, observed, scope, size):
         display = []
         for rank, row in enumerate(rows, offset + 1):
             item = {'Rang': rank, 'Scénario complet': _colored_sequence(row['sequence']),
+                    'Cote cumulée': scenario_odds_text(row['sequence']),
                     'Probabilité du groupe (%)': _percent(row['probability'])}
             if observed is not None:
                 item['Résultat final'] = ':green-badge[Scénario observé]' if list(row['sequence']) == observed else ''
@@ -116,11 +118,13 @@ def _render_rows(rows, offset, observed, scope, size):
     options = [f'{index} {label}' for index in range(1, size + 1) for label in VALUES]
     config = {'Scénario complet': st.column_config.MultiselectColumn(
         options=options, color=['#8fc1ff', '#d7b9ff', '#ffc58a'] * size),
+        'Cote cumulée': st.column_config.NumberColumn(format='%.2f'),
         'Probabilité du groupe (%)': st.column_config.NumberColumn(format='%.6g')}
     display = []
     for rank, row in enumerate(rows, offset + 1):
         item = {'Rang': rank, 'Scénario complet': [f'{index} {label}'
                     for index, label in enumerate(row['sequence'], 1)],
+                'Cote cumulée': combined_odds(row['sequence']),
                 'Probabilité du groupe (%)': row['probability'] * 100}
         if observed is not None:
             item['Résultat final'] = ['Scénario observé'] if list(row['sequence']) == observed else []
@@ -134,10 +138,12 @@ def _render_rows(rows, offset, observed, scope, size):
 
 def _csv(rows, offset, actual):
     buffer = StringIO(newline='')
-    writer = csv.DictWriter(buffer, fieldnames=['Rang', 'Scénario', 'Probabilité (%)', 'Scénario observé'])
+    writer = csv.DictWriter(buffer, fieldnames=['Rang', 'Scénario', 'Cote cumulée',
+                                               'Probabilité (%)', 'Scénario observé'])
     writer.writeheader()
     for number, row in enumerate(rows, offset + 1):
         writer.writerow({'Rang': number, 'Scénario': ' → '.join(row['sequence']),
+                         'Cote cumulée': combined_odds(row['sequence']),
                          'Probabilité (%)': row['probability'] * 100,
                          'Scénario observé': ('Oui' if list(row['sequence']) == actual else 'Non')
                          if actual is not None else ''})
@@ -146,7 +152,9 @@ def _csv(rows, offset, actual):
 
 def _compact(method, descriptor, fixtures):
     value = dict(scope='complete_frozen_distribution', catalogue=deepcopy(descriptor),
-                 method=deepcopy(method), note='Catalogue des possibilités, distinct des propositions historiques.')
+                 method=deepcopy(method), note='Catalogue des possibilités, distinct des propositions historiques.',
+                 reference_odds=dict(source='manual_fixed_reference', per_outcome=dict(DEFAULT_ODDS),
+                     calculation='product_of_all_outcomes_in_sequence', rounding='display_only_2_decimals'))
     if fixtures:
         value['ordered_fixtures'] = [{name: item[name] for name in
             ('match_id', 'league', 'home', 'away', 'timestamp') if name in item} for item in fixtures]
@@ -183,6 +191,8 @@ def render(methods, fixtures=None, actual=None, *, key='scenario_catalog', title
     st.subheader(title or 'Tous les scénarios possibles', icon=':material/view_list:')
     st.caption('Classement complet par probabilité décroissante, sans coupure à trois. '
                'Les pourcentages concernent le groupe entier et ne sont pas recalculés entre les lignes affichées.')
+    st.caption('Cotes cumulées indicatives : produit des références fixes manuelles '
+               '1st = 3,10 · Égal = 3,00 · 2nd = 2,10. Ce ne sont pas des cotes relevées par l’API.')
     base = str(key) + '_catalog'
     method_key = base + '_method'
     if st.session_state.get(method_key) not in available:
@@ -255,6 +265,7 @@ def render(methods, fixtures=None, actual=None, *, key='scenario_catalog', title
             result = selected['result']
             tables.render_sequence(result['sequence'], label='Scénario recherché')
             st.metric('Probabilité conservée de ce scénario', _percent(result['probability']))
+            st.caption('Cote cumulée indicative de ce scénario : ' + scenario_odds_text(result['sequence']))
     st.download_button('Exporter le catalogue complet (JSON compact)',
         data=lambda: _compact(method, descriptor, fixtures),
         file_name=f'catalogue_complet_{name}_{size}_matchs.json', mime='application/json',

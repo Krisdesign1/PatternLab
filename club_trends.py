@@ -100,7 +100,7 @@ def build(start, end, *, seasons=None, recent=10, role='all', now=None, path=Non
     if type(recent) is not int or not 1 <= recent <= 100:
         raise TrendsError('La fenêtre récente doit contenir de 1 à 100 matchs.')
     where, args, current = base._bounds(start, end, seasons, now)
-    groups, reasons, totals = {}, Counter(), Counter(observed=0, matches=0, excluded=0, not_finished=0)
+    groups, role_history, reasons, totals = {}, {}, Counter(), Counter(observed=0, matches=0, excluded=0, not_finished=0)
     unassigned = 0
     try:
         with fixture_store._connection(base._database(path)) as connection:
@@ -116,11 +116,18 @@ def build(start, end, *, seasons=None, recent=10, role='all', now=None, path=Non
                     reasons[record['reason']] += 1
                 else:
                     totals['not_finished'] += 1
-                appearances = list(_appearances(record, role))
+                appearances = list(_appearances(record, 'all'))
                 if not appearances:
                     unassigned += 1
                 for match in appearances:
                     key = (match['team_id'], match['league'])
+                    if match['included']:
+                        if key not in role_history:
+                            role_history[key] = {side: deque(maxlen=recent) for side in ('home', 'away')}
+                        windows = role_history[key]
+                        windows[match['role']].append((match['value'], match['kickoff_local'], match['match_id']))
+                    if role != 'all' and match['role'] != role:
+                        continue
                     item = groups.get(key)
                     if item is None:
                         item = groups[key] = dict(team_id=key[0], league=key[1],
@@ -151,6 +158,13 @@ def build(start, end, *, seasons=None, recent=10, role='all', now=None, path=Non
     except fixture_store.FixtureStoreError:
         raise TrendsError('La lecture des tendances des clubs est momentanément indisponible.') from None
     rows = [_finish(item) for item in groups.values()]
+    for item in rows:
+        windows = role_history.get((item['team_id'], item['league']), {})
+        for side in ('home', 'away'):
+            window = windows.get(side, ())
+            item['recent_' + side + '_results'] = [entry[0] for entry in window]
+            item['recent_' + side + '_dates'] = [entry[1] for entry in window]
+            item['recent_' + side + '_ids'] = [entry[2] for entry in window]
     rows.sort(key=lambda item: (item['country'].casefold(), item['competition'].casefold(), item['club'].casefold(), item['team_id']))
     totals.update(profiles=len(rows), clubs=len({item['team_id'] for item in rows}))
     return dict(version=VERSION, rows=rows, totals=dict(totals), exclusion_reasons=dict(sorted(reasons.items())),

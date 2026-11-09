@@ -701,6 +701,16 @@ Choisissez la date, cochez les lignes du calendrier, puis cliquez sur
 et ajouter d'autres rencontres sans perdre celles du groupe. Retirez les matchs
 indésirables depuis le récapitulatif, puis cliquez sur **Analyser mon groupe**.
 
+Le filtre **Disponibilité des données** propose **Tous les matchs** (par défaut),
+**Exploitables pour Clubs** et **Non exploitables pour Clubs**. Ces deux derniers
+choix vérifient l'historique local des rencontres encore à venir : les seuils
+existants sont 30 résultats de compétition sur 3 dates UTC strictement antérieures
+à la coupure du groupe. Le tableau affiche les effectifs, cette coupure et le motif.
+Il distingue un calcul basé sur les profils des clubs d'un calcul basé sur la
+tendance de la compétition. La possibilité de calculer ne mesure pas sa précision.
+Changer ce filtre conserve votre groupe et son calcul sauvegardé. Cette vérification
+ne demande aucun appel API, entraînement ou nouveau calcul de probabilités.
+
 Le groupe contient de **2 à 20 matchs** encore à venir, ordonnés par coup d'envoi
 puis identifiant. Le calcul utilise les profils des clubs dans chaque compétition
 et affiche les probabilités par match, leur base et leurs effectifs. La combinaison
@@ -2321,9 +2331,13 @@ Détails et preuves : [correction de tout le système](audit/CORRECTION_PROPOSIT
 
 ### Matchs de la journée dans les tendances des clubs
 
-Dans **Matchs → Tendances des clubs**, choisissez **Matchs de la journée**. La date des matchs, en haut de l'application, s'applique aussi à cette vue (aujourd'hui par défaut, autre journée possible). Le tableau réunit les horaires de Kinshasa, les équipes, la compétition, les scores et statuts, ainsi que leurs fréquences historiques 1st / Égal / 2nd et les effectifs correspondants. La période historique et le rôle restent réglables dans le formulaire.
+Dans **Matchs → Tendances des clubs**, choisissez **Matchs de la journée**. La date commune initialise la période des matchs. Réglez ensuite **Première journée des matchs** et **Dernière journée des matchs incluse**, puis cliquez **Afficher la période des matchs**, pour consulter et exporter une ou plusieurs journées. Les deux dates sont incluses, en heures de Kinshasa. Le formulaire historique règle séparément les rencontres utilisées pour calculer les fréquences.
 
 Les rencontres sans profil historique sont conservées, avec des fréquences manquantes. Pays, compétition, état du match et recherche filtrent l'affichage. L'export CSV contient toutes les rencontres filtrées, leurs dates et le contexte historique, indépendamment de la pagination. **Actualiser le relevé local** relit les rencontres déjà importées ; les scores suivent le dernier relevé API horodaté. La vue **Tous les clubs** conserve le tableau historique complet.
+
+Dans les deux vues, **Récents domicile (ancien → récent)** et **Récents extérieur (ancien → récent)** sont deux colonnes distinctes. Dans la vue des matchs, elles correspondent au club recevant à domicile et au club visiteur à l'extérieur. Dans **Tous les clubs**, elles décrivent les deux rôles du même club, dans sa compétition exacte. Chaque suite conserve jusqu'aux N résultats exploitables choisis, dans la période historique ; ses effectifs, dates et identifiants de rencontres sont exportés. Les données absentes ne deviennent jamais des résultats `Égal`.
+
+Pour exporter **Tous les clubs** sur une période, appliquez les dates historiques puis utilisez **Exporter tous les profils filtrés (CSV)**. Les exports sont préparés au clic sur le téléchargement, pour éviter de recalculer de gros fichiers lors de chaque changement de filtre. Ces tableaux décrivent les résultats corrigés actuellement disponibles ; ils ne constituent pas une reconstitution de prévisions avant match.
 
 
 ### Conservation des propositions — correction du 7 novembre 2026
@@ -2345,6 +2359,7 @@ Pays, compétition, recherche, tri, pagination et export s'appliquent ensuite à
 Dans les fiches d'analyses manuelles, automatiques et leur historique, **Tous les scénarios possibles** présente désormais la distribution complète, classée par probabilité décroissante. Choisir une méthode, passer à la page suivante ou rechercher une suite exacte ne relance ni entraînement ni appel API.
 
 - **Scénarios à afficher** : 50, 100, 250, 500 lignes ou **Tout afficher**. La taille et la position restent conservées dans la session ; changer de taille revient à la première page.
+- **Cote cumulée** figure sur chaque ligne, y compris en mode **Tout afficher** et dans l'export CSV. Elle multiplie les références fixes manuelles de tous les matchs du scénario : **1st = 3,10 · Égal = 3,00 · 2nd = 2,10**. Par exemple, `1st → Égal → 2nd` donne **19,53**. Ces références ne sont pas des cotes relevées par API-Football. La recherche exacte indique aussi la cote ; le JSON compact conserve les références et la règle de produit.
 - 10 matchs : **59 049 possibilités** par méthode. **Tout afficher** les charge dans un tableau avec défilement, sans parcourir 1 181 pages de 50 lignes.
 - 20 matchs : **3 486 784 401 possibilités**. Seule la page demandée est calculée ; la distribution et son empreinte suffisent à conserver tout l'espace sans un fichier contenant des milliards de lignes.
 - **Rechercher un scénario complet** affiche sa probabilité absolue à partir du calcul figé, même après le troisième rang. Le résultat final d'un groupe évalué est consultable de la même manière.

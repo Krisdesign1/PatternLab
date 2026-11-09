@@ -172,7 +172,8 @@ class ClubTrendsDayFilterPanelTests(unittest.TestCase):
             self.at.selectbox(key='club_trends_summary_page').set_value(2).run()
             self.assertEqual(len(self.table()), 8)
             kwargs = download.call_args.kwargs
-        exported = list(csv.DictReader(StringIO(kwargs['data'].decode('utf-8-sig')),delimiter=';'))
+        content = kwargs['data']() if callable(kwargs['data']) else kwargs['data']
+        exported = list(csv.DictReader(StringIO(content.decode('utf-8-sig')),delimiter=';'))
         self.assertEqual(len(exported), total)
         self.assertEqual({row['Filtre matchs · journée de Kinshasa'] for row in exported}, {DAY.isoformat()})
         self.assertEqual({row['Fin incluse (Kinshasa)'] for row in exported}, {'2026-11-05'})

@@ -11,6 +11,7 @@ import streamlit as st
 import api_football as api
 import club_trends as trends
 import club_trends_day as day_trends
+from club_recent_sequences import role_columns
 from analysis_date import get_selected_day
 from halftime_domain import CLASS_ORDER
 from ux_theme import render_page_header
@@ -41,6 +42,11 @@ def _details(team, league, start, end, seasons, role, signature, as_of, offset, 
 @st.cache_data(ttl=60, max_entries=4, show_spinner=False)
 def _day_calendar(day, signature, refresh_token):
     return day_trends.load(day)
+
+
+@st.cache_data(ttl=60, max_entries=4, show_spinner=False)
+def _period_calendar(start, end, signature, refresh_token):
+    return day_trends.load_period(start, end)
 
 
 def _result_column(label):
@@ -76,6 +82,7 @@ def _table(rows):
              'Tendance dominante': list(row['leaders']), 'Matchs récents': row['recent_matches'],
              'Tendance récente': recent_leaders(row),
              'Récents (ancien → récent)': ' → '.join(row['recent_results']),
+             **role_columns(row, row),
              'Résultats exclus': row['excluded'], 'Non terminés': row['not_finished'],
              'Premier résultat': row['first_day'], 'Dernier résultat': row['last_day'],
              'ID club API': row['team_id'], 'ID compétition API': row['league']}
@@ -167,18 +174,27 @@ def _day_table(rows):
             for result in CLASS_ORDER:
                 value[f'{label} · {result} (%)'] = profile['percentages'][result] if profile else None
             value[f'Tendance {label.lower()}'] = list(profile['leaders']) if profile else []
+            value[f'{label} · récents selon le rôle choisi'] = ' → '.join(profile['recent_results']) if profile else ''
+        value.update(role_columns(row.get('home_profile'), row.get('away_profile')))
+        value.update({'ID du match API': row['match_id'], 'ID compétition API': row['league'],
+                      'ID club domicile API': row['home_id'], 'ID club extérieur API': row['away_id']})
         values.append(value)
     return values
 
 
-def _day_csv(values, request, day, calendar):
+def _day_csv(values, request, day, calendar, end=None):
+    end = end or day
     output = []
     for row in values:
         item = {name: ' / '.join(value) if isinstance(value, list) else value for name, value in row.items()}
-        item.update({'Journée des matchs (Kinshasa)': day.isoformat(),
+        local_day = datetime.strptime(item['Date'], '%d/%m/%Y').date().isoformat()
+        item.update({'Journée des matchs (Kinshasa)': local_day,
+                     'Première journée exportée': day.isoformat(), 'Dernière journée exportée': end.isoformat(),
                      'Début historique inclus': request[0].isoformat(),
                      'Fin historique incluse': request[1].isoformat(), 'Rôle historique': ROLES[request[4]],
-                     'Dernier relevé du calendrier UTC': calendar.get('calendar_updated_at') or '',
+                     'Dernier relevé du calendrier UTC': calendar.get('calendar_updates', {}).get(local_day)
+                         or (calendar.get('calendar_updated_at') if day == end else '') or '',
+                     'Fenêtre récente par rôle': request[3],
                      'Consultation historique UTC': request[6]})
         output.append(item)
     out = StringIO(newline='')
@@ -190,17 +206,49 @@ def _day_csv(values, request, day, calendar):
     return out.getvalue().encode('utf-8-sig')
 
 
+def _match_period(day):
+    if st.session_state.get('club_trends_period_default') != day:
+        st.session_state['club_trends_period_default'] = day
+        st.session_state['club_trends_period_start'] = day
+        st.session_state['club_trends_period_end'] = day
+        st.session_state['club_trends_period_applied'] = (day, day)
+    with st.form('club_trends_match_period'):
+        with st.container(horizontal=True):
+            start = st.date_input('Première journée des matchs', key='club_trends_period_start',
+                format='DD/MM/YYYY', min_value=date(1900, 1, 1), max_value=date(2100, 12, 31))
+            end = st.date_input('Dernière journée des matchs incluse', key='club_trends_period_end',
+                format='DD/MM/YYYY', min_value=date(1900, 1, 1), max_value=date(2100, 12, 31))
+        apply = st.form_submit_button('Afficher la période des matchs')
+    if apply:
+        if start > end:
+            st.warning('La première journée des matchs doit précéder ou être égale à la dernière.')
+            return None
+        st.session_state['club_trends_period_applied'] = start, end
+    return st.session_state['club_trends_period_applied']
+
+
 def _render_day(report, request, day):
-    st.subheader(f'Matchs du {day:%d/%m/%Y}', icon=':material/calendar_month:')
+    period = _match_period(day)
+    if period is None:
+        return
+    start, end = period
+    st.subheader(f'Matchs du {start:%d/%m/%Y}' + (f' au {end:%d/%m/%Y}' if start != end else ''),
+                 icon=':material/calendar_month:')
     if st.button('Actualiser le relevé local', icon=':material/refresh:', key='club_trends_day_reload'):
         st.session_state['club_trends_day_refresh'] = st.session_state.get('club_trends_day_refresh', 0) + 1
     try:
-        calendar = _day_calendar(day, api.data_signature(api.STORE_PATH),
-                                 st.session_state.get('club_trends_day_refresh', 0))
+        signature, refresh = api.data_signature(api.STORE_PATH), st.session_state.get('club_trends_day_refresh', 0)
+        calendar = (_day_calendar(start, signature, refresh) if start == end else
+                    _period_calendar(start, end, signature, refresh))
     except (trends.TrendsError, api.ApiFootballError, ValueError) as error:
         st.warning(str(error))
         return
     rows = day_trends.enrich(calendar['rows'], report['rows'])
+    st.caption(f'{(end-start).days + 1} journée(s), dates incluses · Heures de Kinshasa. '
+               'L’export contient tous les matchs filtrés de cette période, quelle que soit la page affichée.')
+    missing = [item['day'] for item in calendar.get('days', []) if not item['matches'] and not item['updated_at']]
+    if missing:
+        st.caption('Journées sans donnée locale ni relevé : ' + ', '.join(missing) + '.')
     if calendar.get('revision') != report.get('revision'):
         st.caption('Le calendrier a reçu de nouvelles données depuis le calcul des tendances. '
                    'Utilisez « Afficher et actualiser » pour recalculer leur historique.')
@@ -213,7 +261,7 @@ def _render_day(report, request, day):
             st.caption(f'Dernier relevé du calendrier : {stamp:%d/%m/%Y à %H:%M} (Kinshasa).')
         except (TypeError, ValueError):
             st.caption('La date du dernier relevé du calendrier est à vérifier.')
-    else:
+    elif start == end:
         st.caption('Dernier relevé du calendrier non horodaté pour cette journée.')
     st.caption('Les scores et statuts suivent le dernier relevé API enregistré. '
                'Les tendances de chaque équipe utilisent la période, les saisons et le rôle choisis ci-dessus. '
@@ -252,7 +300,7 @@ def _render_day(report, request, day):
         return
     with st.container(horizontal=True):
         limit = st.selectbox('Matchs par page', [10, 25, 50, 100, 250, 500], index=3, key='club_trends_day_limit')
-        context = (day, calendar['revision'], country, league, status, query, limit)
+        context = (start, end, calendar['revision'], country, league, status, query, limit)
         if st.session_state.get('club_trends_day_context') != context:
             st.session_state['club_trends_day_context'] = context
             st.session_state['club_trends_day_page'] = 1
@@ -272,8 +320,9 @@ def _render_day(report, request, day):
     st.caption(f'Matchs {offset + 1}–{min(offset + limit, len(filtered))} sur {len(filtered)} · '
                'Heures de Kinshasa. Les verdicts finaux utilisent les scores à la pause et à 90 minutes.')
     st.download_button('Exporter tous les matchs filtrés avec leurs tendances (CSV)',
-        data=_day_csv(_day_table(filtered), request, day, calendar),
-        file_name=f'matchs_tendances_clubs_{day}.csv', mime='text/csv',
+        data=lambda: _day_csv(_day_table(filtered), request, start, calendar, end),
+        file_name=(f'matchs_tendances_clubs_{start}.csv' if start == end else
+                   f'matchs_tendances_clubs_{start}_au_{end}.csv'), mime='text/csv',
         icon=':material/download:', on_click='ignore')
 
 
@@ -299,8 +348,8 @@ def render():
         st.session_state.pop('club_trends_request', None)
     with st.form('club_trends_filters'):
         with st.container(horizontal=True):
-            start = st.date_input('Début de la période', key='club_trends_start', format='DD/MM/YYYY')
-            end = st.date_input('Fin de la période incluse', key='club_trends_end', format='DD/MM/YYYY')
+            start = st.date_input('Début de la période historique', key='club_trends_start', format='DD/MM/YYYY')
+            end = st.date_input('Fin de la période historique incluse', key='club_trends_end', format='DD/MM/YYYY')
         with st.container(horizontal=True):
             seasons = st.multiselect('Saisons API-Football', catalogue['seasons'],
                 placeholder='Toutes les saisons disponibles', key='club_trends_seasons',
@@ -321,6 +370,8 @@ def render():
         st.session_state['club_trends_request'] = (start, end, tuple(sorted(seasons)), recent, role,
             signature, datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat())
     request = st.session_state['club_trends_request']
+    st.caption('Récents domicile et récents extérieur restent dans deux colonnes séparées, de l’ancien vers le récent. '
+               'Chaque colonne contient au maximum les N derniers résultats de ce rôle dans la période historique choisie.')
     try:
         with st.spinner('Lecture des tendances des clubs…'):
             report = _summary(*request)
@@ -418,7 +469,7 @@ def render():
                'Un même match peut contribuer aux profils des deux clubs : les lignes ne sont pas des observations indépendantes. '
                'Les petits effectifs restent visibles ; les égalités en tête sont conservées.')
     st.download_button('Exporter tous les profils filtrés (CSV)',
-        data=_csv(rows, request, match_day=selected_day if day_only else None),
+        data=lambda: _csv(rows, request, match_day=selected_day if day_only else None),
         file_name=(f'tendances_clubs_matchs_{selected_day}_{request[4]}.csv' if day_only else
                    f'tendances_clubs_{request[0]}_{request[1]}_{request[4]}.csv'),
         mime='text/csv', icon=':material/download:', on_click='ignore')

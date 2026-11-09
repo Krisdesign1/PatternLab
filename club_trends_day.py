@@ -6,7 +6,7 @@ or treats historical frequencies as probabilities for the fixture.
 """
 from collections import Counter
 from copy import deepcopy
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 import json
 
 import calendar_data
@@ -68,10 +68,19 @@ def load(day, *, path=None, now=None):
     ``now`` timestamps the consultation; it must not cut off upcoming fixtures.
     Revision, day-refresh marker and fixtures share one SQLite read snapshot.
     """
-    day, current = base._day(day), base._now(now)
+    report = load_period(day, day, path=path, now=now)
+    report.update(day=report['start'], calendar_updated_at=report['calendar_updates'].get(report['start']))
+    return report
+
+
+def load_period(start, end, *, path=None, now=None):
+    """Read an inclusive local calendar range in one SQLite snapshot."""
+    start, end, current = base._day(start), base._day(end), base._now(now)
+    if not date(1900, 1, 1) <= start <= end <= date(2100, 12, 31):
+        raise TrendsError('La période des matchs doit être ordonnée entre 1900 et 2100.')
     try:
-        lower = datetime.combine(day, time.min, ZONE).astimezone(timezone.utc)
-        upper = datetime.combine(day + timedelta(days=1), time.min, ZONE).astimezone(timezone.utc)
+        lower = datetime.combine(start, time.min, ZONE).astimezone(timezone.utc)
+        upper = datetime.combine(end + timedelta(days=1), time.min, ZONE).astimezone(timezone.utc)
     except (OverflowError, ValueError):
         raise TrendsError('La journée choisie est hors de la plage du calendrier.') from None
     rows, unreadable = [], 0
@@ -86,20 +95,24 @@ def load(day, *, path=None, now=None):
                     row = _record(saved)
                     # Defend the day view if a damaged SQLite projection ever
                     # disagrees with its provider timestamp.
-                    if row['local_day'] != day.isoformat():
+                    if not start.isoformat() <= row['local_day'] <= end.isoformat():
                         raise ValueError('Date incohérente')
                     rows.append(row)
                 except (KeyError, TypeError, ValueError, AttributeError):
                     unreadable += 1
-            update = connection.execute('SELECT updated_at FROM calendar_updates WHERE day=? AND timezone=?',
-                                        (day.isoformat(), str(ZONE))).fetchone()
+            updates = dict(connection.execute('SELECT day, updated_at FROM calendar_updates '
+                'WHERE day>=? AND day<=? AND timezone=?', (start.isoformat(), end.isoformat(), str(ZONE))))
             revision, uuid, updated_at = int(meta['revision']), meta['store_uuid'], meta.get('updated_at')
     except fixture_store.FixtureStoreError:
         raise TrendsError('La lecture des matchs de la journée est momentanément indisponible.') from None
     groups = Counter(row['status_group'] for row in rows)
-    return dict(version=VERSION, rows=rows, day=day.isoformat(), timezone=str(ZONE),
+    days = [(start + timedelta(days=offset)).isoformat() for offset in range((end-start).days + 1)]
+    counts = Counter(row['local_day'] for row in rows)
+    coverage = [dict(day=day, matches=counts[day], updated_at=updates.get(day)) for day in days]
+    return dict(version=VERSION, rows=rows, start=start.isoformat(), end=end.isoformat(), timezone=str(ZONE),
+                calendar_updates=updates, days=coverage,
                 as_of=current.isoformat(), revision=revision, store_uuid=uuid,
-                calendar_updated_at=update['updated_at'] if update else None, updated_at=updated_at,
+                calendar_updated_at=updates.get(start.isoformat()) if start == end else None, updated_at=updated_at,
                 totals=dict(matches=len(rows), unreadable=unreadable,
                             **{name: groups[name] for name in ('upcoming','live','finished','other')}))
 

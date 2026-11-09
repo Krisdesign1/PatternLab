@@ -12,6 +12,7 @@ import calendar_data
 import calendar_panel as calendar
 import manual_analysis_store as archive
 import manual_mixed_analysis as analysis
+import manual_match_coverage as match_coverage
 import manual_proposal_archive as proposals
 import scenario_tables
 import table_views
@@ -19,6 +20,8 @@ import workspace_sources as sources
 
 
 FIELDS = ('match_id', 'league', 'home', 'away', 'timestamp', 'provider', 'home_id', 'away_id', 'season')
+DATA_FILTERS = {'all': 'Tous les matchs', 'eligible': 'Exploitables pour Clubs',
+                'unavailable': 'Non exploitables pour Clubs'}
 
 
 def _now():
@@ -65,6 +68,50 @@ def _competition(info, league):
     return ' · '.join(filter(None, (value.get('country'), value.get('name')))) or str(league)
 
 
+@st.cache_data(ttl=60, max_entries=8, show_spinner=False)
+def _coverage(signature, source, candidates, group, decision_day):
+    """Read only the needed histories; never infer, collect or save a forecast.
+
+    History eligibility changes with UTC dates, fixtures, the current group or
+    the store revision. The exact current clock still gates selectable rows in
+    render() and on add; this cache only describes prior-day data availability.
+    """
+    leagues = tuple(sorted({row['league'] for row in (*candidates, *group)}, key=int))
+    rows = _history(signature, source, leagues) if leagues else []
+    decision = datetime.fromisoformat(decision_day).replace(tzinfo=timezone.utc)
+    return match_coverage.coverage(rows, candidates, decision_at=decision, group_fixtures=group)
+
+
+def _coverage_columns(value):
+    return {'Exploitable pour Clubs': 'Oui' if value.get('eligible') else 'Non',
+            'Base du calcul': ('Profils des clubs' if value.get('personalized') else
+                              'Tendance de la compétition') if value.get('eligible') else 'Indisponible',
+            'Résultats exploitables': value.get('training_matches'),
+            'Journées historiques UTC': value.get('training_days'),
+            'Historique avant (UTC)': value.get('before'),
+            'Motif des données': value.get('reason') or 'Contrôle des données indisponible.'}
+
+
+def _unavailable_group(payload):
+    """Name every affected match even when the full Clubs group is unavailable."""
+    support = {str(item['league']): item for item in payload.get('competition_support', [])}
+    rows = []
+    for index, fixture in enumerate(payload['fixtures'], 1):
+        item = support.get(str(fixture['league']), {})
+        if item.get('eligible'):
+            continue
+        rows.append({'Ordre': index, 'Match': f"{fixture['home']} — {fixture['away']}",
+                     'Compétition': _competition(payload.get('competitions', {}), fixture['league']),
+                     'ID compétition': fixture['league'],
+                     'Résultats exploitables': item.get('training_matches'),
+                     'Journées historiques UTC': item.get('training_days'),
+                     'Historique avant (UTC)': item.get('before')})
+    if rows:
+        st.caption('Matchs concernés par le manque de données :')
+        table_views.dataframe(rows, hide_index=True, width='stretch',
+                             table_id='manual_mixed_panel:unavailable_group')
+
+
 def _same(payload, day, source, chosen):
     return bool(payload and payload.get('day') == day.isoformat() and payload.get('source') == source
                 and {_identity(row) for row in payload['fixtures']} == {_identity(row) for row in chosen})
@@ -74,6 +121,7 @@ def _show(payload):
     st.subheader('Les scénarios de mon groupe', icon=':material/schema:')
     if not payload['forecast'].get('eligible'):
         st.warning(payload['forecast'].get('diagnostic') or 'Historique insuffisant pour ce groupe.')
+        _unavailable_group(payload)
         return
     if payload.get('save_error'):
         st.warning('Analyse calculée, mais non sauvegardée : ' + payload['save_error'])
@@ -153,6 +201,10 @@ def render(source):
         default='À venir', required=True, key='mixed_manual_status', persist_state='session')
     query = st.text_input('Rechercher un match, un pays ou une compétition', type='search', key='mixed_manual_query',
                           persist_state='session')
+    data_filter = st.selectbox('Disponibilité des données', list(DATA_FILTERS), format_func=DATA_FILTERS.get,
+        key='mixed_manual_data_filter', persist_state='session',
+        help='Exploitables pour Clubs : les minimums existants de 30 résultats de compétition sur 3 dates UTC '
+             'antérieures sont atteints. Cela indique la possibilité de calculer, sans garantir la précision.')
     filtered = calendar_data.filter_rows(display, None, status, query)
     if selected_leagues:
         filtered = [row for row in filtered if row['league'] in selected_leagues]
@@ -163,11 +215,36 @@ def render(source):
         if len(filtered) < len(candidates):
             st.caption(f'{len(candidates)-len(filtered)} rencontre(s) annoncée(s) à venir dans le relevé '
                        'ont un horaire passé ou des identités non confirmées. Elles restent consultables dans « Tous ».')
+    coverage = {}
+    if data_filter != 'all':
+        candidates = [fixtures[row['match_id']] for row in filtered
+                      if row['match_id'] in fixtures and _future(fixtures[row['match_id']], day, now)]
+        group = [row for row in chosen if row['match_id'] not in missing and _future(row, day, now)]
+        coverage_fixtures = {row['match_id']: row for row in (*candidates, *group)}
+        try:
+            with st.spinner('Vérification de l’historique local…'):
+                coverage = _coverage(workspace._signature(), source,
+                    [{name: row[name] for name in FIELDS if name in row} for row in coverage_fixtures.values()],
+                    [{name: row[name] for name in FIELDS if name in row} for row in group],
+                    now.date().isoformat())
+        except (sources.ERRORS + (ValueError, OSError)):
+            coverage = {row['match_id']: dict(eligible=False, invalid=True,
+                reason='Contrôle de l’historique local indisponible.') for row in coverage_fixtures.values()}
+            st.warning('La disponibilité des données ne peut pas être vérifiée pour le moment.')
+        eligible = sum(bool(coverage.get(row['match_id'], {}).get('eligible')) for row in candidates)
+        st.caption(f'{eligible} match(s) exploitable(s) pour Clubs · '
+                   f'{len(candidates)-eligible} non exploitable(s) parmi les rencontres encore à venir de ces filtres. '
+                   'Les résultats utilisables précèdent la coupure UTC du groupe.')
+        wanted = data_filter == 'eligible'
+        candidate_ids = {row['match_id'] for row in candidates}
+        filtered = [row for row in filtered if row['match_id'] in candidate_ids
+                    and bool(coverage.get(row['match_id'], {}).get('eligible')) == wanted]
     st.caption(f'{len(filtered)} matchs affichés sur {snapshot["day_count"]} à la date choisie · '
                'Seuls les matchs encore à venir avec leurs clubs confirmés peuvent être ajoutés.')
     selected_ids = []
     if filtered:
-        frame = pd.DataFrame([{'ID match': row['match_id'], **calendar.table_rows([row])[0]}
+        frame = pd.DataFrame([{'ID match': row['match_id'], **calendar.table_rows([row])[0],
+                              **(_coverage_columns(coverage.get(row['match_id'], {})) if data_filter != 'all' else {})}
                               for row in filtered])
         displayed, event = table_views.selectable_dataframe(frame, table_id='manual_mixed_panel:calendar_selection',
             key=f'mixed_manual_calendar_{source}_{day}_{st.session_state.get("mixed_manual_selection_revision", 0)}',
@@ -199,7 +276,8 @@ def render(source):
                  'Compétition': _competition(competitions, row['league']),
                  'Domicile': row['home'], 'Extérieur': row['away'],
                  'État': 'À revérifier' if row['match_id'] in missing else
-                         'À venir' if _future(row, day, now) else 'Coup d’envoi passé ou statut modifié'}
+                         'À venir' if _future(row, day, now) else 'Coup d’envoi passé ou statut modifié',
+                 **(_coverage_columns(coverage[row['match_id']]) if row['match_id'] in coverage else {})}
                 for index, row in enumerate(chosen, 1)]
         table_views.dataframe(rows, table_id='manual_mixed_panel:chosen_group', hide_index=True, width='stretch')
         remove_key = f'mixed_manual_remove_{day}'
