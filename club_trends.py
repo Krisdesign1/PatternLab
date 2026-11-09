@@ -5,6 +5,7 @@ forecast, a club-only scoring outcome, or a replay of pre-match availability.
 Identity and result validation share the competition trend import boundary.
 """
 from collections import Counter, deque
+from datetime import datetime, time
 import json
 
 import competition_trends as base
@@ -90,16 +91,28 @@ def _finish(item):
     return item
 
 
-def build(start, end, *, seasons=None, recent=10, role='all', now=None, path=None):
+def _bounds(start, end, seasons, now, league=None, before_day=None):
+    where, args, current = base._bounds(start, end, seasons, now, league)
+    if before_day is not None:
+        before_day = base._day(before_day)
+        cutoff = datetime.combine(before_day, time.min, base.ZONE)
+        where += ' AND kickoff_utc < ?'
+        args.append(base._utc_text(cutoff))
+    return where, args, current
+
+
+def build(start, end, *, seasons=None, recent=10, role='all', now=None, path=None, before_day=None):
     """One profile per (API team ID, league ID), without blending competitions.
 
     Each fixture contributes once to totals and once to each applicable club.
     Memory is bounded by profile count × recent window, never raw payload size.
+    Optional before_day excludes that Kinshasa day and every following kickoff
+    before computing counts and recent windows; it never rewrites the store.
     """
     role = _role(role)
     if type(recent) is not int or not 1 <= recent <= 100:
         raise TrendsError('La fenêtre récente doit contenir de 1 à 100 matchs.')
-    where, args, current = base._bounds(start, end, seasons, now)
+    where, args, current = _bounds(start, end, seasons, now, before_day=before_day)
     groups, role_history, reasons, totals = {}, {}, Counter(), Counter(observed=0, matches=0, excluded=0, not_finished=0)
     unassigned = 0
     try:
@@ -170,10 +183,12 @@ def build(start, end, *, seasons=None, recent=10, role='all', now=None, path=Non
     return dict(version=VERSION, rows=rows, totals=dict(totals), exclusion_reasons=dict(sorted(reasons.items())),
                 start=start.isoformat(), end=end.isoformat(), recent=recent, role=role,
                 timezone=str(base.ZONE), as_of=current.isoformat(), revision=revision,
-                store_uuid=store_uuid, unassigned_matches=unassigned)
+                store_uuid=store_uuid, unassigned_matches=unassigned,
+                before_day=before_day.isoformat() if before_day is not None else None)
 
 
-def details(team, league, start, end, *, seasons=None, role='all', now=None, path=None, limit=50, offset=0):
+def details(team, league, start, end, *, seasons=None, role='all', now=None, path=None, limit=50, offset=0,
+            before_day=None):
     """Read only one league and stream exact validated club IDs before paging.
 
     IDs are checked in Python so malformed or zero-padded raw IDs cannot create
@@ -182,7 +197,7 @@ def details(team, league, start, end, *, seasons=None, role='all', now=None, pat
     role, team = _role(role), base._identity(team)
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 500:
         raise TrendsError('La pagination des rencontres est invalide.')
-    where, args, current = base._bounds(start, end, seasons, now, league)
+    where, args, current = _bounds(start, end, seasons, now, league, before_day)
     rows, total = [], 0
     try:
         with fixture_store._connection(base._database(path)) as connection:
@@ -197,6 +212,7 @@ def details(team, league, start, end, *, seasons=None, role='all', now=None, pat
                         total += 1
             return dict(rows=rows, total=total, offset=offset, limit=limit, role=role,
                         timezone=str(base.ZONE), as_of=current.isoformat(),
+                        before_day=before_day.isoformat() if before_day is not None else None,
                         revision=int(meta['revision']), store_uuid=meta['store_uuid'])
     except fixture_store.FixtureStoreError:
         raise TrendsError('La lecture des rencontres du club est momentanément indisponible.') from None

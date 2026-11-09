@@ -2339,6 +2339,10 @@ Dans les deux vues, **Récents domicile (ancien → récent)** et **Récents ext
 
 Pour exporter **Tous les clubs** sur une période, appliquez les dates historiques puis utilisez **Exporter tous les profils filtrés (CSV)**. Les exports sont préparés au clic sur le téléchargement, pour éviter de recalculer de gros fichiers lors de chaque changement de filtre. Ces tableaux décrivent les résultats corrigés actuellement disponibles ; ils ne constituent pas une reconstitution de prévisions avant match.
 
+Pour examiner une journée sans inclure ses propres résultats, activez **Exclure le … des tendances et des récents**, dans l'une des deux vues. Dans **Tous les clubs**, la coupure suit la date commune des matchs. Dans **Matchs de la journée**, elle suit la première journée de la période appliquée. L'historique s'arrête strictement avant minuit à Kinshasa : cette journée et les suivantes sont écartées des pourcentages, effectifs, suites récentes globale/domicile/extérieur et rencontres justificatives. Les fenêtres se complètent avec les matchs antérieurs admissibles ; aucune donnée n'est effacée. Les scores du calendrier restent visibles pour comparer.
+
+Pour une période de plusieurs journées, **une coupure commune avant la première journée** s'applique à toutes ses rencontres ; ce n'est pas un historique recalculé à chaque jour. Les exports conservent le mode, la date de coupure locale et UTC, la fin historique effective et la période demandée. Désactiver l'option rétablit l'historique complet de la période. Les corrections actuellement enregistrées restent utilisées : cette consultation ne prouve pas que ces données étaient disponibles à l'époque et n'ajoute aucune prévision aux cohortes de validation.
+
 
 ### Conservation des propositions — correction du 7 novembre 2026
 

@@ -1,7 +1,7 @@
 """Club trends from corrected local results, without collecting or predicting."""
 import table_views
 import csv
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from io import StringIO
 from math import ceil
 from zoneinfo import ZoneInfo
@@ -28,15 +28,15 @@ def _catalogue():
 
 
 @st.cache_data(ttl=300, max_entries=2, show_spinner=False)
-def _summary(start, end, seasons, recent, role, signature, as_of):
+def _summary(start, end, seasons, recent, role, signature, as_of, before_day=None):
     return trends.build(start, end, seasons=seasons or None, recent=recent, role=role,
-                        now=datetime.fromisoformat(as_of))
+                        now=datetime.fromisoformat(as_of), before_day=before_day)
 
 
 @st.cache_data(ttl=120, max_entries=8, show_spinner=False)
-def _details(team, league, start, end, seasons, role, signature, as_of, offset, limit):
+def _details(team, league, start, end, seasons, role, signature, as_of, offset, limit, before_day=None):
     return trends.details(team, league, start, end, seasons=seasons or None, role=role,
-                          now=datetime.fromisoformat(as_of), offset=offset, limit=limit)
+                          now=datetime.fromisoformat(as_of), offset=offset, limit=limit, before_day=before_day)
 
 
 @st.cache_data(ttl=60, max_entries=4, show_spinner=False)
@@ -99,16 +99,28 @@ def _comparison(row):
              'Écart (points)': row['delta_points'][value]} for value in CLASS_ORDER]
 
 
-def _csv(rows, request, *, match_day=None):
+def _history_metadata(request, before_day):
+    return {'Mode historique': 'Avant la journée choisie' if before_day else 'Période historique complète',
+            'Historique strictement avant (Kinshasa)': before_day.isoformat() if before_day else '',
+            'Coupure historique exclusive UTC': datetime.combine(before_day, time.min, ZONE)
+                .astimezone(timezone.utc).isoformat() if before_day else '',
+            'Fin historique demandée incluse': request[1].isoformat()}
+
+
+def _history_end(request, before_day):
+    return min(request[1], before_day - timedelta(days=1)) if before_day else request[1]
+
+
+def _csv(rows, request, *, match_day=None, before_day=None):
     values = _table(rows)
     for item in values:
         for key in ('Tendance dominante', 'Tendance récente'):
             item[key] = ' / '.join(item[key])
         item.update({'Début inclus (Kinshasa)': request[0].isoformat(),
-                     'Fin incluse (Kinshasa)': request[1].isoformat(),
+                     'Fin incluse (Kinshasa)': _history_end(request, before_day).isoformat(),
                      'Rôle': ROLES[request[4]], 'Fenêtre récente': request[3],
                      'Saisons sélectionnées': ', '.join(map(str, request[2])) or 'Toutes',
-                     'Consultation UTC': request[6]})
+                     'Consultation UTC': request[6], **_history_metadata(request, before_day)})
         if match_day is not None:
             item['Filtre matchs · journée de Kinshasa'] = match_day.isoformat()
     out = StringIO(newline='')
@@ -120,23 +132,23 @@ def _csv(rows, request, *, match_day=None):
     return out.getvalue().encode('utf-8-sig')
 
 
-def _render_matches(row, request, report):
+def _render_matches(row, request, report, before_day=None):
     if not st.toggle('Voir les rencontres utilisées et les exclusions', key='club_trends_show_matches'):
         return
     with st.container(horizontal=True):
         limit = st.selectbox('Rencontres par page', [10, 25, 50, 100], index=2, key='club_trends_match_limit')
         args = (row['team_id'], row['league'], *request[:3], request[4], request[5], request[6])
-        detail = _details(*args, 0, limit)
+        detail = _details(*args, 0, limit, before_day=before_day)
         total = detail['total']
         pages = max(1, ceil(total / limit))
-        context = (row['profile_id'], request, limit)
+        context = (row['profile_id'], request, limit, before_day)
         if st.session_state.get('club_trends_match_context') != context:
             st.session_state['club_trends_match_context'] = context
             st.session_state['club_trends_match_page'] = 1
         page = st.selectbox('Page des rencontres', range(1, pages + 1), key='club_trends_match_page',
                             format_func=lambda value: f'Page {value} sur {pages}')
     if page > 1:
-        detail = _details(*args, (page - 1) * limit, limit)
+        detail = _details(*args, (page - 1) * limit, limit, before_day=before_day)
     if detail.get('revision') != report.get('revision'):
         st.caption('De nouveaux résultats ont été importés. Utilisez « Afficher et actualiser » pour recalculer les tendances.')
     values = [{'Coup d’envoi (Kinshasa)': datetime.fromisoformat(item['kickoff_local']).strftime('%d/%m/%Y %H:%M'),
@@ -182,7 +194,7 @@ def _day_table(rows):
     return values
 
 
-def _day_csv(values, request, day, calendar, end=None):
+def _day_csv(values, request, day, calendar, end=None, *, before_day=None):
     end = end or day
     output = []
     for row in values:
@@ -191,11 +203,11 @@ def _day_csv(values, request, day, calendar, end=None):
         item.update({'Journée des matchs (Kinshasa)': local_day,
                      'Première journée exportée': day.isoformat(), 'Dernière journée exportée': end.isoformat(),
                      'Début historique inclus': request[0].isoformat(),
-                     'Fin historique incluse': request[1].isoformat(), 'Rôle historique': ROLES[request[4]],
+                     'Fin historique incluse': _history_end(request, before_day).isoformat(), 'Rôle historique': ROLES[request[4]],
                      'Dernier relevé du calendrier UTC': calendar.get('calendar_updates', {}).get(local_day)
                          or (calendar.get('calendar_updated_at') if day == end else '') or '',
                      'Fenêtre récente par rôle': request[3],
-                     'Consultation historique UTC': request[6]})
+                     'Consultation historique UTC': request[6], **_history_metadata(request, before_day)})
         output.append(item)
     out = StringIO(newline='')
     writer = csv.DictWriter(out, fieldnames=list(output[0]), delimiter=';')
@@ -227,8 +239,8 @@ def _match_period(day):
     return st.session_state['club_trends_period_applied']
 
 
-def _render_day(report, request, day):
-    period = _match_period(day)
+def _render_day(report, request, day, *, period=None, before_day=None):
+    period = period or _match_period(day)
     if period is None:
         return
     start, end = period
@@ -300,7 +312,7 @@ def _render_day(report, request, day):
         return
     with st.container(horizontal=True):
         limit = st.selectbox('Matchs par page', [10, 25, 50, 100, 250, 500], index=3, key='club_trends_day_limit')
-        context = (start, end, calendar['revision'], country, league, status, query, limit)
+        context = (start, end, calendar['revision'], country, league, status, query, limit, before_day)
         if st.session_state.get('club_trends_day_context') != context:
             st.session_state['club_trends_day_context'] = context
             st.session_state['club_trends_day_page'] = 1
@@ -320,7 +332,7 @@ def _render_day(report, request, day):
     st.caption(f'Matchs {offset + 1}–{min(offset + limit, len(filtered))} sur {len(filtered)} · '
                'Heures de Kinshasa. Les verdicts finaux utilisent les scores à la pause et à 90 minutes.')
     st.download_button('Exporter tous les matchs filtrés avec leurs tendances (CSV)',
-        data=lambda: _day_csv(_day_table(filtered), request, start, calendar, end),
+        data=lambda: _day_csv(_day_table(filtered), request, start, calendar, end, before_day=before_day),
         file_name=(f'matchs_tendances_clubs_{start}.csv' if start == end else
                    f'matchs_tendances_clubs_{start}_au_{end}.csv'), mime='text/csv',
         icon=':material/download:', on_click='ignore')
@@ -346,6 +358,21 @@ def render():
         st.session_state['club_trends_end'] = selected_day
         st.session_state['club_trends_selected_day'] = selected_day
         st.session_state.pop('club_trends_request', None)
+    period = _match_period(selected_day) if view == 'Matchs de la journée' else None
+    if view == 'Matchs de la journée' and period is None:
+        return
+    test_day = period[0] if period else selected_day
+    exclude_day = st.toggle(f'Exclure le {test_day:%d/%m/%Y} des tendances et des récents',
+        key='club_trends_before_day',
+        help='Recalcule uniquement avec les rencontres antérieures à 00 h de cette journée à Kinshasa. '
+             'La journée et les suivantes sont écartées ; les N récents sont complétés avec les matchs précédents. '
+             'Pour une période de matchs, la même coupure avant la première journée s’applique à toutes les lignes.')
+    before_day = test_day if exclude_day else None
+    if before_day:
+        st.caption(f'Test : historique arrêté avant le {before_day:%d/%m/%Y} à 00 h (Kinshasa). '
+                   'La journée choisie et les suivantes ne comptent dans aucune tendance ni suite récente. '
+                   + ('Cette même coupure s’applique à tous les matchs de la période. ' if period and period[0] != period[1] else '')
+                   + 'Les scores de la journée restent visibles pour comparer. Les corrections actuellement disponibles sont utilisées.')
     with st.form('club_trends_filters'):
         with st.container(horizontal=True):
             start = st.date_input('Début de la période historique', key='club_trends_start', format='DD/MM/YYYY')
@@ -374,16 +401,19 @@ def render():
                'Chaque colonne contient au maximum les N derniers résultats de ce rôle dans la période historique choisie.')
     try:
         with st.spinner('Lecture des tendances des clubs…'):
-            report = _summary(*request)
+            report = _summary(*request, before_day=before_day)
     except (trends.TrendsError, api.ApiFootballError) as error:
         st.warning(str(error))
         return
     as_of = datetime.fromisoformat(request[6]).astimezone(ZONE)
-    st.caption(f'Période appliquée : {request[0]:%d/%m/%Y} → {request[1]:%d/%m/%Y} · {ROLES[request[4]]} · '
+    history_end = _history_end(request, before_day)
+    period_label = (f'{request[0]:%d/%m/%Y} → {history_end:%d/%m/%Y}' if history_end >= request[0]
+                    else 'aucune journée historique avant la coupure dans la période demandée')
+    st.caption(f'Période appliquée : {period_label} · {ROLES[request[4]]} · '
                f'Coups d’envoi antérieurs au {as_of:%d/%m/%Y à %H:%M} (Kinshasa). '
                'Les corrections actuellement enregistrées sont utilisées ; ce tableau ne reconstitue pas les informations connues avant un ancien match.')
     if view == 'Matchs de la journée':
-        _render_day(report, request, selected_day)
+        _render_day(report, request, selected_day, period=period, before_day=before_day)
         return
     day_only = st.toggle(f'Uniquement les clubs avec un match le {selected_day:%d/%m/%Y}',
         key='club_trends_day_only',
@@ -447,7 +477,7 @@ def render():
     with st.container(horizontal=True):
         limit = st.selectbox('Profils par page', [10, 25, 50, 100, 250, 500], index=3,
                              key='club_trends_summary_limit')
-        context = (request, country, league, query, minimum, sort, limit, day_only,
+        context = (request, country, league, query, minimum, sort, limit, day_only, before_day,
                    selected_day if day_only else None, calendar['revision'] if calendar else None)
         if st.session_state.get('club_trends_summary_context') != context:
             st.session_state['club_trends_summary_context'] = context
@@ -469,7 +499,7 @@ def render():
                'Un même match peut contribuer aux profils des deux clubs : les lignes ne sont pas des observations indépendantes. '
                'Les petits effectifs restent visibles ; les égalités en tête sont conservées.')
     st.download_button('Exporter tous les profils filtrés (CSV)',
-        data=lambda: _csv(rows, request, match_day=selected_day if day_only else None),
+        data=lambda: _csv(rows, request, match_day=selected_day if day_only else None, before_day=before_day),
         file_name=(f'tendances_clubs_matchs_{selected_day}_{request[4]}.csv' if day_only else
                    f'tendances_clubs_{request[0]}_{request[1]}_{request[4]}.csv'),
         mime='text/csv', icon=':material/download:', on_click='ignore')
@@ -492,7 +522,7 @@ def render():
     if not row['previous_matches']:
         st.info('Pas de matchs antérieurs au groupe récent dans cette période : l’écart reste indisponible.')
     try:
-        _render_matches(row, request, report)
+        _render_matches(row, request, report, before_day=before_day)
     except (trends.TrendsError, api.ApiFootballError) as error:
         st.warning(str(error))
     if report.get('exclusion_reasons'):
