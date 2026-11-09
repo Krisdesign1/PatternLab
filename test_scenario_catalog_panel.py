@@ -51,6 +51,8 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
             st.caption((kwargs.get('label') or '') + ' : ' + ' → '.join(sequence)))
         self.grid = self._patch(panel.table_views, 'table', side_effect=lambda rows, **kwargs:
             st.dataframe(pd.DataFrame(rows), hide_index=True))
+        self.native_grid = self._patch(panel.table_views, 'dataframe', side_effect=lambda rows, **kwargs:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, column_config=kwargs.get('column_config')))
         self.network = self._patch(models, 'build_methods',
             side_effect=AssertionError('Catalogue browsing must not train or load a current model'))
 
@@ -69,6 +71,9 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
 
     def table(self):
         return self.at.dataframe[0].value
+
+    def rows_selector(self):
+        return next(item for item in self.at.selectbox if item.label == 'Scénarios à afficher')
 
     def test_ten_matches_immediately_show_fifty_with_complete_count_and_no_mutation(self):
         at = self.app()
@@ -117,6 +122,75 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.assertFalse(at.exception)
         self.assertEqual(self.table()['Rang'].iloc[0], 51)
 
+    def test_page_size_options_are_real_visible_row_counts(self):
+        at = self.app()
+        for amount in (100, 250, 500, 50):
+            with self.subTest(rows=amount):
+                self.rows_selector().select(amount).run()
+                self.assertFalse(at.exception)
+                self.assertEqual(len(self.table()), amount)
+                self.assertEqual(self.pages.call_args.args[1:], (0, amount))
+        self.assertEqual(self.methods, self.before)
+
+    def test_all_displays_every_ten_match_outcome_in_a_virtualized_grid(self):
+        at = self.app()
+        self.rows_selector().select('all').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(len(self.table()), 59049)
+        self.assertEqual(self.table()['Rang'].iloc[-1], 59049)
+        self.assertEqual(self.pages.call_args.args[1:], (0, 59049))
+        self.native_grid.assert_called_once()
+        self.assertEqual(self.native_grid.call_args.kwargs['height'], 650)
+        self.assertEqual(list(self.table()['Scénario complet'].iloc[0]),
+                         [f'{index} 1st' for index in range(1, 11)])
+        self.assertTrue(at.number_input[0].disabled)
+        self.assertEqual(self.methods, self.before)
+
+    def test_size_change_resets_page_and_method_keeps_its_size_and_page(self):
+        at = self.app()
+        at.number_input[0].set_value(4).run()
+        self.rows_selector().select(100).run()
+        self.assertEqual(at.number_input[0].value, 1)
+        at.number_input[0].set_value(3).run()
+        at.selectbox[0].select('combined').run()
+        self.assertEqual(self.rows_selector().value, 50)
+        self.rows_selector().select(250).run()
+        at.selectbox[0].select('clubs').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(self.rows_selector().value, 100)
+        self.assertEqual(at.number_input[0].value, 3)
+        self.assertEqual(self.table()['Rang'].iloc[0], 201)
+        at.run()
+        self.assertEqual(self.rows_selector().value, 100)
+        self.assertEqual(at.number_input[0].value, 3)
+
+    def test_all_for_smaller_groups_has_exact_count_and_observed_badge(self):
+        methods={'clubs':method(size=7)}
+        at=self.app(methods=methods,actual=['1st']*7)
+        self.rows_selector().select('all').run()
+        self.assertFalse(at.exception)
+        self.assertEqual(len(self.table()),2187)
+        self.assertEqual(self.table()['Rang'].iloc[-1],2187)
+        self.assertEqual(list(self.table()['Résultat final'].iloc[0]),['Scénario observé'])
+        self.assertEqual(self.pages.call_args.args[1:],(0,2187))
+
+    def test_hide_and_return_restores_method_page_and_size(self):
+        source = ('import streamlit as st\nimport scenario_catalog_panel as p\n'
+                  'shown=st.toggle("Afficher le catalogue",value=True,key="show-catalog")\n'
+                  f'if shown:p.render({self.methods!r}, key="catalogue-test")')
+        self.at=at=AppTest.from_string(source,default_timeout=15).run()
+        at.selectbox[0].select('combined').run()
+        self.rows_selector().select(250).run()
+        at.number_input[0].set_value(3).run()
+        at.toggle[0].set_value(False).run()
+        self.assertFalse(at.dataframe)
+        at.toggle[0].set_value(True).run()
+        self.assertFalse(at.exception)
+        self.assertEqual(at.selectbox[0].value, 'combined')
+        self.assertEqual(self.rows_selector().value, 250)
+        self.assertEqual(at.number_input[0].value, 3)
+        self.assertEqual(self.table()['Rang'].iloc[0], 501)
+
     def test_exact_sequence_lookup_works_beyond_reference_without_a_catalogue_scan(self):
         at = self.app()
         at.text_input[0].set_value('egal ' * 10).run()
@@ -159,6 +233,22 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.assertEqual(len(at.text_input), 1)
         self.assertTrue(any('catalogue complet' in item.proto.label for item in at.get('download_button')))
 
+    def test_all_interruption_does_not_silently_show_first_fifty(self):
+        def bounded(value, offset, page_size):
+            if page_size > 1000:
+                raise TimeoutError('Chargement complet interrompu ; aucun préfixe complet annoncé.')
+            return page(value, offset, page_size)
+        self.pages.side_effect=bounded
+        at=self.app()
+        self.rows_selector().select('all').run()
+        self.assertFalse(at.exception)
+        self.assertFalse(at.dataframe)
+        self.assertEqual(self.rows_selector().value, 'all')
+        self.assertTrue(any('Page non chargée' in item.value for item in at.warning))
+        self.assertTrue(any('catalogue complet' in item.proto.label for item in at.get('download_button')))
+        self.rows_selector().select(500).run()
+        self.assertEqual(len(self.table()),500)
+
     def test_compact_export_and_csv_preserve_complete_distribution_and_absolute_probabilities(self):
         value = self.methods['clubs']
         original = deepcopy(value)
@@ -169,6 +259,45 @@ class ScenarioCataloguePanelTests(unittest.TestCase):
         self.assertEqual(value, original)
         csv = panel._csv([dict(sequence=['1st', '2nd'], probability=.002)], 8, None).decode('utf-8-sig')
         self.assertIn('9,1st → 2nd,0.2,', csv)
+
+
+class CompleteCatalogueLoadingTests(unittest.TestCase):
+    def setUp(self):
+        panel._page.clear()
+        self.addCleanup(panel._page.clear)
+
+    def test_real_all_reader_returns_all_59049_without_mutating_forecast(self):
+        value=method()
+        original=deepcopy(value)
+        complete=panel._page(value,0,59049)
+        self.assertEqual(len(complete['ranking']),59049)
+        self.assertEqual(complete['total'],59049)
+        self.assertFalse(complete['has_next'])
+        self.assertEqual(complete['ranking'][:3],value['ranking'])
+        self.assertAlmostEqual(sum(row['probability'] for row in complete['ranking']),1,places=10)
+        self.assertEqual(value,original)
+
+    def test_small_all_reads_every_outcome_with_existing_paged_reader(self):
+        value=method(size=3)
+        complete=panel._page(value,0,27)
+        self.assertEqual(len(complete['ranking']),27)
+
+    def test_astronomical_all_fails_before_allocation_and_preserves_compact_export(self):
+        value=method(size=20)
+        with patch.object(panel.catalog,'_all',side_effect=AssertionError('No giant enumeration')):
+            with self.assertRaisesRegex(ValueError,'budget mémoire'):
+                panel._page(value,0,3**20)
+        self.assertEqual(json.loads(panel._compact(value,panel.catalog.descriptor(value),None))['catalogue']['total'],3**20)
+        self.assertEqual(len(panel._page(value,0,500)['ranking']),500)
+
+    def test_unchanged_page_uses_cache_instead_of_reranking(self):
+        value=method()
+        with patch.object(panel.catalog,'page',wraps=panel.catalog.page) as reader:
+            panel._page(value,0,50)
+            panel._page(deepcopy(value),0,50)
+            self.assertEqual(reader.call_count,1)
+            panel._page(value,50,50)
+            self.assertEqual(reader.call_count,2)
 
 
 if __name__ == '__main__':

@@ -21,7 +21,11 @@ import table_views
 
 
 PAGE_SIZE = 50
+ROW_OPTIONS = (50, 100, 250, 500, 'all')
 PAGE_SECONDS = 5.0
+# This is an explicit per-render memory budget, not a scenario-selection cap.
+# Larger catalogues remain paginated/searchable and fully exportable compactly.
+RENDER_BYTES = 64 * 1024 * 1024
 VALUES = ('1st', 'Égal', '2nd')
 
 
@@ -43,7 +47,7 @@ def _colored_sequence(sequence):
                       for index, value in enumerate(sequence, 1))
 
 
-@st.cache_data(show_spinner=False, max_entries=64)
+@st.cache_data(show_spinner=False, max_entries=4)
 def _page(method, offset, page_size):
     started = monotonic()
 
@@ -52,7 +56,28 @@ def _page(method, offset, page_size):
             raise TimeoutError('Le calcul de cette page demande davantage de temps. '
                                'Consultez une page plus proche ou recherchez directement un scénario précis.')
 
-    return catalog.page(method, offset=offset, page_size=page_size, check_time=check_time)
+    if page_size <= catalog.MAX_PAGE_SIZE:
+        return catalog.page(method, offset=offset, page_size=page_size, check_time=check_time)
+    # The public paged reader intentionally bounds each individual page. All
+    # mode walks the same frozen iterator once, avoiding repeated prefix scans.
+    size = catalog._size(method)
+    total = 3**size
+    if offset != 0 or page_size != total:
+        raise ValueError('Le chargement complet doit porter sur tout le catalogue.')
+    if total * (256 + 24 * size) > RENDER_BYTES:
+        raise ValueError('« Tout afficher » dépasse le budget mémoire de cet affichage. '
+                         'Utilisez 50, 100, 250 ou 500 lignes par page, la recherche directe '
+                         'ou le catalogue complet en JSON compact. Aucun scénario n’est supprimé.')
+    budget = catalog._Budget(check_time, PAGE_SECONDS)
+    model, _reference = catalog._model(method, budget)
+    rows = []
+    for row in catalog._all(model, budget):
+        budget.check()
+        rows.append(row)
+    budget.check(force=True)
+    if len(rows) != total:
+        raise ValueError('Le classement complet n’a pas pu être chargé entièrement.')
+    return dict(ranking=rows, total=total, has_next=False, offset=0, page_size=total)
 
 
 def _remember_page(key, saved_key):
@@ -65,6 +90,46 @@ def _navigate(key, saved_key, amount, pages):
     value = value if type(value) is int else 1
     st.session_state[key] = max(1, min(pages, value + amount))
     _remember_page(key, saved_key)
+
+
+def _change_rows(scope):
+    # A new presentation size starts on its first page; method/distribution
+    # identity and frozen probabilities never change with this preference.
+    st.session_state[scope + '_saved_page'] = 1
+    st.session_state[scope + '_page'] = 1
+
+
+def _render_rows(rows, offset, observed, scope, size):
+    if len(rows) <= 500:
+        display = []
+        for rank, row in enumerate(rows, offset + 1):
+            item = {'Rang': rank, 'Scénario complet': _colored_sequence(row['sequence']),
+                    'Probabilité du groupe (%)': _percent(row['probability'])}
+            if observed is not None:
+                item['Résultat final'] = ':green-badge[Scénario observé]' if list(row['sequence']) == observed else ''
+            display.append(item)
+        table_views.table(display, hide_index=True, width='stretch',
+                          table_id='scenario_catalog_panel:render:table:1', key=scope + '_table')
+        return
+    # Native virtualization avoids putting tens of thousands of HTML rows in
+    # the browser. Indexed badges preserve both the colours and match order.
+    options = [f'{index} {label}' for index in range(1, size + 1) for label in VALUES]
+    config = {'Scénario complet': st.column_config.MultiselectColumn(
+        options=options, color=['#8fc1ff', '#d7b9ff', '#ffc58a'] * size),
+        'Probabilité du groupe (%)': st.column_config.NumberColumn(format='%.6g')}
+    display = []
+    for rank, row in enumerate(rows, offset + 1):
+        item = {'Rang': rank, 'Scénario complet': [f'{index} {label}'
+                    for index, label in enumerate(row['sequence'], 1)],
+                'Probabilité du groupe (%)': row['probability'] * 100}
+        if observed is not None:
+            item['Résultat final'] = ['Scénario observé'] if list(row['sequence']) == observed else []
+        display.append(item)
+    if observed is not None:
+        config['Résultat final'] = st.column_config.MultiselectColumn(options=['Scénario observé'], color='green')
+    table_views.dataframe(display, hide_index=True, width='stretch', height=650,
+                         column_config=config, table_id='scenario_catalog_panel:render:table:1',
+                         key=scope + '_table')
 
 
 def _csv(rows, offset, actual):
@@ -123,15 +188,26 @@ def render(methods, fixtures=None, actual=None, *, key='scenario_catalog', title
     if st.session_state.get(method_key) not in available:
         st.session_state[method_key] = next(iter(available))
     name = st.selectbox('Méthode du classement complet', list(available),
-                        format_func=lambda value: tables.METHOD_LABELS.get(value, value), key=method_key)
+                        format_func=lambda value: tables.METHOD_LABELS.get(value, value), key=method_key,
+                        persist_state='session')
     if name not in available:
         st.warning('Choisissez une méthode disponible.')
         return None
     method, descriptor = available[name], descriptors[name]
     size, total = descriptor['size'], descriptor['total']
-    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     identity = descriptor.get('sha256') or sha256(json.dumps(descriptor, sort_keys=True).encode()).hexdigest()
     scope = f'{base}_{name}_{identity[:16]}'
+    rows_key = scope + '_rows'
+    if st.session_state.get(rows_key) not in ROW_OPTIONS:
+        st.session_state[rows_key] = PAGE_SIZE
+    selected_rows = st.selectbox('Scénarios à afficher', ROW_OPTIONS,
+        format_func=lambda value: 'Tout afficher' if value == 'all' else str(value),
+        key=rows_key, persist_state='session', on_change=_change_rows, args=(scope,))
+    if selected_rows not in ROW_OPTIONS:
+        st.warning('Choisissez un nombre de lignes disponible.')
+        return None
+    page_size = total if selected_rows == 'all' else selected_rows
+    pages = max(1, (total + page_size - 1) // page_size)
     page_key = scope + '_page'
     # Widget keys disappear when another method is displayed. Keep a separate
     # non-widget value so returning to a method restores its page.
@@ -142,7 +218,8 @@ def render(methods, fixtures=None, actual=None, *, key='scenario_catalog', title
         value in VALUES for value in actual) else None
     st.metric('Scénarios possibles pour ce groupe', f'{total:,}'.replace(',', ' '))
     pages_text = f'{pages:,}'.replace(',', ' ')
-    st.caption(f'{size} matchs · {PAGE_SIZE} lignes par page · {pages_text} page(s). '
+    rows_label = 'Toutes les lignes demandées' if selected_rows == 'all' else f'{page_size} lignes par page'
+    st.caption(f'{size} matchs · {rows_label} · {pages_text} page(s). '
                'La pagination change uniquement les lignes affichées, pas le catalogue conservé.')
     if method.get('scenario_catalog') is not None:
         st.caption('Le catalogue complet est lié à la distribution conservée avec ce calcul.')
@@ -185,7 +262,8 @@ def render(methods, fixtures=None, actual=None, *, key='scenario_catalog', title
         help='La distribution complète et son empreinte sont conservées sans énumérer toutes les combinaisons.')
     current_page = st.number_input('Page du classement complet', min_value=1, max_value=pages,
                                    step=1, key=page_key, on_change=_remember_page,
-                                   args=(page_key, saved_page_key))
+                                   args=(page_key, saved_page_key), persist_state='session',
+                                   disabled=pages == 1)
     if type(current_page) is not int or not 1 <= current_page <= pages:
         st.warning('Le numéro de page est invalide.')
         return None
@@ -194,29 +272,21 @@ def render(methods, fixtures=None, actual=None, *, key='scenario_catalog', title
                   icon=':material/arrow_back:', on_click=_navigate, args=(page_key, saved_page_key, -1, pages))
         st.button('Page suivante', key=scope + '_next', disabled=current_page >= pages,
                   icon=':material/arrow_forward:', on_click=_navigate, args=(page_key, saved_page_key, 1, pages))
-    offset = (current_page - 1) * PAGE_SIZE
+    offset = (current_page - 1) * page_size
     try:
         with st.spinner('Lecture du classement conservé…'):
-            page = _page(method, offset, PAGE_SIZE)
+            page = _page(method, offset, page_size)
         rows = page['ranking']
     except (ValueError, TypeError, KeyError, OverflowError, TimeoutError) as error:
         st.warning('Page non chargée : ' + str(error))
         st.caption('Aucun classement partiel n’est présenté comme complet. La recherche directe reste disponible ci-dessus.')
         return None
-    display = []
-    for rank, row in enumerate(rows, offset + 1):
-        item = {'Rang': rank, 'Scénario complet': _colored_sequence(row['sequence']),
-                'Probabilité du groupe (%)': _percent(row['probability'])}
-        if observed is not None:
-            item['Résultat final'] = ':green-badge[Scénario observé]' if list(row['sequence']) == observed else ''
-        display.append(item)
-    table_views.table(display, hide_index=True, width='stretch',
-                      table_id='scenario_catalog_panel:render:table:1', key=scope + '_table')
+    _render_rows(rows, offset, observed, scope, size)
     total_text = f'{total:,}'.replace(',', ' ')
     st.caption(f'Scénarios {offset + 1}–{offset + len(rows)} sur {total_text} · '
                'Les rangs portent sur la distribution complète, pas uniquement sur cette page.')
     with st.container(horizontal=True):
-        st.download_button('Exporter cette page (CSV)', _csv(rows, offset, observed),
+        st.download_button('Exporter cette page (CSV)', lambda: _csv(rows, offset, observed),
             file_name=f'scenarios_{name}_page_{current_page}.csv', mime='text/csv',
             key=scope + '_csv', icon=':material/download:', on_click='ignore')
     for error in rejected:

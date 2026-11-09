@@ -200,7 +200,7 @@ def _detail(row, clock_day):
         st.json(entry.get('result_history', []), expanded=False)
 
 
-@st.fragment(run_every=60)
+@st.fragment
 @guarded
 def render_daily():
     today = _now().date()
@@ -208,6 +208,8 @@ def render_daily():
     render_page_header('Analyses de la journée',
                        'Des groupes de matchs sélectionnés au-delà des frontières des compétitions.',
                        eyebrow='GROUPES MULTIPLES · SCÉNARIOS FIGÉS · SUIVI DES RÉSULTATS', icon=':material/stars:')
+    st.button('Actualiser l’affichage', icon=':material/refresh:', key='daily_view_refresh',
+              help='Relire les résultats sauvegardés en conservant la fiche et les filtres. La collecte du serveur continue en arrière-plan.')
     st.caption('API-Football · Heure de Kinshasa · Groupes de 2 à 20 matchs, plusieurs scénarios par analyse.')
     modes = {'today': 'Aujourd’hui' if selected_day == today else 'Date choisie', 'history': 'Historique'}
     mode = st.segmented_control('Consulter les analyses sélectionnées', list(modes), format_func=modes.get,

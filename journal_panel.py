@@ -254,7 +254,7 @@ def _past_days(entries, today):
     return counts
 
 
-@st.fragment(run_every=60)
+@st.fragment
 @guarded
 def render_journal():
     today = _today()
@@ -262,6 +262,8 @@ def render_journal():
     render_page_header('Mes analyses et évaluations',
                        'Retrouver vos groupes pour la date choisie et les évaluations des journées passées.',
                        eyebrow='PRÉVISIONS VERROUILLÉES · RÉSULTATS RÉELS', icon=':material/history_edu:')
+    st.button('Actualiser l’affichage', icon=':material/refresh:', key='journal_view_refresh',
+              help='Relire les résultats sauvegardés en conservant la fiche et les filtres. La collecte du serveur continue en arrière-plan.')
     st.caption('Source unique : API-Football. Vos analyses manuelles et les regroupements automatiques '
                'sont réunis ici. Les scénarios et probabilités enregistrés sont conservés.')
     manual_counts, linked_manual = {}, None

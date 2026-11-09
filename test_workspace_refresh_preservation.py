@@ -10,6 +10,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+import streamlit as st
+from streamlit.testing.v1 import AppTest
+
 import test_scenario_workspace_panel as fixture_tests
 
 
@@ -284,13 +287,43 @@ class WorkspaceRefreshPreservationTests(unittest.TestCase):
     def test_navigation_keeps_the_draft_and_its_competition(self):
         before = self.forecast()
         case = self.case
+        case.at.segmented_control(key='calendar_status').set_value('À venir').run()
+        case.at.text_input(key='calendar_query').set_value('PL').run()
         case.at.switch_page('ui_pages/explore.py').run()
         self.assertFalse(case.at.exception)
         case.at.switch_page('ui_pages/analyze.py').run()
         self.assertEqual(case.at.selectbox(key=fixture_tests.league_key()).value, '39')
+        self.assertEqual(case.at.segmented_control(key='calendar_status').value, 'À venir')
+        self.assertEqual(case.at.text_input(key='calendar_query').value, 'PL')
         self.assertTrue(case.at.checkbox(key=fixture_tests.match_key(101)).value)
         self.assertTrue(case.at.checkbox(key=fixture_tests.match_key(102)).value)
         self.assert_frozen(before)
+
+    def test_toggling_live_scores_keeps_the_same_composition_and_saved_forecast(self):
+        before = self.forecast()
+        case = self.case
+        with patch.object(fixture_tests.panel.calendar, 'maybe_refresh') as poll:
+            case.at.toggle(key='workspace_auto').set_value(True).run()
+            self.assertTrue(poll.called)
+            self.assertTrue(case.at.checkbox(key=fixture_tests.match_key(101)).value)
+            self.assertTrue(case.at.checkbox(key=fixture_tests.match_key(102)).value)
+            self.assert_frozen(before)
+            case.at.toggle(key='workspace_auto').set_value(False).run()
+            self.assert_frozen(before)
+            self.assertTrue(case.at.checkbox(key=fixture_tests.match_key(101)).value)
+            self.assertTrue(case.at.checkbox(key=fixture_tests.match_key(102)).value)
+
+    def test_failed_explicit_refresh_keeps_automatic_following_paused_and_forecast_intact(self):
+        before = self.forecast()
+        case = self.case
+        with patch.object(fixture_tests.panel.calendar, 'maybe_refresh'):
+            case.at.toggle(key='workspace_auto').set_value(True).run()
+            case.refresh.side_effect = fixture_tests.api_football.ApiFootballError('Quota atteint')
+            case.at.button(key='workspace_refresh').click().run()
+            self.assertEqual(case.at.session_state['calendar_auto_error'], {
+                'context': ('API-Football', fixture_tests.DAY.isoformat()), 'message': 'Quota atteint'})
+            self.assert_frozen(before)
+            case.refresh.assert_called_once()
 
 
 class WorkspaceRefreshTimerTests(unittest.TestCase):
@@ -312,6 +345,50 @@ class WorkspaceRefreshTimerTests(unittest.TestCase):
         self.assertIsInstance(live[0], ast.Call)
         self.assertEqual(next(ast.literal_eval(item.value) for item in live[0].keywords
                               if item.arg == 'run_every'), 60)
+
+    def test_live_timer_does_not_render_the_composition_or_calculate_predictions(self):
+        panel = fixture_tests.panel
+        revision = [1]
+
+        def composition(source, auto=False):
+            st.session_state['composition_runs'] = st.session_state.get('composition_runs', 0) + 1
+            st.session_state['workspace_display_revision'] = {
+                'context': (source, fixture_tests.DAY.isoformat()), 'signature': tuple(revision)}
+            st.text_input('Brouillon', key='retained_draft', persist_state='session')
+            st.caption('Scénarios calculés : résultat figé')
+
+        def poll(source, day, today):
+            revision[0] += 1
+
+        source = '''import streamlit as st
+import scenario_workspace_panel as panel
+def poll_again():
+    st.rerun('workspace_live_scores')
+st.button('Observer le prochain passage', key='poll_again', on_click=poll_again)
+panel._manual_workspace('API-Football')
+panel._live_workspace('API-Football')
+'''
+        with patch.object(panel, '_render_workspace', side_effect=composition) as render, \
+             patch.object(panel.calendar, 'maybe_refresh', side_effect=poll) as refresh, \
+             patch.object(panel, '_today', return_value=fixture_tests.DAY), \
+             patch.object(panel, 'get_selected_day', return_value=fixture_tests.DAY), \
+             patch.object(panel, '_signature', side_effect=lambda: tuple(revision)):
+            at = AppTest.from_string(source, default_timeout=15).run()
+            self.assertFalse(at.exception)
+            self.assertEqual(render.call_count, 1)
+            self.assertEqual(refresh.call_count, 1)
+            at.session_state['retained_draft'] = 'Mon groupe'
+            at.button(key='poll_again').click().run()
+            self.assertFalse(at.exception)
+            self.assertEqual(refresh.call_count, 2)
+            self.assertEqual(render.call_count, 1)
+            self.assertEqual(at.session_state['retained_draft'], 'Mon groupe')
+            self.assertEqual(at.session_state['composition_runs'], 1)
+            at.button(key='workspace_apply_live_scores').click().run()
+            self.assertFalse(at.exception)
+            self.assertEqual(render.call_count, 2)
+            self.assertEqual(refresh.call_count, 2)
+            self.assertEqual(at.text_input(key='retained_draft').value, 'Mon groupe')
 
 
 class WorkspaceReadinessScopeTests(unittest.TestCase):

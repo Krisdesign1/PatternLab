@@ -379,27 +379,51 @@ def render_workspace():
         render(source)
         return
     auto = st.toggle('Suivre les scores automatiquement · toutes les 60 secondes', value=False, key='workspace_auto',
+                     persist_state='session',
                      help='Une requête API par minute pour la date sélectionnée, aujourd’hui ou à venir, pendant que cette page est ouverte. '
+                          'Les nouveaux scores sont signalés sans redessiner votre sélection. '
                           'Les prédictions restent déclenchées par leur bouton.')
     if auto:
         _live_workspace(source)
-    else:
-        _manual_workspace(source)
+    # The composition keeps the same fragment identity when live following is
+    # toggled. Periodic polling must never recreate its controls or catalogue.
+    _manual_workspace(source)
 
 
-@st.fragment(run_every=60)
+def _apply_live_update():
+    """Refresh only the composition after an explicit user action."""
+    st.rerun('workspace_composition')
+
+
+@st.fragment(run_every=60, key='workspace_live_scores')
 @guarded
 def _live_workspace(source):
-    _render_workspace(source, auto=True)
+    day = get_selected_day(_today())
+    # A click on the explicit API refresh already reserves this attempt. Do
+    # not issue a second request first when the same event is a full rerun.
+    if not st.session_state.get('workspace_refresh', False):
+        calendar.maybe_refresh(source, day, _today())
+    try:
+        signature = _signature()
+    except sources.ERRORS as error:
+        st.warning('Suivi des scores indisponible : ' + str(error))
+        return
+    shown = st.session_state.get('workspace_display_revision', {})
+    if shown.get('context') == (source, day.isoformat()) and shown.get('signature') != signature:
+        st.caption('De nouvelles données sont disponibles. Votre sélection et vos scénarios restent affichés.')
+        st.button('Actualiser l’affichage des scores', key='workspace_apply_live_scores',
+                  icon=':material/refresh:', on_click=_apply_live_update)
+    else:
+        st.caption('Suivi des scores actif. Votre sélection et vos scénarios restent en place.')
 
 
-@st.fragment
+@st.fragment(key='workspace_composition')
 @guarded
 def _manual_workspace(source):
-    _render_workspace(source, auto=False)
+    _render_workspace(source)
 
 
-def _render_workspace(source, auto=False):
+def _render_workspace(source):
     today = _today()
     day = get_selected_day(today)
     for name in ('workspace_forecast', 'workspace_evaluation'):
@@ -411,15 +435,15 @@ def _render_workspace(source, auto=False):
         with controls[0]:
             st.markdown('**Date des matchs**')
             st.markdown(day.strftime('%d/%m/%Y'))
-        if auto and admin_access.can_admin() and not st.session_state.get('workspace_refresh', False):
-            admin_access.require_admin()
-            calendar.maybe_refresh(source, day, today)
         try:
-            snapshot = _day_snapshot(_snapshot(day, _signature(), source), day)
+            signature = _signature()
+            snapshot = _day_snapshot(_snapshot(day, signature, source), day)
         except sources.ERRORS as error:
             st.error(str(error))
             st.page_link('ui_pages/settings.py', label='Ouvrir les données et réglages', icon=':material/tune:')
             return
+        st.session_state['workspace_display_revision'] = {
+            'context': (source, day.isoformat()), 'signature': signature}
         competitions = snapshot['competitions']
         options = sorted(competitions, key=lambda key: (-competitions[key]['matches'],
                          competitions[key]['country'], competitions[key]['name']))
@@ -467,7 +491,7 @@ def _render_workspace(source, auto=False):
                     st.rerun()
                 except sources.ERRORS as error:
                     st.error(str(error))
-                    if auto:
+                    if st.session_state.get('workspace_auto', False):
                         st.session_state['calendar_auto_error'] = {
                             'context': (source, day.isoformat()), 'message': str(error)}
         stamp = snapshot.get('calendar_updated_at')

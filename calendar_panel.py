@@ -93,9 +93,11 @@ def render_calendar(snapshot, day, league):
     rows = display_rows(snapshot, day)
     st.subheader('Le calendrier de la journée', icon=':material/scoreboard:')
     status = st.segmented_control('Afficher les matchs', ['Tous', 'En cours', 'À venir', 'Terminés', 'Autres'],
-                                   default='Tous', selection_mode='single', required=True, key='calendar_status')
+                                   default='Tous', selection_mode='single', required=True, key='calendar_status',
+                                   persist_state='session')
     query = st.text_input('Rechercher un club, un pays ou une compétition', type='search',
-                          placeholder='Ex. Arsenal, France, Ligue 1', key='calendar_query')
+                          placeholder='Ex. Arsenal, France, Ligue 1', key='calendar_query',
+                          persist_state='session')
     filtered = calendar_data.filter_rows(rows, None if league == ALL else league, status, query)
     if rows:
         live = sum(row['status_group'] == 'live' for row in rows)

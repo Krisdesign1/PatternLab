@@ -128,8 +128,12 @@ class SavedTableViewsTests(unittest.TestCase):
                     self.assertIsInstance(identity, ast.Constant, (path.name, node.lineno))
                     routed.append(identity.value)
         self.assertFalse(raw)
-        self.assertEqual(len(routed), 196)
+        # The catalogue has two mutually exclusive renderers (small native
+        # table / virtualised large dataframe) sharing one saved browser view.
+        self.assertEqual(len(routed), 197)
         self.assertEqual(len(set(routed)), 196)
+        self.assertEqual({name: routed.count(name) for name in set(routed) if routed.count(name) > 1},
+                         {'scenario_catalog_panel:render:table:1': 2})
 
 
 if __name__ == '__main__': unittest.main()

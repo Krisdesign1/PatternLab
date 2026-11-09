@@ -360,7 +360,7 @@ def _prepared_detail(report, indexed, now):
             st.error(str(error))
 
 
-@st.fragment(run_every=60)
+@st.fragment
 @guarded
 def render_high_probabilities():
     now = _now()
@@ -374,6 +374,8 @@ def render_high_probabilities():
     render_page_header('Fortes probabilités',
                        f"Les plus hauts pourcentages du {day:%d/%m/%Y}, toutes compétitions confondues.",
                        eyebrow='DATE SÉLECTIONNÉE · CLASSEMENT PAR PROBABILITÉ', icon=':material/trending_up:')
+    st.button('Actualiser l’affichage', icon=':material/refresh:', key='hp_view_refresh',
+              help='Relire les données sauvegardées sans lancer de collecte API. La collecte du serveur continue en arrière-plan.')
     view = st.segmented_control('Consulter les fortes probabilités', ['ranking', 'history', 'groups'],
         format_func={'ranking': 'Classement de la date choisie', 'history': 'Historique des probabilités',
                      'groups': 'Mes groupes enregistrés'}.get,

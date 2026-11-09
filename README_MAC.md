@@ -854,7 +854,10 @@ téléchargement. L'aperçu de 50 lignes ne limite pas le contenu exporté.
 **Actualiser** récupère les derniers scores de la journée en une requête. Le
 suivi automatique est facultatif : active **Suivre les scores automatiquement**
 pour une mise à jour toutes les 60 secondes tant que cette page est ouverte sur
-la journée sélectionnée, aujourd’hui ou à venir. Filtrer, rechercher ou sélectionner des matchs ne déclenche pas
+la journée sélectionnée, aujourd’hui ou à venir. Ce suivi utilise un petit panneau
+séparé et ne redessine pas la sélection ni les scénarios. Quand un nouveau relevé
+est disponible, **Actualiser l’affichage des scores** permet de l’appliquer au
+moment choisi. Filtrer, rechercher ou sélectionner des matchs ne déclenche pas
 de requête supplémentaire pendant cet intervalle. Une erreur met le suivi en
 pause jusqu’à un nouvel essai avec **Actualiser**. Aucun calcul de prédiction
 n’est lancé par ce suivi des scores. Le service décrit ci-dessous automatise un
@@ -2341,11 +2344,13 @@ Pays, compétition, recherche, tri, pagination et export s'appliquent ensuite à
 
 Dans les fiches d'analyses manuelles, automatiques et leur historique, **Tous les scénarios possibles** présente désormais la distribution complète, classée par probabilité décroissante. Choisir une méthode, passer à la page suivante ou rechercher une suite exacte ne relance ni entraînement ni appel API.
 
-- 10 matchs : **59 049 possibilités** par méthode, consultables par pages de 50 lignes.
+- **Scénarios à afficher** : 50, 100, 250, 500 lignes ou **Tout afficher**. La taille et la position restent conservées dans la session ; changer de taille revient à la première page.
+- 10 matchs : **59 049 possibilités** par méthode. **Tout afficher** les charge dans un tableau avec défilement, sans parcourir 1 181 pages de 50 lignes.
 - 20 matchs : **3 486 784 401 possibilités**. Seule la page demandée est calculée ; la distribution et son empreinte suffisent à conserver tout l'espace sans un fichier contenant des milliards de lignes.
 - **Rechercher un scénario complet** affiche sa probabilité absolue à partir du calcul figé, même après le troisième rang. Le résultat final d'un groupe évalué est consultable de la même manière.
 - **Exporter le catalogue complet (JSON compact)** conserve la distribution, ses paramètres et son empreinte ; **Exporter cette page (CSV)** fournit les lignes visibles, avec leurs rangs absolus. Le JSON n'est pas une liste CSV de milliards de lignes.
 - Un calcul de page est interrompu explicitement après cinq secondes pour garder le serveur disponible. Une page interrompue n'est jamais présentée comme une page vide ou un catalogue terminé. La recherche directe et le téléchargement complet restent disponibles.
+- Pour les catalogues trop volumineux, **Tout afficher** signale explicitement le dépassement du budget estimé de rendu. Les pages, la recherche et le JSON compact permettent toujours de consulter le catalogue. Cette protection d'affichage ne retire aucun scénario des données conservées.
 
 Les nouvelles captures utilisent `computed-scenario-proposals-v3` et lient leur catalogue complet à la distribution enregistrée. La première prévision n'est pas remplacée. Les archives anciennes restent inchangées ; si leur distribution complète existe, elle peut être consultée, avec une mention explicite distinguant cette consultation des propositions effectivement enregistrées à l'époque.
 
@@ -2358,4 +2363,20 @@ Les indicateurs Top1/Top3 et les paris simulés sur les choix explicites restent
 
 Les filtres et la pagination réutilisent une projection d’affichage légère. Son cache est borné en mémoire et invalidé par les changements du journal, du WAL SQLite, des analyses manuelles ou des données API locales. Les états temporels sont renouvelés au plus tard au changement de minute. Ce cache ne remplace ni les archives ni les contrôles d’intégrité lors de l’ouverture d’une fiche. L’export complet charge toutes les prévisions uniquement au téléchargement.
 
-Le rapprochement administratif des résultats utilise ses deux lectures de contrôle existantes au lieu de quatre ; les contrôles des écritures concurrentes et les règles d’évaluation restent conservés. L’actualisation périodique n’est pas supprimée et tous les scénarios restent accessibles.
+Le rapprochement administratif des résultats utilise ses deux lectures de contrôle existantes au lieu de quatre ; les contrôles des écritures concurrentes et les règles d’évaluation restent conservés. Tous les scénarios restent accessibles.
+
+### Actualiser sans perdre son travail — 9 novembre 2026
+
+**Mes analyses**, **Analyses proposées** et **Fortes probabilités** ne redessinent
+plus toute la fiche chaque minute. **Actualiser l’affichage** relit les données
+sauvegardées en conservant la fiche ouverte, les filtres et le catalogue choisi.
+Ce bouton ne déclenche pas de collecte API ni de nouveau calcul prédictif.
+Le collecteur du serveur continue ses cycles indépendamment de la navigation.
+
+La composition d’un groupe conserve ses matchs cochés et ses scénarios pendant
+le suivi facultatif des scores. Le filtre de statut et la recherche du calendrier
+restent aussi en place après un aller-retour entre pages. Ces brouillons et
+préférences concernent la session ouverte ; les analyses sauvegardées restent
+accessibles dans **Mes analyses** après une nouvelle session.
+
+[Vérification et périmètre de la livraison](audit/AFFICHAGE_ET_ACTUALISATIONS_2026-11-09.md).
