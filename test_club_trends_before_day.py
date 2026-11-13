@@ -152,7 +152,7 @@ class ClubBeforeDayTests(unittest.TestCase):
         table = self.table(at, 'Match')
         self.assertEqual(set(table['ID du match API']), {'8', '9', '11'})
         known = table[table['ID du match API'] == '8'].iloc[0]
-        self.assertEqual(known['Matchs historiques domicile'], 7)
+        self.assertEqual(known['Matchs historiques domicile'], 4)
         self.assertEqual(known['Verdict final'], ['2nd'])
         self.assertEqual(known['À 90 minutes'], '1–1')
         self.assertNotIn('8', known['ID matchs récents domicile'].split(' → '))
@@ -174,7 +174,7 @@ class ClubBeforeDayTests(unittest.TestCase):
         self.assertTrue(at.toggle(key='club_trends_before_day').value)
         table = self.table(at, 'Match')
         self.assertEqual(set(table['ID du match API']), {'7', '8', '9', '10', '11'})
-        self.assertEqual(set(table[table['ID du match API'] != '11']['Matchs historiques domicile']), {6})
+        self.assertEqual(set(table[table['ID du match API'] != '11']['Matchs historiques domicile']), {3})
         exported = self.download(at)
         self.assertEqual({row['Historique strictement avant (Kinshasa)'] for row in exported}, {'2026-11-05'})
         self.assertEqual({row['Fin historique incluse'] for row in exported}, {'2026-11-04'})

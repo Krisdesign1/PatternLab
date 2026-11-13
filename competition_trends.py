@@ -7,6 +7,7 @@ This describes the current corrected catalogue, not an as-of prediction replay.
 """
 from collections import Counter, deque
 from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 import json
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -120,7 +121,38 @@ def _text(value, fallback):
     return value.strip() if isinstance(value, str) and value.strip() else fallback
 
 
-def _record(row):
+class _RecordContext:
+    """Bounded memoization and evidence for one sequential read, never shared.
+
+    A season repeats the same score strings and identities many times. Cache
+    their pure parsing only; every fixture still crosses every provenance,
+    identity, date and result check. Mutable values and invalid values keep the
+    original validation path. The last payload/result are reused by club views
+    rather than decoding and parsing the same fixture a second time.
+    """
+    def __init__(self):
+        self._identity = lru_cache(maxsize=4096, typed=True)(_identity)
+        self._score_pair = lru_cache(maxsize=256)(parse_score)
+        self.payload = self.outcome = None
+
+    def identity(self, value):
+        return self._identity(value) if type(value) in (int, str) else _identity(value)
+
+    def score_pair(self, value):
+        return self._score_pair(value) if isinstance(value, str) else parse_score(value)
+
+    def score(self, value):
+        try:
+            return '-'.join(map(str, self.score_pair(value)))
+        except ContractError:
+            return None
+
+
+def _record(row, *, _context=None):
+    identity = _context.identity if _context is not None else _identity
+    score = _context.score if _context is not None else _score
+    if _context is not None:
+        _context.payload = _context.outcome = None
     stamp = _stamp(row['kickoff_utc'])
     result = dict(match_id=row['match_id'], league=row['league'], season=row['season'],
                   timestamp=_utc_text(stamp), local_day=stamp.astimezone(ZONE).date().isoformat(),
@@ -131,35 +163,42 @@ def _record(row):
     if row['has_projection']:
         try:
             payload = json.loads(row['projection'])
+            if _context is not None:
+                _context.payload = payload
             result.update(home=_text(payload.get('home'), result['home']), away=_text(payload.get('away'), result['away']),
                           competition=_text(payload.get('competition'), result['competition']),
                           country=_text(payload.get('country'), result['country']),
-                          ht=_score(payload.get('ht')), ft=_score(payload.get('ft')))
+                          ht=score(payload.get('ht')), ft=score(payload.get('ft')))
             if payload.get('provider') != 'api-football':
                 raise ValueError('Source API-Football non confirmée')
             if row['status'] not in FINISHED_STATUSES:
                 raise ValueError('Projection finale associée à un match non terminé')
-            if (_identity(payload.get('match_id')) != _identity(row['match_id'])
-                    or _identity(payload.get('league')) != _identity(row['league'])
+            if (identity(payload.get('match_id')) != identity(row['match_id'])
+                    or identity(payload.get('league')) != identity(row['league'])
                     or payload.get('season') != row['season']
                     or _stamp(payload.get('timestamp')) != stamp):
                 raise ValueError('Projection et index de la rencontre incohérents')
             if (type(payload.get('season')) is not int or not 1900 <= payload['season'] <= 2100
-                    or _identity(payload.get('home_id')) == _identity(payload.get('away_id'))
+                    or identity(payload.get('home_id')) == identity(payload.get('away_id'))
                     or not all(isinstance(payload.get(key), str) and payload[key].strip()
                                for key in ('home', 'away', 'competition'))):
                 raise ValueError('Identité ou saison de la rencontre non confirmée')
-            outcome = regulation_result(payload.get('ht'), payload.get('ft'), status=row['status'])
+            ht, ft = payload.get('ht'), payload.get('ft')
+            if _context is not None:
+                ht, ft = _context.score_pair(ht), _context.score_pair(ft)
+            outcome = regulation_result(ht, ft, status=row['status'])
             if payload.get('value') != outcome.label:
                 raise ValueError('Verdict conservé incohérent avec les scores')
             result.update(included=True, value=outcome.label, reason='Scores HT/90 minutes exploitables')
+            if _context is not None:
+                _context.outcome = outcome
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             result['reason'] = 'Projection à vérifier : ' + str(error)
     else:
         try:
             name, country, home, away, ht, ft, quarantined, quality_reason = json.loads(row['projection'])
             result.update(competition=_text(name, result['competition']), country=_text(country, result['country']),
-                          home=_text(home, result['home']), away=_text(away, result['away']), ht=_score(ht), ft=_score(ft))
+                          home=_text(home, result['home']), away=_text(away, result['away']), ht=score(ht), ft=score(ft))
             if quarantined:
                 result['reason'] = row['issue'] or 'Correction d’import en quarantaine'
         except (ValueError, TypeError):
